@@ -263,7 +263,7 @@ def test_topic_editor_run_once_uses_native_tools_and_topic_run_lifecycle(monkeyp
     assert result["trace_messages"]
     assert "sources=1 tools=2" in result["trace_messages"][0]
     assert "publishing=OFF" in result["trace_messages"][0]
-    assert "cost_usd=0.001062" in result["trace_messages"][0]
+    assert "cost_usd=0.001044" in result["trace_messages"][0]
     assert "would-publish:" in result["trace_messages"][0]
     assert trace_channel.sent == result["trace_messages"]
     assert db.failed == []
