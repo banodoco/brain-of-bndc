@@ -548,11 +548,16 @@ def test_topic_editor_cost_cap_triggers_force_close(monkeypatch):
     assert db.transitions[-1][0]["payload"]["cumulative_cost_usd"] == 10.0
 
 
-def test_topic_editor_cold_start_seeds_latest_checkpoint_and_returns_empty_messages():
+def test_topic_editor_cold_start_seeds_interval_lookback_and_processes_window(monkeypatch):
+    """Cold-start seeds checkpoint to (lookback_minutes ago) so the first run
+    immediately processes the last interval's worth of messages, not zero."""
+    monkeypatch.setenv("TOPIC_EDITOR_COLD_START_LOOKBACK_MINUTES", "60")
+
     class ColdStartDB(FakeDB):
         def __init__(self):
             super().__init__()
             self.archived_calls = 0
+            self.before_calls = []
 
         def get_topic_editor_checkpoint(self, checkpoint_key, environment="prod"):
             return None
@@ -560,16 +565,13 @@ def test_topic_editor_cold_start_seeds_latest_checkpoint_and_returns_empty_messa
         def mirror_live_checkpoint_to_topic_editor(self, checkpoint_key, environment="prod"):
             return None
 
-        def get_latest_archived_message_checkpoint(self, guild_id=None):
-            return {
-                "guild_id": guild_id,
-                "message_id": 987654321,
-                "created_at": "2026-05-13T12:34:56Z",
-            }
+        def get_archived_message_id_before_timestamp(self, guild_id=None, before=None):
+            self.before_calls.append({"guild_id": guild_id, "before": before})
+            return 555000222111
 
-        def get_archived_messages_after_checkpoint(self, *args, **kwargs):
+        def get_archived_messages_after_checkpoint(self, *, checkpoint, guild_id, channel_ids, limit, exclude_author_ids):
             self.archived_calls += 1
-            raise AssertionError("cold-start run should not fetch archive messages after seeding")
+            return []
 
     response = SimpleNamespace(content=[], usage=None)
     db = ColdStartDB()
@@ -580,14 +582,12 @@ def test_topic_editor_cold_start_seeds_latest_checkpoint_and_returns_empty_messa
 
     assert result["status"] == "completed"
     assert result["skipped_reason"] == "no_new_archived_messages"
-    assert db.archived_calls == 0
+    assert db.archived_calls == 1
+    assert db.before_calls and "before" in db.before_calls[0]
     seeded_checkpoint = db.checkpoints[0][0]
-    assert seeded_checkpoint["last_message_id"] == 987654321
-    assert seeded_checkpoint["last_message_created_at"] == "2026-05-13T12:34:56Z"
-    assert seeded_checkpoint["state"] == {"seeded_from": "latest_archived_message"}
-    assert db.completed[0][1]["source_message_count"] == 0
-    assert db.completed[0][1]["checkpoint_before"]["last_message_id"] == 987654321
-    assert claude.client.messages.calls == []
+    assert seeded_checkpoint["last_message_id"] == 555000222111
+    assert seeded_checkpoint["state"]["seeded_from"] == "interval_lookback"
+    assert seeded_checkpoint["state"]["lookback_minutes"] == 60.0
 
 
 def test_topic_editor_dispatch_rejects_simple_collisions_and_replays_without_side_effects():

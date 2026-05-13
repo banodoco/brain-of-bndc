@@ -619,6 +619,19 @@ class DatabaseHandler:
             self.storage_handler.get_latest_archived_message_checkpoint(guild_id=guild_id)
         )
 
+    def get_archived_message_id_before_timestamp(
+        self, guild_id: Optional[int], before: str
+    ) -> Optional[int]:
+        """Resolve a message_id older-than-or-at the given ISO timestamp.
+        Used by topic editor cold-start to anchor checkpoint to a time window."""
+        if not self.storage_handler:
+            return None
+        return self._run_async_in_thread(
+            self.storage_handler.get_archived_message_id_before_timestamp(
+                guild_id=guild_id, before=before
+            )
+        )
+
     def get_author_context_snapshots(
         self,
         author_ids: List[int],

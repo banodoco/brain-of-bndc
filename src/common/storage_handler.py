@@ -1530,6 +1530,39 @@ class StorageHandler:
             logger.error(f"Error fetching latest archived message checkpoint: {e}", exc_info=True)
             return None
 
+    async def get_archived_message_id_before_timestamp(
+        self, guild_id: Optional[int], before: str
+    ) -> Optional[int]:
+        """Return the message_id of the most recent non-deleted archived message
+        whose created_at is at or before `before` (ISO timestamp). Used to anchor
+        cold-start checkpoints to a time window so `get_archived_messages_after_checkpoint`
+        returns the post-anchor traffic.
+
+        Returns None if no archived message is older than the anchor.
+        """
+        if not self.supabase_client:
+            logger.error("Supabase client not initialized")
+            return None
+        try:
+            query = (
+                self.supabase_client.table('discord_messages')
+                .select('message_id,created_at')
+                .eq('is_deleted', False)
+                .lte('created_at', before)
+                .order('created_at', desc=True)
+                .order('message_id', desc=True)
+                .limit(1)
+            )
+            if guild_id is not None:
+                query = query.eq('guild_id', guild_id)
+            result = await asyncio.to_thread(query.execute)
+            if not result.data:
+                return None
+            return int(result.data[0]['message_id'])
+        except Exception as e:
+            logger.error(f"Error fetching archived message id before timestamp: {e}", exc_info=True)
+            return None
+
     async def _attach_channel_context_and_filter_nsfw(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Attach channel names and remove NSFW channels from live-editor source messages."""
         channel_ids = sorted({msg.get('channel_id') for msg in messages if msg.get('channel_id') is not None})

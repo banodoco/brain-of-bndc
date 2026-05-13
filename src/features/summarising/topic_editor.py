@@ -288,16 +288,16 @@ class TopicEditor:
             "trigger": trigger,
         }
         try:
-            if cold_start_seeded:
-                messages = []
-            else:
-                messages = self.db.get_archived_messages_after_checkpoint(
-                    checkpoint=checkpoint,
-                    guild_id=guild_id,
-                    channel_ids=None,
-                    limit=self.source_limit,
-                    exclude_author_ids=self._excluded_author_ids(),
-                )
+            # Cold-start no longer short-circuits to zero — the seeded checkpoint
+            # is anchored to (lookback_minutes ago), so the same query returns
+            # the last interval's worth of messages.
+            messages = self.db.get_archived_messages_after_checkpoint(
+                checkpoint=checkpoint,
+                guild_id=guild_id,
+                channel_ids=None,
+                limit=self.source_limit,
+                exclude_author_ids=self._excluded_author_ids(),
+            )
             active_topics = self.db.get_topics(
                 guild_id=guild_id,
                 states=["posted", "watching"],
@@ -1611,16 +1611,42 @@ class TopicEditor:
         guild_id: Optional[int],
         live_channel_id: Optional[int],
     ) -> Dict[str, Any]:
-        latest = None
-        if hasattr(self.db, "get_latest_archived_message_checkpoint"):
+        """Cold-start: anchor the checkpoint to (run interval ago) so the first
+        run immediately processes the last interval's worth of messages.
+
+        Default interval is `TOPIC_EDITOR_COLD_START_LOOKBACK_MINUTES` (default
+        60) — matching the runner's typical 60-min cadence. Falls back to the
+        most recent archived message id/timestamp for tie-breaking the SQL
+        ordering on `(created_at, message_id)`.
+        """
+        lookback_minutes = self._env_float("TOPIC_EDITOR_COLD_START_LOOKBACK_MINUTES", 60.0)
+        anchor_dt = datetime.now(timezone.utc) - timedelta(minutes=lookback_minutes)
+        anchor_iso = anchor_dt.isoformat()
+
+        # Resolve a real message_id older-than-or-at the anchor timestamp, so
+        # `get_archived_messages_after_checkpoint` can index by message_id too.
+        anchor_message_id: Optional[int] = None
+        if hasattr(self.db, "get_archived_message_id_before_timestamp"):
+            anchor_message_id = self.db.get_archived_message_id_before_timestamp(
+                guild_id=guild_id, before=anchor_iso
+            )
+        # Last-resort fallback: take the latest archived message id (loses the hour-window
+        # semantic but never poisons the checkpoint with NULL).
+        if anchor_message_id is None and hasattr(self.db, "get_latest_archived_message_checkpoint"):
             latest = self.db.get_latest_archived_message_checkpoint(guild_id=guild_id)
+            if latest:
+                anchor_message_id = (latest or {}).get("message_id")
+
         checkpoint = {
             "checkpoint_key": checkpoint_key,
             "guild_id": guild_id,
             "channel_id": live_channel_id,
-            "last_message_id": (latest or {}).get("message_id"),
-            "last_message_created_at": (latest or {}).get("created_at"),
-            "state": {"seeded_from": "latest_archived_message"},
+            "last_message_id": anchor_message_id,
+            "last_message_created_at": anchor_iso,
+            "state": {
+                "seeded_from": "interval_lookback",
+                "lookback_minutes": lookback_minutes,
+            },
         }
         self.db.upsert_topic_editor_checkpoint(checkpoint, environment=self.environment)
         return checkpoint
