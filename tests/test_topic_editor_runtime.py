@@ -39,6 +39,8 @@ class FakeDB:
         self.topic_updates = []
         self.active_topics = []
         self.topic_alias_rows = []
+        self.seeded_transitions = []
+        self.transition_lookups = []
 
     def get_topic_editor_checkpoint(self, checkpoint_key, environment="prod"):
         return {
@@ -89,6 +91,26 @@ class FakeDB:
     def store_topic_transition(self, transition, environment="prod"):
         self.transitions.append((transition, environment))
         return {"transition_id": "transition-1"}
+
+    def get_topic_transitions_by_tool_call_ids(self, run_id, tool_call_ids, environment="prod"):
+        self.transition_lookups.append((run_id, list(tool_call_ids), environment))
+        wanted = {str(tool_call_id) for tool_call_id in tool_call_ids}
+        rows = []
+        rows.extend(self.seeded_transitions)
+        rows.extend(transition for transition, _environment in self.transitions)
+        by_tool_call_id = {}
+        for row in rows:
+            if str(row.get("run_id")) != str(run_id):
+                continue
+            if row.get("environment", environment) != environment:
+                continue
+            tool_call_id = row.get("tool_call_id")
+            if str(tool_call_id) not in wanted:
+                continue
+            existing = by_tool_call_id.get(str(tool_call_id))
+            if not existing or (existing.get("action") == "override" and row.get("action") != "override"):
+                by_tool_call_id[str(tool_call_id)] = row
+        return by_tool_call_id
 
     def store_editorial_observation(self, observation, environment="prod"):
         raise AssertionError("not used in this test")
@@ -174,6 +196,80 @@ def test_topic_editor_run_once_uses_native_tools_and_topic_run_lifecycle(monkeyp
     llm_call = editor.llm_client.client.messages.calls[0]
     assert llm_call["tools"] == TOPIC_EDITOR_TOOLS
     assert len(llm_call["tools"]) == 10
+
+
+def test_topic_editor_run_once_replays_seeded_transition_after_restart_without_duplicate_write():
+    finalize_reasoning = (
+        "The restarted run already executed this topic decision before the crash, "
+        "so the editor should replay the stored transition and then close cleanly "
+        "without creating another topic or source row."
+    )
+    response = SimpleNamespace(
+        content=[
+            SimpleNamespace(
+                type="tool_use",
+                id="tool-replayed-post",
+                name="post_simple_topic",
+                input={
+                    "proposed_key": "Alice Restart Test",
+                    "headline": "Alice restart test",
+                    "body": "This should not be written twice.",
+                    "source_message_ids": ["100"],
+                },
+            ),
+            SimpleNamespace(
+                type="tool_use",
+                id="tool-replayed-finalize",
+                name="finalize_run",
+                input={"overall_reasoning": finalize_reasoning},
+            ),
+        ],
+        usage=SimpleNamespace(input_tokens=1, output_tokens=2),
+    )
+    db = FakeDB()
+    db.seeded_transitions = [
+        {
+            "run_id": "run-1",
+            "guild_id": 1,
+            "environment": "prod",
+            "tool_call_id": "tool-replayed-post",
+            "topic_id": "topic-existing",
+            "action": "post_simple",
+            "payload": {
+                "outcome": "accepted",
+                "tool_name": "post_simple_topic",
+                "topic_id": "topic-existing",
+            },
+        },
+        {
+            "run_id": "run-1",
+            "guild_id": 1,
+            "environment": "prod",
+            "tool_call_id": "tool-replayed-finalize",
+            "action": "finalize_run",
+            "reason": finalize_reasoning,
+            "payload": {
+                "outcome": "accepted",
+                "tool_name": "finalize_run",
+                "overall_reasoning": finalize_reasoning,
+                "topics_considered": ["Alice restart test"],
+            },
+        },
+    ]
+    editor = TopicEditor(db_handler=db, llm_client=FakeClaude(response), guild_id=1, live_channel_id=2, environment="prod")
+
+    result = asyncio.run(editor.run_once("manual"))
+
+    assert result["status"] == "completed"
+    assert db.transition_lookups == [("run-1", ["tool-replayed-post", "tool-replayed-finalize"], "prod")]
+    assert [outcome["outcome"] for outcome in result["outcomes"]] == ["idempotent_replay", "idempotent_replay"]
+    assert result["outcomes"][0]["action"] == "post_simple"
+    assert result["outcomes"][0]["topic_id"] == "topic-existing"
+    assert result["outcomes"][1]["action"] == "finalize_run"
+    assert db.topics == []
+    assert db.sources == []
+    assert db.aliases == []
+    assert db.transitions == []
 
 
 def test_topic_editor_run_once_skips_when_active_lease_is_not_acquired():

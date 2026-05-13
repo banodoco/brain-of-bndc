@@ -22,6 +22,23 @@ from src.features.summarising.live_update_prompts import DEFAULT_LIVE_UPDATE_MOD
 
 SIMILARITY_COLLISION_THRESHOLD = 0.55
 
+READ_TOOL_NAMES = {
+    "search_topics",
+    "search_messages",
+    "get_author_profile",
+    "get_message_context",
+}
+
+WRITE_TOOL_NAMES = {
+    "post_simple_topic",
+    "post_sectioned_topic",
+    "watch_topic",
+    "update_topic_source_messages",
+    "discard_topic",
+    "record_observation",
+    "finalize_run",
+}
+
 
 TOPIC_EDITOR_SYSTEM_PROMPT = """You are the BNDC live-update topic editor.
 
@@ -315,6 +332,7 @@ class TopicEditor:
                 "active_topics": active_topics,
                 "aliases": aliases,
                 "seen_tool_call_ids": set(),
+                "idempotent_results": {},
                 "observation_count": 0,
                 "created_topics": [],
                 "finalize": None,
@@ -363,6 +381,7 @@ class TopicEditor:
 
                 # Dispatch each tool call this turn, building tool_result blocks.
                 tool_calls.extend(turn_tool_calls)
+                self._populate_idempotent_results(turn_tool_calls, dispatcher_context)
                 turn_results: List[Dict[str, Any]] = []
                 for call in turn_tool_calls:
                     outcome = self._dispatch_tool_call(call, dispatcher_context)
@@ -555,10 +574,13 @@ class TopicEditor:
     def _dispatch_tool_call(self, call: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
         name = call["name"]
         args = call["input"]
-        if self._is_idempotent_replay(call, context):
-            return {"tool_call_id": call.get("id"), "tool": name, "outcome": "idempotent_replay"}
-        if name in {"search_topics", "search_messages", "get_author_profile", "get_message_context"}:
+        replay_outcome = self._idempotent_replay_outcome(call, context)
+        if replay_outcome:
+            return replay_outcome
+        if name in READ_TOOL_NAMES:
             return {"tool_call_id": call["id"], "tool": name, "outcome": "read"}
+        if name in WRITE_TOOL_NAMES and self._is_idempotent_replay(call, context):
+            return {"tool_call_id": call.get("id"), "tool": name, "outcome": "idempotent_replay"}
         if name == "record_observation":
             if int(context.get("observation_count") or 0) >= 3:
                 self._store_transition({
@@ -893,6 +915,45 @@ class TopicEditor:
             if "duplicate" in str(exc).lower() or "23505" in str(exc):
                 return None
             raise
+
+    def _populate_idempotent_results(self, calls: Sequence[Dict[str, Any]], context: Dict[str, Any]) -> None:
+        tool_call_ids = [
+            str(call.get("id"))
+            for call in calls or []
+            if call.get("name") in WRITE_TOOL_NAMES and call.get("id")
+        ]
+        if not tool_call_ids:
+            return
+        getter = getattr(self.db, "get_topic_transitions_by_tool_call_ids", None)
+        if not getter:
+            return
+        existing = getter(context.get("run_id"), tool_call_ids, environment=self.environment) or {}
+        cache = context.setdefault("idempotent_results", {})
+        for tool_call_id, row in existing.items():
+            if row:
+                cache[str(tool_call_id)] = row
+
+    def _idempotent_replay_outcome(self, call: Dict[str, Any], context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        tool_call_id = call.get("id")
+        if not tool_call_id or call.get("name") not in WRITE_TOOL_NAMES:
+            return None
+        row = (context.get("idempotent_results") or {}).get(str(tool_call_id))
+        if not row:
+            return None
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        action = row.get("action")
+        if action == "finalize_run" and payload.get("outcome") == "accepted":
+            context["finalize"] = {
+                "overall_reasoning": payload.get("overall_reasoning") or row.get("reason") or "",
+                "topics_considered": list(payload.get("topics_considered") or []),
+            }
+        return {
+            "tool_call_id": str(tool_call_id),
+            "tool": call.get("name"),
+            "outcome": "idempotent_replay",
+            "action": action,
+            "topic_id": payload.get("topic_id") or row.get("topic_id"),
+        }
 
     def _is_idempotent_replay(self, call: Dict[str, Any], context: Dict[str, Any]) -> bool:
         tool_call_id = call.get("id")

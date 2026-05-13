@@ -1049,6 +1049,50 @@ class StorageHandler:
             'payload': self._as_json_object(transition.get('payload')),
         }))
 
+    async def get_topic_transitions_by_tool_call_ids(
+        self,
+        run_id: str,
+        tool_call_ids: List[str],
+        environment: str = 'prod',
+    ) -> Dict[str, Dict[str, Any]]:
+        if not self.supabase_client or not run_id or not tool_call_ids:
+            return {}
+        ids = []
+        seen = set()
+        for tool_call_id in tool_call_ids:
+            if tool_call_id is None:
+                continue
+            normalized = str(tool_call_id)
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                ids.append(normalized)
+        if not ids:
+            return {}
+        try:
+            query = (
+                self.supabase_client
+                .table('topic_transitions')
+                .select('*')
+                .eq('environment', environment)
+                .eq('run_id', str(run_id))
+                .in_('tool_call_id', ids)
+            )
+            result = await asyncio.to_thread(query.execute)
+            rows = result.data or []
+            by_tool_call_id: Dict[str, Dict[str, Any]] = {}
+            for row in rows:
+                tool_call_id = row.get('tool_call_id')
+                if not tool_call_id:
+                    continue
+                key = str(tool_call_id)
+                existing = by_tool_call_id.get(key)
+                if not existing or (existing.get('action') == 'override' and row.get('action') != 'override'):
+                    by_tool_call_id[key] = row
+            return by_tool_call_id
+        except Exception as e:
+            logger.error(f"Error fetching topic transitions by tool_call_id: {e}", exc_info=True)
+            return {}
+
     async def store_editorial_observation(self, observation: Dict[str, Any], environment: str = 'prod') -> Optional[Dict[str, Any]]:
         return await self._insert_live_row('editorial_observations', self._clean_payload({
             'run_id': observation.get('run_id'),
