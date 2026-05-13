@@ -19,6 +19,23 @@ class FakeMessages:
 
     async def create(self, **kwargs):
         self.calls.append(kwargs)
+        if len(self.calls) > 1:
+            return SimpleNamespace(
+                content=[
+                    SimpleNamespace(
+                        type="tool_use",
+                        id=f"tool-finalize-{len(self.calls)}",
+                        name="finalize_run",
+                        input={
+                            "overall_reasoning": (
+                                "I reviewed the supplied source window, considered the visible topic activity, "
+                                "and completed the run after recording the relevant editorial actions."
+                            )
+                        },
+                    )
+                ],
+                usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+            )
         return self.response
 
 
@@ -152,9 +169,9 @@ def test_topic_editor_run_once_uses_native_tools_and_topic_run_lifecycle(monkeyp
     assert result["status"] == "completed"
     assert db.acquired[0]["publishing_enabled"] is False
     assert db.completed[0][1]["source_message_count"] == 1
-    assert db.completed[0][1]["tool_call_count"] == 1
-    assert db.completed[0][1]["input_tokens"] == 123
-    assert db.completed[0][1]["cost_usd"] == 0.001044
+    assert db.completed[0][1]["tool_call_count"] == 2
+    assert db.completed[0][1]["input_tokens"] == 124
+    assert db.completed[0][1]["cost_usd"] == 0.001062
     assert db.checkpoints[0][0]["last_message_id"] == 100
     assert db.topics[0][0]["canonical_key"] == "alice-lora-test"
     assert db.sources[0][0]["message_id"] == "100"
@@ -164,16 +181,16 @@ def test_topic_editor_run_once_uses_native_tools_and_topic_run_lifecycle(monkeyp
     assert db.topic_updates[0][1]["publication_status"] == "suppressed"
     assert result["publish_results"][0]["status"] == "suppressed"
     assert result["trace_messages"]
-    assert "sources=1 tools=1" in result["trace_messages"][0]
+    assert "sources=1 tools=2" in result["trace_messages"][0]
     assert "publishing=OFF" in result["trace_messages"][0]
-    assert "cost_usd=0.001044" in result["trace_messages"][0]
+    assert "cost_usd=0.001062" in result["trace_messages"][0]
     assert "would-publish:" in result["trace_messages"][0]
     assert trace_channel.sent == result["trace_messages"]
     assert db.failed == []
 
     llm_call = editor.llm_client.client.messages.calls[0]
     assert llm_call["tools"] == TOPIC_EDITOR_TOOLS
-    assert len(llm_call["tools"]) == 10
+    assert len(llm_call["tools"]) == 11
 
 
 def test_topic_editor_run_once_skips_when_active_lease_is_not_acquired():
@@ -198,6 +215,122 @@ def test_topic_editor_run_once_skips_when_active_lease_is_not_acquired():
     assert db.failed == []
     assert db.transitions == []
     assert db.checkpoints == []
+
+
+def test_topic_editor_force_close_marks_run_failed_and_trace_embed(monkeypatch):
+    monkeypatch.setenv("TOPIC_EDITOR_MAX_TURNS", "1")
+    monkeypatch.setenv("LIVE_UPDATE_TRACE_CHANNEL_ID", "999")
+
+    class TraceChannel:
+        def __init__(self):
+            self.embeds = []
+
+        async def send(self, content=None, **kwargs):
+            if kwargs.get("embed") is not None:
+                self.embeds.append(kwargs["embed"])
+
+    trace_channel = TraceChannel()
+    bot = SimpleNamespace(get_channel=lambda channel_id: trace_channel if channel_id == 999 else None)
+    response = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text="I saw the messages but I am not finalizing.")],
+        usage=SimpleNamespace(input_tokens=100, output_tokens=20),
+    )
+    db = FakeDB()
+    editor = TopicEditor(
+        bot=bot,
+        db_handler=db,
+        llm_client=FakeClaude(response),
+        guild_id=1,
+        live_channel_id=2,
+        environment="prod",
+    )
+
+    result = asyncio.run(editor.run_once("manual"))
+
+    assert result["status"] == "failed"
+    assert db.completed[0][1]["status"] == "failed"
+    assert db.completed[0][1]["metadata"]["forced_close"] is True
+    assert db.transitions[-1][0]["action"] == "rejected_finalize_run"
+    assert db.transitions[-1][0]["reason"] == "max_turns_reached_without_finalize"
+    assert trace_channel.embeds
+    embed = trace_channel.embeds[0]
+    assert embed.color.value == 0xE74C3C
+    assert "⚠ FORCE-CLOSED" in embed.description
+    assert "⚠ FORCE-CLOSED" in result["trace_messages"][0]
+
+
+def test_topic_editor_cost_cap_triggers_force_close(monkeypatch):
+    monkeypatch.setenv("TOPIC_EDITOR_INPUT_COST_PER_MTOKENS", "1000000")
+    monkeypatch.setenv("TOPIC_EDITOR_OUTPUT_COST_PER_MTOKENS", "0")
+    monkeypatch.setenv("TOPIC_EDITOR_MAX_COST_USD", "5.0")
+    monkeypatch.setenv("TOPIC_EDITOR_MAX_TOKENS", "500000")
+
+    response = SimpleNamespace(
+        content=[
+            SimpleNamespace(
+                type="tool_use",
+                id="tool-search",
+                name="search_topics",
+                input={"query": "expensive"},
+            )
+        ],
+        usage=SimpleNamespace(input_tokens=10, output_tokens=1),
+    )
+    db = FakeDB()
+    editor = TopicEditor(db_handler=db, llm_client=FakeClaude(response), guild_id=1, live_channel_id=2, environment="prod")
+
+    result = asyncio.run(editor.run_once("manual"))
+
+    assert result["status"] == "failed"
+    assert db.completed[0][1]["status"] == "failed"
+    assert db.completed[0][1]["cost_usd"] == 10.0
+    assert db.completed[0][1]["metadata"]["cumulative_cost_usd"] == 10.0
+    assert db.completed[0][1]["metadata"]["cumulative_tokens"] == 11
+    assert db.transitions[-1][0]["action"] == "rejected_finalize_run"
+    assert db.transitions[-1][0]["reason"] == "cost_cap_exceeded"
+    assert db.transitions[-1][0]["payload"]["cumulative_cost_usd"] == 10.0
+
+
+def test_topic_editor_cold_start_seeds_latest_checkpoint_and_returns_empty_messages():
+    class ColdStartDB(FakeDB):
+        def __init__(self):
+            super().__init__()
+            self.archived_calls = 0
+
+        def get_topic_editor_checkpoint(self, checkpoint_key, environment="prod"):
+            return None
+
+        def mirror_live_checkpoint_to_topic_editor(self, checkpoint_key, environment="prod"):
+            return None
+
+        def get_latest_archived_message_checkpoint(self, guild_id=None):
+            return {
+                "guild_id": guild_id,
+                "message_id": 987654321,
+                "created_at": "2026-05-13T12:34:56Z",
+            }
+
+        def get_archived_messages_after_checkpoint(self, *args, **kwargs):
+            self.archived_calls += 1
+            raise AssertionError("cold-start run should not fetch archive messages after seeding")
+
+    response = SimpleNamespace(content=[], usage=None)
+    db = ColdStartDB()
+    claude = FakeClaude(response)
+    editor = TopicEditor(db_handler=db, llm_client=claude, guild_id=1, live_channel_id=2, environment="prod")
+
+    result = asyncio.run(editor.run_once("manual"))
+
+    assert result["status"] == "completed"
+    assert result["skipped_reason"] == "no_new_archived_messages"
+    assert db.archived_calls == 0
+    seeded_checkpoint = db.checkpoints[0][0]
+    assert seeded_checkpoint["last_message_id"] == 987654321
+    assert seeded_checkpoint["last_message_created_at"] == "2026-05-13T12:34:56Z"
+    assert seeded_checkpoint["state"] == {"seeded_from": "latest_archived_message"}
+    assert db.completed[0][1]["source_message_count"] == 0
+    assert db.completed[0][1]["checkpoint_before"]["last_message_id"] == 987654321
+    assert claude.client.messages.calls == []
 
 
 def test_topic_editor_dispatch_rejects_simple_collisions_and_replays_without_side_effects():
@@ -275,7 +408,7 @@ def test_topic_editor_dispatch_rejects_simple_collisions_and_replays_without_sid
 
     result = asyncio.run(editor.run_once("manual"))
 
-    assert [transition[0]["action"] for transition in db.transitions] == ["rejected_post_simple", "rejected_watch"]
+    assert [transition[0]["action"] for transition in db.transitions] == ["rejected_post_simple", "rejected_watch", "finalize_run"]
     assert db.transitions[0][0]["payload"]["outcome"] == "tool_error"
     assert db.transitions[0][0]["payload"]["source_message_ids"] == ["100", "101"]
     assert db.transitions[1][0]["payload"]["collisions"][0]["topic_id"] == "topic-existing"
@@ -313,7 +446,7 @@ def test_topic_editor_dispatch_allows_collision_override_and_dedupes_sources():
 
     assert result["outcomes"][0]["outcome"] == "accepted"
     assert [source[0]["message_id"] for source in db.sources] == ["100"]
-    assert [transition[0]["action"] for transition in db.transitions] == ["watch", "override"]
+    assert [transition[0]["action"] for transition in db.transitions] == ["watch", "override", "finalize_run"]
     assert db.transitions[1][0]["payload"]["overridden_topic_id"] == "topic-existing"
 
 
@@ -339,8 +472,8 @@ def test_topic_editor_dispatch_logs_invalid_update_and_discard_under_base_action
 
     result = asyncio.run(editor.run_once("manual"))
 
-    assert [transition[0]["action"] for transition in db.transitions] == ["update_sources", "discard"]
-    assert [transition[0]["payload"]["outcome"] for transition in db.transitions] == ["tool_error", "tool_error"]
+    assert [transition[0]["action"] for transition in db.transitions] == ["update_sources", "discard", "finalize_run"]
+    assert [transition[0]["payload"]["outcome"] for transition in db.transitions] == ["tool_error", "tool_error", "accepted"]
     assert {transition[0]["action"] for transition in db.transitions}.isdisjoint({"rejected_update_sources", "rejected_discard"})
     assert db.sources == []
     assert result["outcomes"][0]["error"] == "topic_not_found"
@@ -371,10 +504,10 @@ def test_topic_editor_dispatch_caps_record_observation_storage():
     result = asyncio.run(editor.run_once("manual"))
 
     assert len(observations) == 3
-    assert [transition[0]["action"] for transition in db.transitions] == ["observation", "observation", "observation", "observation"]
-    assert db.transitions[-1][0]["payload"]["outcome"] == "tool_error"
-    assert db.transitions[-1][0]["payload"]["error"] == "observation_cap_reached"
-    assert result["outcomes"][-1]["outcome"] == "tool_error"
+    assert [transition[0]["action"] for transition in db.transitions] == ["observation", "observation", "observation", "observation", "finalize_run"]
+    assert db.transitions[-2][0]["payload"]["outcome"] == "tool_error"
+    assert db.transitions[-2][0]["payload"]["error"] == "observation_cap_reached"
+    assert result["outcomes"][-2]["outcome"] == "tool_error"
 
 
 def test_topic_editor_audit_action_vocabulary_excludes_invalid_rejected_actions():
