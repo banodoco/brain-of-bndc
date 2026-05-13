@@ -260,10 +260,13 @@ class TopicEditor:
         guild_id = self._resolve_guild_id()
         live_channel_id = self._resolve_live_channel_id(guild_id)
         checkpoint_key = self._checkpoint_key(guild_id, live_channel_id)
+        cold_start_seeded = False
         checkpoint = self.db.get_topic_editor_checkpoint(checkpoint_key, environment=self.environment)
         if checkpoint is None:
             checkpoint = self.db.mirror_live_checkpoint_to_topic_editor(checkpoint_key, environment=self.environment)
-        checkpoint = checkpoint or {"checkpoint_key": checkpoint_key, "guild_id": guild_id, "channel_id": live_channel_id}
+        if checkpoint is None:
+            checkpoint = self._seed_cold_start_checkpoint(checkpoint_key, guild_id, live_channel_id)
+            cold_start_seeded = True
 
         run = self.db.acquire_topic_editor_run({
             "guild_id": guild_id,
@@ -284,13 +287,16 @@ class TopicEditor:
             "trigger": trigger,
         }
         try:
-            messages = self.db.get_archived_messages_after_checkpoint(
-                checkpoint=checkpoint,
-                guild_id=guild_id,
-                channel_ids=None,
-                limit=self.source_limit,
-                exclude_author_ids=self._excluded_author_ids(),
-            )
+            if cold_start_seeded:
+                messages = []
+            else:
+                messages = self.db.get_archived_messages_after_checkpoint(
+                    checkpoint=checkpoint,
+                    guild_id=guild_id,
+                    channel_ids=None,
+                    limit=self.source_limit,
+                    exclude_author_ids=self._excluded_author_ids(),
+                )
             active_topics = self.db.get_topics(
                 guild_id=guild_id,
                 states=["posted", "watching"],
@@ -341,9 +347,15 @@ class TopicEditor:
             outcomes: List[Dict[str, Any]] = []
             total_input_tokens = 0
             total_output_tokens = 0
+            cumulative_tokens = 0
+            cumulative_cost_usd = 0.0
+            has_cost_estimate = False
             text_chunks: List[str] = []
             forced_close = False
+            forced_close_reason: Optional[str] = None
             turn_count = 0
+            max_cost_usd = self._env_float("TOPIC_EDITOR_MAX_COST_USD", 5.0)
+            max_tokens = self._env_int("TOPIC_EDITOR_MAX_TOKENS", 500000)
             for turn_count in range(1, max_turns + 1):
                 response = await self._invoke_anthropic(messages_arg)
                 turn_tool_calls = self._extract_tool_calls(response)
@@ -353,6 +365,20 @@ class TopicEditor:
                 usage = self._extract_usage(response)
                 total_input_tokens += int(usage.get("input_tokens", 0) or 0)
                 total_output_tokens += int(usage.get("output_tokens", 0) or 0)
+                cumulative_tokens = total_input_tokens + total_output_tokens
+                turn_cost = self._estimate_cost_usd(usage)
+                if turn_cost is not None:
+                    has_cost_estimate = True
+                    cumulative_cost_usd = round(cumulative_cost_usd + float(turn_cost), 6)
+
+                if has_cost_estimate and cumulative_cost_usd > max_cost_usd:
+                    forced_close = True
+                    forced_close_reason = "cost_cap_exceeded"
+                    break
+                if cumulative_tokens > max_tokens:
+                    forced_close = True
+                    forced_close_reason = "token_cap_exceeded"
+                    break
 
                 if not turn_tool_calls:
                     # Agent ended with text only — push back demanding finalize_run.
@@ -376,6 +402,7 @@ class TopicEditor:
                     )
                     if turn_count >= max_turns:
                         forced_close = True
+                        forced_close_reason = "max_turns_reached_without_finalize"
                         break
                     continue
 
@@ -404,19 +431,27 @@ class TopicEditor:
 
                 if turn_count >= max_turns:
                     forced_close = True
+                    forced_close_reason = "max_turns_reached_without_finalize"
                     break
 
             if forced_close and not dispatcher_context.get("finalize"):
                 # Loud audit row when we hit the budget without a clean finalize.
+                reason = forced_close_reason or "max_turns_reached_without_finalize"
                 self._store_transition({
                     "run_id": run_id,
                     "guild_id": guild_id,
                     "action": "rejected_finalize_run",
-                    "reason": "max_turns_reached_without_finalize",
+                    "reason": reason,
                     "payload": shape_transition_payload(
                         outcome="tool_error",
                         tool_name="finalize_run",
-                        error=f"max_turns={max_turns} reached without finalize_run",
+                        error=self._forced_close_error(reason, max_turns, cumulative_cost_usd, cumulative_tokens),
+                        extra={
+                            "cumulative_cost_usd": cumulative_cost_usd if has_cost_estimate else None,
+                            "cumulative_tokens": cumulative_tokens,
+                            "max_cost_usd": max_cost_usd,
+                            "max_tokens": max_tokens,
+                        },
                     ),
                     "model": self.model,
                 })
@@ -426,8 +461,13 @@ class TopicEditor:
                 for call in tool_calls
             ]
             metadata["usage"] = {"input_tokens": total_input_tokens, "output_tokens": total_output_tokens}
+            metadata["cumulative_cost_usd"] = cumulative_cost_usd if has_cost_estimate else None
+            metadata["cumulative_tokens"] = cumulative_tokens
+            metadata["max_cost_usd"] = max_cost_usd
+            metadata["max_tokens"] = max_tokens
             metadata["turn_count"] = turn_count
             metadata["forced_close"] = forced_close
+            metadata["forced_close_reason"] = forced_close_reason
             finalize = dispatcher_context.get("finalize") or {}
             metadata["reasoning"] = finalize.get("overall_reasoning") or "\n\n".join(text_chunks).strip()
             metadata["topics_considered"] = finalize.get("topics_considered") or []
@@ -453,12 +493,14 @@ class TopicEditor:
                 observation_count=sum(1 for outcome in outcomes if outcome.get("action") == "observation"),
                 published_count=sum(1 for result in publish_results if result.get("status") == "sent"),
                 failed_publish_count=sum(1 for result in publish_results if result.get("status") in {"failed", "partial"}),
+                status="failed" if forced_close else "completed",
             )
             self.db.complete_topic_editor_run(run_id, updates, guild_id=guild_id, environment=self.environment)
             trace_messages = self._format_trace_messages(run_id, updates, outcomes, publish_results)
             await self._emit_trace(trace_messages, run_id=run_id, updates=updates, outcomes=outcomes, publish_results=publish_results)
+            status = updates.get("status") or "completed"
             return {
-                "status": "completed",
+                "status": status,
                 "run_id": run_id,
                 "tool_calls": len(tool_calls),
                 "outcomes": outcomes,
@@ -1055,9 +1097,12 @@ class TopicEditor:
         published_count: int = 0,
         failed_publish_count: int = 0,
         skipped_reason: Optional[str] = None,
+        status: str = "completed",
     ) -> Dict[str, Any]:
         usage = metadata.get("usage") or {}
+        metadata_cost = metadata.get("cumulative_cost_usd")
         return {
+            "status": status,
             "guild_id": self._resolve_guild_id(),
             "checkpoint_before": checkpoint_before,
             "checkpoint_after": checkpoint_after,
@@ -1071,7 +1116,7 @@ class TopicEditor:
             "failed_publish_count": failed_publish_count,
             "input_tokens": usage.get("input_tokens", 0),
             "output_tokens": usage.get("output_tokens", 0),
-            "cost_usd": self._estimate_cost_usd(usage),
+            "cost_usd": metadata_cost if isinstance(metadata_cost, (int, float)) else self._estimate_cost_usd(usage),
             "latency_ms": int((time.monotonic() - started) * 1000),
             "model": self.model,
             "publishing_enabled": self.publishing_enabled,
@@ -1138,6 +1183,14 @@ class TopicEditor:
             f"tokens in/out={usage['input_tokens']}/{usage['output_tokens']} cost_usd={usage['cost_usd']} model={usage['model']}",
             f"outcomes={outcome_counts}",
         ]
+        metadata = updates.get("metadata") or {}
+        if metadata.get("forced_close"):
+            lines.insert(1, f"⚠ FORCE-CLOSED reason={metadata.get('forced_close_reason') or 'unknown'}")
+        if metadata.get("cumulative_tokens") is not None:
+            lines.insert(
+                5,
+                f"cumulative_tokens={metadata.get('cumulative_tokens')} cumulative_cost_usd={metadata.get('cumulative_cost_usd')}",
+            )
         sections = [
             ("Tool calls", tool_lines),
             ("Rejections", rejection_lines),
@@ -1209,6 +1262,8 @@ class TopicEditor:
         publishing_label = "ON" if self.publishing_enabled else "OFF"
         title = f"Topic editor · {self.environment} · publishing {publishing_label}"
         description_parts = [f"run `{run_id or 'unknown'}`"]
+        if metadata.get("forced_close"):
+            description_parts.append(f"⚠ FORCE-CLOSED: `{metadata.get('forced_close_reason') or 'unknown'}`")
         if skipped_reason:
             description_parts.append(f"skipped: `{skipped_reason}`")
         description = " · ".join(description_parts)
@@ -1239,7 +1294,9 @@ class TopicEditor:
         model_lines = [
             f"model: `{updates.get('model') or 'n/a'}`",
             f"tokens in/out: `{updates.get('input_tokens', 0)}` / `{updates.get('output_tokens', 0)}`",
+            f"cumulative tokens: `{metadata.get('cumulative_tokens', updates.get('input_tokens', 0) + updates.get('output_tokens', 0))}`",
             f"cost: `{cost_str}`",
+            f"cumulative cost: `{self._format_cost(metadata.get('cumulative_cost_usd'))}`",
             f"latency: `{updates.get('latency_ms', 0)} ms`",
         ]
         embed.add_field(name="model & cost", value="\n".join(model_lines)[:1024], inline=True)
@@ -1442,6 +1499,54 @@ class TopicEditor:
             return round((input_tokens / 1_000_000.0 * input_rate) + (output_tokens / 1_000_000.0 * output_rate), 6)
         except (TypeError, ValueError):
             return None
+
+    def _seed_cold_start_checkpoint(
+        self,
+        checkpoint_key: str,
+        guild_id: Optional[int],
+        live_channel_id: Optional[int],
+    ) -> Dict[str, Any]:
+        latest = None
+        if hasattr(self.db, "get_latest_archived_message_checkpoint"):
+            latest = self.db.get_latest_archived_message_checkpoint(guild_id=guild_id)
+        checkpoint = {
+            "checkpoint_key": checkpoint_key,
+            "guild_id": guild_id,
+            "channel_id": live_channel_id,
+            "last_message_id": (latest or {}).get("message_id"),
+            "last_message_created_at": (latest or {}).get("created_at"),
+            "state": {"seeded_from": "latest_archived_message"},
+        }
+        self.db.upsert_topic_editor_checkpoint(checkpoint, environment=self.environment)
+        return checkpoint
+
+    def _forced_close_error(
+        self,
+        reason: str,
+        max_turns: int,
+        cumulative_cost_usd: float,
+        cumulative_tokens: int,
+    ) -> str:
+        if reason == "cost_cap_exceeded":
+            return f"cumulative_cost_usd={cumulative_cost_usd} exceeded TOPIC_EDITOR_MAX_COST_USD"
+        if reason == "token_cap_exceeded":
+            return f"cumulative_tokens={cumulative_tokens} exceeded TOPIC_EDITOR_MAX_TOKENS"
+        return f"max_turns={max_turns} reached without finalize_run"
+
+    def _format_cost(self, value: Any) -> str:
+        return f"${value:.4f}" if isinstance(value, (int, float)) else "n/a"
+
+    def _env_float(self, name: str, default: float) -> float:
+        try:
+            return float(os.getenv(name, str(default)))
+        except (TypeError, ValueError):
+            return default
+
+    def _env_int(self, name: str, default: int) -> int:
+        try:
+            return int(os.getenv(name, str(default)))
+        except (TypeError, ValueError):
+            return default
 
     def _checkpoint_after(self, checkpoint: Dict[str, Any], messages: Sequence[Dict[str, Any]], run_id: str) -> Dict[str, Any]:
         if not messages:
