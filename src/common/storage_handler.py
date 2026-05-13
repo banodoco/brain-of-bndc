@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import mimetypes
+import uuid
 from datetime import datetime, timedelta
 from typing import Any, List, Dict, Optional
 from pathlib import Path
@@ -593,6 +594,19 @@ class StorageHandler:
     def _as_json_object(value: Optional[Any]) -> Dict[str, Any]:
         return value if isinstance(value, dict) else {}
 
+    @staticmethod
+    def _topic_editor_lease_timeout_minutes() -> int:
+        raw_timeout = os.getenv('TOPIC_EDITOR_LEASE_TIMEOUT_MINUTES', '30')
+        try:
+            timeout = int(raw_timeout)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid TOPIC_EDITOR_LEASE_TIMEOUT_MINUTES=%r; using 30",
+                raw_timeout,
+            )
+            return 30
+        return max(timeout, 1)
+
     async def _insert_live_row(self, table: str, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if not self.supabase_client:
             logger.error("Supabase client not initialized")
@@ -881,7 +895,53 @@ class StorageHandler:
 
     async def acquire_topic_editor_run(self, run: Dict[str, Any], environment: str = 'prod') -> Optional[Dict[str, Any]]:
         """Create a running topic-editor lease row."""
+        if not self.supabase_client:
+            logger.error("Supabase client not initialized")
+            return None
+
+        run_id = str(run.get('run_id') or uuid.uuid4())
+        now = datetime.utcnow().isoformat()
+        timeout_minutes = self._topic_editor_lease_timeout_minutes()
+        cutoff = (datetime.utcnow() - timedelta(minutes=timeout_minutes)).isoformat()
+
+        try:
+            stale_result = await asyncio.to_thread(
+                self.supabase_client.table('topic_editor_runs')
+                .select('run_id,metadata')
+                .eq('environment', environment)
+                .eq('guild_id', run.get('guild_id'))
+                .eq('live_channel_id', run.get('live_channel_id'))
+                .eq('status', 'running')
+                .lt('started_at', cutoff)
+                .limit(1)
+                .execute
+            )
+            stale_rows = stale_result.data or []
+            if stale_rows:
+                stale = stale_rows[0]
+                metadata = self._as_json_object(stale.get('metadata'))
+                metadata.update({
+                    'expired_by': run_id,
+                    'expired_at': now,
+                })
+                # Supabase REST cannot wrap this stale-lease update and the insert below
+                # in one transaction. The insert still relies on the partial unique index,
+                # so any competing runner that wins the post-expiry race blocks this insert.
+                await asyncio.to_thread(
+                    self.supabase_client.table('topic_editor_runs')
+                    .update({'status': 'expired', 'metadata': metadata})
+                    .eq('run_id', stale.get('run_id'))
+                    .eq('environment', environment)
+                    .eq('status', 'running')
+                    .lt('started_at', cutoff)
+                    .execute
+                )
+        except Exception as e:
+            logger.error(f"Error expiring stale topic_editor_runs lease: {e}", exc_info=True)
+            return None
+
         return await self._insert_live_row('topic_editor_runs', self._clean_payload({
+            'run_id': run_id,
             'guild_id': run.get('guild_id'),
             'environment': environment,
             'live_channel_id': run.get('live_channel_id'),
