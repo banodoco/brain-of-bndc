@@ -1094,6 +1094,220 @@ class StorageHandler:
             logger.error(f"Error fetching topic aliases: {e}", exc_info=True)
             return []
 
+    async def search_topic_editor_topics(
+        self,
+        query: str,
+        guild_id: Optional[int] = None,
+        environment: str = 'prod',
+        state_filter: Optional[List[str]] = None,
+        hours_back: int = 72,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """Search compact topic rows by headline, canonical key, and alias."""
+        if not self.supabase_client:
+            return []
+        safe_query = str(query or "").strip()[:120]
+        safe_limit = max(1, min(int(limit or 10), 10))
+        since = datetime.utcnow() - timedelta(hours=max(1, int(hours_back or 72)))
+        states = self._as_json_array(state_filter)
+
+        def topic_query():
+            q = (
+                self.supabase_client.table('topics')
+                .select('topic_id,canonical_key,headline,state,created_at')
+                .eq('environment', environment)
+                .gte('created_at', since.isoformat())
+                .order('created_at', desc=True)
+                .limit(safe_limit)
+            )
+            if guild_id is not None:
+                q = q.eq('guild_id', guild_id)
+            if states:
+                q = q.in_('state', states)
+            return q
+
+        try:
+            topic_tasks = []
+            if safe_query:
+                topic_tasks = [
+                    asyncio.to_thread(topic_query().ilike('headline', f"%{safe_query}%").execute),
+                    asyncio.to_thread(topic_query().ilike('canonical_key', f"%{safe_query}%").execute),
+                ]
+            else:
+                topic_tasks = [asyncio.to_thread(topic_query().execute)]
+
+            alias_query = (
+                self.supabase_client.table('topic_aliases')
+                .select('topic_id,alias_key')
+                .eq('environment', environment)
+                .limit(safe_limit)
+            )
+            if guild_id is not None:
+                alias_query = alias_query.eq('guild_id', guild_id)
+            if safe_query:
+                alias_query = alias_query.ilike('alias_key', f"%{safe_query}%")
+            query_results = await asyncio.gather(*topic_tasks, asyncio.to_thread(alias_query.execute))
+            alias_rows = query_results[-1].data or []
+            alias_topic_ids = [row.get('topic_id') for row in alias_rows if row.get('topic_id')]
+
+            topic_rows: List[Dict[str, Any]] = []
+            for result in query_results[:-1]:
+                topic_rows.extend(result.data or [])
+
+            if alias_topic_ids:
+                alias_topic_query = topic_query().in_('topic_id', alias_topic_ids).limit(safe_limit)
+                alias_topic_result = await asyncio.to_thread(alias_topic_query.execute)
+                topic_rows.extend(alias_topic_result.data or [])
+
+            merged: Dict[str, Dict[str, Any]] = {}
+            for row in topic_rows:
+                topic_id = str(row.get('topic_id') or '')
+                if topic_id and topic_id not in merged:
+                    merged[topic_id] = row
+
+            topic_ids = list(merged.keys())[:safe_limit]
+            aliases_by_topic: Dict[str, List[str]] = {topic_id: [] for topic_id in topic_ids}
+            if topic_ids:
+                all_alias_query = (
+                    self.supabase_client.table('topic_aliases')
+                    .select('topic_id,alias_key')
+                    .eq('environment', environment)
+                    .in_('topic_id', topic_ids)
+                )
+                if guild_id is not None:
+                    all_alias_query = all_alias_query.eq('guild_id', guild_id)
+                all_alias_result = await asyncio.to_thread(all_alias_query.execute)
+                for alias in all_alias_result.data or []:
+                    topic_id = str(alias.get('topic_id') or '')
+                    alias_key = alias.get('alias_key')
+                    if topic_id in aliases_by_topic and alias_key:
+                        aliases_by_topic[topic_id].append(str(alias_key)[:200])
+
+            compacted: List[Dict[str, Any]] = []
+            for topic_id in topic_ids:
+                row = merged[topic_id]
+                compacted.append({
+                    'topic_id': topic_id,
+                    'canonical_key': str(row.get('canonical_key') or '')[:200],
+                    'headline': str(row.get('headline') or '')[:200],
+                    'state': row.get('state'),
+                    'aliases': aliases_by_topic.get(topic_id, [])[:10],
+                    'created_at': row.get('created_at'),
+                })
+            return compacted[:safe_limit]
+        except Exception as e:
+            logger.warning("Could not search topic-editor topics: %s", e, exc_info=True)
+            return []
+
+    async def get_topic_editor_author_profile(
+        self,
+        author_id: Optional[int],
+        guild_id: Optional[int] = None,
+        environment: str = 'prod',
+    ) -> Dict[str, Any]:
+        """Fetch compact last-30-days author stats from archived Discord messages."""
+        if not self.supabase_client or not author_id:
+            return {}
+        try:
+            since = datetime.utcnow() - timedelta(days=30)
+            query = (
+                self.supabase_client.table('discord_messages')
+                .select('message_id,content,created_at,reaction_count', count='exact')
+                .eq('author_id', author_id)
+                .eq('is_deleted', False)
+                .gte('created_at', since.isoformat())
+                .order('created_at', desc=True)
+                .limit(30)
+            )
+            if guild_id is not None:
+                query = query.eq('guild_id', guild_id)
+            result = await asyncio.to_thread(query.execute)
+            rows = result.data or []
+            reaction_counts = [int(row.get('reaction_count') or 0) for row in rows]
+            recent = rows[:3]
+            return {
+                'author_id': author_id,
+                'message_count_30d': result.count if result.count is not None else len(rows),
+                'recent_message_ids': [str(row.get('message_id')) for row in recent if row.get('message_id') is not None],
+                'recent_message_dates': [row.get('created_at') for row in recent if row.get('created_at')],
+                'average_reaction_count': round(sum(reaction_counts) / len(reaction_counts), 2) if reaction_counts else 0,
+                'sample_messages': [
+                    {
+                        'message_id': str(row.get('message_id')),
+                        'content_preview': str(row.get('content') or '')[:200],
+                        'created_at': row.get('created_at'),
+                    }
+                    for row in recent
+                ],
+            }
+        except Exception as e:
+            logger.warning("Could not fetch topic-editor author profile: %s", e, exc_info=True)
+            return {}
+
+    async def get_topic_editor_message_context(
+        self,
+        message_ids: List[str],
+        guild_id: Optional[int] = None,
+        environment: str = 'prod',
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """Fetch exact archived messages in a compact shape for topic-editor tools."""
+        if not self.supabase_client or not message_ids:
+            return []
+        safe_limit = max(1, min(int(limit or 10), 10))
+        ids = [str(item) for item in message_ids if item is not None][:safe_limit]
+        if not ids:
+            return []
+        try:
+            query = (
+                self.supabase_client.table('discord_messages')
+                .select('message_id,channel_id,author_id,content,created_at,reference_id,thread_id')
+                .in_('message_id', ids)
+                .eq('is_deleted', False)
+            )
+            if guild_id is not None:
+                query = query.eq('guild_id', guild_id)
+            result = await asyncio.to_thread(query.execute)
+            rows = await self._attach_channel_context_and_filter_nsfw(result.data or [])
+            author_ids = []
+            for row in rows:
+                try:
+                    author_id = int(row.get('author_id'))
+                except (TypeError, ValueError):
+                    continue
+                if author_id not in author_ids:
+                    author_ids.append(author_id)
+            snapshots = await self.get_author_context_snapshots(sorted(author_ids), guild_id=guild_id)
+            rows_by_id = {str(row.get('message_id')): row for row in rows}
+            compacted: List[Dict[str, Any]] = []
+            for message_id in ids:
+                row = rows_by_id.get(str(message_id))
+                if not row:
+                    continue
+                try:
+                    author_id = int(row.get('author_id'))
+                except (TypeError, ValueError):
+                    author_id = None
+                snapshot = snapshots.get(author_id, {})
+                compacted.append({
+                    'message_id': str(row.get('message_id')),
+                    'channel_name': row.get('channel_name'),
+                    'author_name': (
+                        snapshot.get('server_nick')
+                        or snapshot.get('global_name')
+                        or snapshot.get('display_name')
+                        or snapshot.get('username')
+                    ),
+                    'content': str(row.get('content') or '')[:200],
+                    'created_at': row.get('created_at'),
+                    'reply_to_message_id': row.get('reference_id'),
+                    'thread_id': row.get('thread_id'),
+                })
+            return compacted
+        except Exception as e:
+            logger.warning("Could not fetch topic-editor message context: %s", e, exc_info=True)
+            return []
+
     async def store_topic_transition(self, transition: Dict[str, Any], environment: str = 'prod') -> Optional[Dict[str, Any]]:
         return await self._insert_live_row('topic_transitions', self._clean_payload({
             'topic_id': transition.get('topic_id'),
