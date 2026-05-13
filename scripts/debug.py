@@ -13,7 +13,7 @@ Usage:
     # Log analysis
     python scripts/debug.py search "AdminChat"  # Search logs by message
     python scripts/debug.py tail                # Live tail of logs
-    python scripts/debug.py trace summary       # Trace a feature (summary, share, react, llm)
+    python scripts/debug.py trace live-update   # Trace the active live-update editor
     
     # Database queries
     python scripts/debug.py db-stats            # Database statistics
@@ -165,6 +165,35 @@ def cmd_health(args):
             print(f"  Last log: {RED}{last_log} ({age_mins:.0f}m ago) ⚠️ No recent activity{RESET}")
     else:
         print(f"  {RED}No logs found{RESET}")
+
+    # Active overview system
+    print(f"\n{BOLD}📝 Live Update Editor:{RESET}")
+    try:
+        live_runs = (
+            supabase.table('live_update_editor_runs')
+            .select('run_id,status,trigger,created_at,error_message')
+            .gte('created_at', last_24h)
+            .order('created_at', desc=True)
+            .limit(1)
+            .execute()
+        )
+        feed_count = (
+            supabase.table('live_update_feed_items')
+            .select('feed_item_id', count='exact')
+            .gte('created_at', last_24h)
+            .execute()
+        )
+        if live_runs.data:
+            latest = live_runs.data[0]
+            status = latest.get('status')
+            color = GREEN if status in {'completed', 'skipped'} else RED if status == 'failed' else YELLOW
+            print(f"  Latest run: {color}{status}{RESET} trigger={latest.get('trigger')} at {latest.get('created_at')}")
+        else:
+            print(f"  {YELLOW}No live-update editor runs in the last 24h{RESET}")
+        print(f"  Live feed items posted in last 24h: {feed_count.count or 0}")
+        print(f"  {DIM}daily_summaries is legacy history only; active overview state is live_update_* tables.{RESET}")
+    except Exception as e:
+        print(f"  {YELLOW}Could not inspect live-update tables: {e}{RESET}")
     
     print("=" * 60)
 
@@ -279,7 +308,8 @@ def cmd_trace(args):
     supabase = get_client()
     
     FEATURES = {
-        'summary': ['summary', 'summariser', 'summarizer', 'news_summary', 'generate_summary'],
+        'live-update': ['LiveUpdateEditor', 'live_update', 'live-update', 'live_update_editor_runs', 'live_update_feed_items'],
+        'summary': ['legacy summary', 'ChannelSummarizer', 'daily_summaries', 'generate_summary'],
         'archive': ['[Archive]', 'archive_discord', 'archiving'],
         'share': ['sharer', 'sharing', 'twitter', 'social_poster', 'tweet'],
         'react': ['reactor', 'reaction', 'watchlist'],
@@ -406,7 +436,15 @@ def cmd_db_stats(args):
         'discord_messages': 'Messages',
         'discord_channels': 'Channels',
         'members': 'Members',
-        'daily_summaries': 'Daily Summaries',
+        'live_update_editor_runs': 'Live Update Runs',
+        'live_update_candidates': 'Live Update Candidates',
+        'live_update_decisions': 'Live Update Decisions',
+        'live_update_feed_items': 'Live Update Feed Items',
+        'live_update_editorial_memory': 'Live Editorial Memory',
+        'live_update_duplicate_state': 'Live Duplicate State',
+        'live_top_creation_runs': 'Live Top Creation Runs',
+        'live_top_creation_posts': 'Live Top Creation Posts',
+        'daily_summaries': 'Legacy Daily Summaries',
         'system_logs': 'System Logs',
     }
     
@@ -433,6 +471,18 @@ def cmd_db_stats(args):
         print(f"  Errors logged:       {errs.count:>10,}")
     except Exception:
         print(f"  Errors logged:       {'Error':>10}")
+
+    try:
+        runs = supabase.table('live_update_editor_runs').select('run_id', count='exact').gte('created_at', cutoff).execute()
+        print(f"  Live editor runs:    {runs.count:>10,}")
+    except Exception:
+        print(f"  Live editor runs:    {'Error':>10}")
+
+    try:
+        feed_items = supabase.table('live_update_feed_items').select('feed_item_id', count='exact').gte('created_at', cutoff).execute()
+        print(f"  Live feed items:     {feed_items.count:>10,}")
+    except Exception:
+        print(f"  Live feed items:     {'Error':>10}")
     
     print("=" * 60)
 
@@ -653,7 +703,7 @@ Commands:
   errors          Show errors (--hours N to filter)
   search PATTERN  Search logs by message content
   tail            Live tail of logs
-  trace FEATURE   Trace: summary, share, react, llm, admin
+  trace FEATURE   Trace: live-update, summary (legacy), share, react, llm, admin
   recent          Show recent logs
   stats           Log statistics
   
@@ -698,7 +748,7 @@ Examples:
     if args.command == 'trace' and args.pattern:
         args.feature = args.pattern
     elif args.command == 'trace':
-        args.feature = 'summary'  # default
+        args.feature = 'live-update'  # default
     
     commands = {
         'health': cmd_health,

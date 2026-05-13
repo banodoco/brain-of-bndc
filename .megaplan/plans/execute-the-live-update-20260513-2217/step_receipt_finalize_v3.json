@@ -1,0 +1,31 @@
+{
+  "receipt_id": "2613369c-28ab-4de5-8ed8-59cca28ef028",
+  "plan_id": "execute-the-live-update-20260513-2217",
+  "phase": "finalize",
+  "iteration": 3,
+  "attempt": 1,
+  "timestamp_utc": "2026-05-13T20:35:55.777974+00:00",
+  "profile_name": "thoughtful",
+  "agent": "codex",
+  "agent_mode": "persistent",
+  "model_configured": "codex:low",
+  "model_actual": "gpt-5.5",
+  "session_id": "019e230c-3376-7271-90f0-37d1efbb7a55",
+  "megaplan_version": "0.8.1",
+  "schema_version": 1,
+  "prompt_hash_raw": "48feddc78e8257e799cbe34b92fe2b81410c290f268a2b5219e9042679eeb7e3",
+  "prompt_hash_canonical": "b4c9190b6deef23a6556181bcd93a2ad42c791692b0ae421536abdfd2b7d7b03",
+  "canonicalization_version": 1,
+  "upstream_artifact_hashes": [],
+  "cost_usd": 0.378036,
+  "duration_ms": 88804,
+  "prompt_tokens": 48834,
+  "completion_tokens": 4827,
+  "verdict": null,
+  "metrics": {
+    "tasks_count": 16,
+    "sense_checks_count": 16,
+    "per_task_evidence_file_count": 0
+  },
+  "scope_drift_severity": null
+}

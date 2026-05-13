@@ -224,18 +224,26 @@ module, function_name, line_number, hostname
 
 ---
 
-### 12. ✅ `summaries` - Daily Summaries
+### 12. ✅ `live-update` / `summaries` - Active Live Updates and Legacy Summaries
 **Status:** PASS  
-**Output:** Shows daily summaries with full/short text
+**Output:** Active overview state comes from live-update editor tables. `summaries` remains available only for legacy daily-summary history/backfill inspection.
+```
+live_update_editor_runs, live_update_candidates,
+live_update_decisions, live_update_feed_items,
+live_update_editorial_memory, live_update_duplicate_state
+```
+
+**Legacy Output:** Historical daily summaries with full/short text
 ```
 daily_summary_id, date, channel_id,
 full_summary, short_summary, created_at
 ```
 
 **Validation:**
-- ✅ Queries daily_summaries table
-- ✅ Shows structured JSON summaries
-- ✅ Displays summary metadata
+- ✅ Queries live_update_* tables for active overview/debug state
+- ✅ Preserves ordered discord_message_ids when inspecting posted live feed items
+- ✅ Labels daily_summaries as legacy history/backfill, not the active overview system
+- ✅ Displays legacy summary metadata when explicitly requested
 
 ---
 
@@ -274,7 +282,8 @@ sharing_consent, social handles
 1. ✅ **Use `archive-status`** to verify archive is keeping up (shows created vs archived)
 2. ✅ **Use `bot-status`** for quick health check before investigating issues
 3. ✅ **Use `deployments`** daily to catch duplicate deployment issues early
-4. ✅ **Use `db-stats`** for quick overview of database activity
+4. ✅ **Use `db-stats`** for quick overview of database activity, including live-update runs/feed items
+5. ✅ **Use `trace live-update`** for the active editorial loop; `trace summary` is legacy daily-summary/backfill tracing
 
 ### Commands to Run Daily
 
@@ -283,6 +292,7 @@ sharing_consent, social handles
 python scripts/debug.py bot-status
 python scripts/debug.py archive-status
 python scripts/debug.py deployments
+python scripts/debug.py trace live-update
 
 # If issues detected
 python scripts/debug.py railway-status

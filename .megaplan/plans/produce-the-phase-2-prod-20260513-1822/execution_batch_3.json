@@ -1,0 +1,35 @@
+{
+  "output": "Authored \u00a73 (pre-flip preconditions checklist as a gate/verification/pass-criterion table) and \u00a74 (shadow-mode GO/TUNE/ABORT rubric).",
+  "commands_run": [
+    "wc -l docs/live-update-editor-phase-2-runbook.md"
+  ],
+  "deviations": [
+    "Advisory audit finding: Sense check SC4 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC5 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC6 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC7 is missing an executor acknowledgment."
+  ],
+  "task_updates": [
+    {
+      "task_id": "T3",
+      "status": "done",
+      "executor_notes": "\u00a73 authored as a 12-row Gate|Verification|Pass-criterion markdown table covering: Phase 1 soak passed (:642-644); 5-table schema applied; named indexes present per :130-132+:189-191 (topics_state_idx, topics_revisit_idx, topics_headline_trgm, topic_sources_message_idx, transitions_topic_idx, transitions_run_idx, transitions_action_idx); backfill row-count parity for state='posted' vs live_update_feed_items and state='watching' vs live_update_watchlist; runner lease key per :684; trace embed in prod TODO(phase-1) e channel; legacy editor still running (latest live_update_editor_runs row under <run-source discriminator = legacy> within last hour); operator paged-in window; ALL SIX Phase-1 TODOs resolved (toggle, suppression mechanism, Branch-B marker, bot identities, trace channel, run-source discriminator); Phase 1 shipped Branch A or Branch B (not hybrid/per-guild/per-channel/partial-guild); run-source discriminator present (sample SELECT shows distinct legacy/new). End-statement: 'If any gate is RED, do not flip. Consult docs/live-update-editor-redesign.md and reschedule.' Explicit ABORT-to-\u00a711 for third-mechanism or missing discriminator. \u00a74 authored as Signal|GO|TUNE|ABORT table keyed on Phase-1 signals from :611-644/:599-604: replay-divergence explainability; collision-override rate <10%/10-25%/>25% citing :603; record_observation rate 1-3/run / <1/run TUNE citing :602; Phase-1 shadow-attempted-publish partials 0 GO / 1 TUNE (counts toward cross-window trip-wire) / \u22652 ABORT citing :600-601; schema-rejection rate <10%/10-50%/>50% citing :676; cost/run \u22643\u00d7 / 3-5\u00d7 / >5\u00d7 citing :690; latency/run scheduler-cadence-aware citing :633. Annotation above the table: 'Sourced from Phase-1 telemetry (trace embed + shadow logs), NOT from topics WHERE environment=dev \u2014 Phase 1 runs with publishing OFF per :611/:627/:633.' Decision rules: GO=proceed to \u00a75; TUNE=delay flip + consult redesign for collision threshold/rejection-rate/cost; ABORT=walk away from Phase 2 this week and re-open redesign.",
+      "sections_written": [
+        "\u00a73-pre-flip-preconditions",
+        "\u00a74-shadow-mode-cutover-rubric"
+      ],
+      "stance": null,
+      "stop_signal": null
+    }
+  ],
+  "sense_check_acknowledgments": [
+    {
+      "sense_check_id": "SC3",
+      "executor_note": "Confirmed: \u00a73 preconditions table includes both 'Phase 1 shipped Branch A or Branch B (not a third mechanism)' as one gate AND 'Run-source discriminator present' as a separate gate, explicitly noting all SIX Phase-1 TODOs must be resolved (the previous row in the table enumerates a-f including (f) run-source discriminator). Explicit ABORT-to-\u00a711 for third mechanism OR missing discriminator. \u00a74 rubric annotates the partial-publish row 'Sourced from Phase-1 telemetry (trace embed in Phase-1 monitoring channel + shadow logs per :611-644), NOT from topics WHERE environment=dev \u2014 Phase 1 runs with publishing OFF per :611/:627/:633.' The shadow-attempted-publish partial count is a telemetry counter, never an SQL query against topics in dev."
+    }
+  ],
+  "sections_written": [
+    "\u00a73-pre-flip-preconditions",
+    "\u00a74-shadow-mode-cutover-rubric"
+  ]
+}

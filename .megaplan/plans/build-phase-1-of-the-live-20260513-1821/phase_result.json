@@ -1,0 +1,9 @@
+{
+  "phase": "prep",
+  "invocation_id": "9750dedd9d3d4fd0",
+  "exit_kind": "internal_error",
+  "blocked_tasks": [],
+  "deviations": [],
+  "artifacts_written": [],
+  "cli_provenance": {}
+}

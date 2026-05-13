@@ -1,0 +1,115 @@
+{
+  "name": "fix-the-4-rework-items-the-20260513-2341",
+  "idea": "Fix the 4 rework items the prior review flagged on plan execute-the-live-update-20260513-2217. Review artifact at .megaplan/plans/execute-the-live-update-20260513-2217/review.json. The code already exists; this sprint patches it.\n\n1. **Override audit conflicts with idempotency unique constraint.** In src/features/summarising/topic_editor.py, the override path writes a topic_transitions row but the UNIQUE constraint on (run_id, tool_call_id) rejects the second write (one for the rejected call, one for the override). Fix: either (a) make the unique constraint include a sequence/attempt column so multiple rows per tool_call_id are allowed when they're distinct events, OR (b) make the override path UPDATE the existing rejected row in place and append override details to its payload jsonb. Pick whichever matches the spec in docs/live-update-editor-redesign.md most closely. Update the migration .migrations_staging/20260513230500_live_update_topic_editor_phase1.sql AND ../supabase/migrations/ copy + add a regression test that exercises the override path end-to-end.\n\n2. **Idempotent replay is in-memory only.** Re-running a tool call with the same Anthropic tool_use_id should return the prior result from the DB, not re-execute. Today the check is in-memory per-process \u2014 a crashed-and-restarted run will double-execute. Fix: on every write tool's entry, query topic_transitions for an existing row matching (run_id, tool_call_id) and return its stored result/payload if found. Add a regression test simulating process restart mid-run.\n\n3. **Stale lease expiry missing.** topic_editor_runs has a concurrent-run lease keyed by (environment, guild_id, live_channel_id) but no expiry. A crashed runner's lease blocks future runs forever. Fix: on lease acquire, treat any existing lease older than 30 minutes (configurable via TOPIC_EDITOR_LEASE_TIMEOUT_MINUTES env var, default 30) as expired and steal it. Add a regression test.\n\n4. **Backfill parity not validated.** scripts/backfill_live_update_topics.py has in-memory tests but was never run against prod data. Run it in dry-run mode against prod, compare row counts of prod live_update_feed_items + live_update_watchlist vs. the topics rows the script would generate. Surface any mismatches in a structured report. Do NOT actually apply (read-only validation only).\n\nHard scope guards: do not modify src/features/summarising/live_update_editor.py or src/features/summarising/live_update_prompts.py. Existing tests for the new topic_editor must remain green after these fixes. Migration changes go to both .migrations_staging/ and ../supabase/migrations/.",
+  "current_state": "aborted",
+  "iteration": 1,
+  "created_at": "2026-05-13T21:41:16Z",
+  "config": {
+    "project_dir": "/Users/peteromalley/Documents/banodoco-workspace/brain-of-bndc",
+    "auto_approve": true,
+    "robustness": "tiny",
+    "mode": "code",
+    "strict_notes": false,
+    "agent": "",
+    "profile": "led",
+    "vendor": "codex",
+    "from_doc": "docs/live-update-editor-sprint-plan.md",
+    "phase_model": [
+      "finalize=codex:low",
+      "execute=codex:low",
+      "plan=codex:low",
+      "prep=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "critique=hermes:fireworks:accounts/fireworks/models/kimi-k2p6",
+      "revise=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "gate=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "loop_plan=codex:low",
+      "loop_execute=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "review=hermes:fireworks:accounts/fireworks/models/kimi-k2p6",
+      "tiebreaker_researcher=codex:low",
+      "tiebreaker_challenger=codex:low",
+      "feedback=claude:low"
+    ]
+  },
+  "sessions": {
+    "codex_planner": {
+      "id": "019e234f-c3d1-7481-a7c7-a8b8ef3092ac",
+      "mode": "persistent",
+      "created_at": "2026-05-13T21:49:38Z",
+      "last_used_at": "2026-05-13T21:49:38Z",
+      "refreshed": false
+    }
+  },
+  "plan_versions": [
+    {
+      "version": 1,
+      "file": "plan_v1.md",
+      "hash": "sha256:6adc02a97b9c4681864a99ff0f88c4e6c3d82d3d3296c2473040313217abd5b0",
+      "timestamp": "2026-05-13T21:49:38Z"
+    }
+  ],
+  "history": [
+    {
+      "step": "init",
+      "timestamp": "2026-05-13T21:41:16Z",
+      "duration_ms": 0,
+      "cost_usd": 0.0,
+      "result": "success",
+      "environment": {
+        "claude": true,
+        "codex": true
+      }
+    },
+    {
+      "step": "plan",
+      "timestamp": "2026-05-13T21:49:38Z",
+      "duration_ms": 88392,
+      "cost_usd": 0.554016,
+      "result": "success",
+      "prompt_tokens": 246108,
+      "completion_tokens": 4694,
+      "total_tokens": 250802,
+      "session_mode": "persistent",
+      "session_id": "019e234f-c3d1-7481-a7c7-a8b8ef3092ac",
+      "agent": "codex",
+      "output_file": "plan_v1.md",
+      "artifact_hash": "sha256:6adc02a97b9c4681864a99ff0f88c4e6c3d82d3d3296c2473040313217abd5b0"
+    }
+  ],
+  "meta": {
+    "significant_counts": [],
+    "weighted_scores": [],
+    "plan_deltas": [],
+    "recurring_critiques": [],
+    "total_cost_usd": 0.554016,
+    "overrides": [
+      {
+        "action": "abort",
+        "timestamp": "2026-05-13T21:49:45Z",
+        "reason": "user requested publishing ON + rich embed + mandatory reasoning; folding into manual edits first"
+      }
+    ],
+    "notes": [],
+    "imported_decisions": [],
+    "current_invocation_id": "385bed8511794677"
+  },
+  "last_gate": {},
+  "latest_failure": {
+    "kind": "phase_failed",
+    "message": "phase 'finalize' internal_error",
+    "phase": "finalize",
+    "state": "failed",
+    "recorded_at": "2026-05-13T21:49:40Z",
+    "last_artifact": null,
+    "suggested_action": "Inspect phase output and resume from the failed phase.",
+    "metadata": {
+      "exit_code": 1,
+      "stderr": "[megaplan] Starting finalize... Expected duration: 1m-15m.\nTraceback (most recent call last):\n  File \"<frozen runpy>\", line 198, in _run_module_as_main\n  File \"<frozen runpy>\", line 88, in _run_code\n  File \"/Users/peteromalley/Documents/megaplan/megaplan/__main__.py\", line 6, in <module>\n    sys.exit(main())\n             ^^^^^^\n  File \"/Users/peteromalley/Documents/megaplan/megaplan/cli.py\", line 2564, in main\n    response = handler(root, args)\n               ^^^^^^^^^^^^^^^^^^^\n  File \"/Users/peteromalley/Documents/megaplan/megaplan/handlers/finalize.py\", line 418, in handle_finalize\n    worker, agent, mode, refreshed = _run_worker(\"finalize\", state, plan_dir, args, root=root)\n                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/peteromalley/Documents/megaplan/megaplan/handlers/shared.py\", line 180, in _run_worker\n    return worker_module.run_step_with_worker(\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/peteromalley/Documents/megaplan/megaplan/workers.py\", line 2481, in run_step_with_worker\n    worker = run_codex_step(\n             ^^^^^^^^^^^^^^^\n  File \"/Users/peteromalley/Documents/megaplan/megaplan/workers.py\", line 1934, in run_codex_step\n    prompt = prompt_override if prompt_override is not None else create_codex_prompt(\n                                                                 ^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/peteromalley/Documents/megaplan/megaplan/prompts/__init__.py\", line 228, in create_codex_prompt\n    return _prepend_harness_guard(builder(state, plan_dir, root=root))\n                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/peteromalley/Documents/megaplan/megaplan/prompts/finalize.py\", line 28, in _finalize_prompt\n    gate = read_json(plan_dir / \"gate.json\")\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/peteromalley/Documents/megaplan/megaplan/_core/io.py\", line 195, in read_json\n    return json.loads(path.read_text(encoding=\"utf-8\"))\n                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/peteromalley/.local/share/uv/python/cpython-3.11.14-macos-aarch64-none/lib/python3.11/pathlib.py\", line 1058, in read_text\n    with self.open(mode='r', encoding=encoding, errors=errors) as f:\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/peteromalley/.local/share/uv/python/cpython-3.11.14-macos-aarch64-none/lib/python3.11/pathlib.py\", line 1044, in open\n    return io.open(self, mode, buffering, encoding, errors, newline)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nFileNotFoundError: [Errno 2] No such file or directory: '/Users/peteromalley/Documents/banodoco-workspace/brain-of-bndc/.megaplan/plans/fix-the-4-rework-items-the-20260513-2341/gate.json'",
+      "stdout": "",
+      "iteration": 2
+    }
+  },
+  "resume_cursor": {
+    "phase": "finalize",
+    "retry_strategy": "rerun_phase"
+  }
+}

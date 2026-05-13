@@ -1,0 +1,60 @@
+{
+  "output": "Batch 6 executed successfully. T12 completed: (a) debug_live_editor_audit.py now collects reasoning_recovery_path per-run and prints aggregate distribution + watchlist-actions summary; (b) _build_reasoning_embed now includes a footer with run_id, model, and reasoning_recovery_path. T13 blocked awaiting U1 \u2014 the migration has not been applied (verified: column expires_at does not exist on live_update_watchlist). All 36 existing tests pass.",
+  "files_changed": [
+    "scripts/debug_live_editor_audit.py",
+    "src/features/summarising/live_update_editor.py",
+    ".megaplan/plans/implement-the-watchlist-20260512-1809/execution_batch_6.json"
+  ],
+  "commands_run": [
+    "python3 -c '...' (verify migration status \u2014 confirmed NOT applied: expires_at column missing)",
+    "python -m pytest tests/test_live_update_editor_lifecycle.py tests/test_live_update_prompts.py tests/test_live_update_editor_publishing.py -v --tb=short (36 passed, 0 failed)",
+    "python -c 'ast.parse(...)' (syntax check on both changed files \u2014 OK)"
+  ],
+  "deviations": [
+    "T13 blocked: migration U1 has not been applied. Verified via Supabase query \u2014 column 'expires_at' does not exist on live_update_watchlist. Marked `awaiting U1`.",
+    "Advisory quality: scripts/debug_live_editor_audit.py adds unused imports: Optional.",
+    "Advisory quality: code changes lacked test updates: scripts/debug_live_editor_audit.py, src/features/summarising/live_update_editor.py.",
+    "Advisory observation mismatch: executor claimed files not observed in git status/content hash delta: .megaplan/plans/implement-the-watchlist-20260512-1809/execution_batch_6.json",
+    "Advisory audit finding: Sense check SC16 is missing an executor acknowledgment.",
+    "Advisory audit finding: Tasks left pending after execute (executor never started them): T16"
+  ],
+  "task_updates": [
+    {
+      "id": "T12",
+      "status": "done",
+      "executor_notes": "(a) Added Counter import, recovery_path_counter/wl accumulators. Collect reasoning_recovery_path and watchlist_actions per-run in the audit loop. Added recovery_path to per-run output. After loop, prints aggregate section: reasoning_recovery_path distribution (count per branch) and watchlist-actions summary (watchlist_add/watchlist_update counts). (b) Added embed.set_footer() in _build_reasoning_embed with run_id, model, and reasoning_recovery_path. All 36 tests pass.",
+      "files_changed": [
+        "scripts/debug_live_editor_audit.py",
+        "src/features/summarising/live_update_editor.py"
+      ],
+      "task_id": "T12",
+      "commands_run": []
+    },
+    {
+      "id": "T13",
+      "status": "blocked",
+      "executor_notes": "Blocked awaiting U1: Migration .migrations_staging/20260512185328_live_update_watchlist_lifecycle.sql has NOT been applied. Verified by querying live_update_watchlist \u2014 column 'expires_at' does not exist. User must run the migration against both dev and prod Supabase environments before T13 can proceed.",
+      "task_id": "T13",
+      "files_changed": [],
+      "commands_run": []
+    }
+  ],
+  "sense_check_acknowledgments": [
+    {
+      "id": "SC12",
+      "task_id": "T12",
+      "verdict": "pass",
+      "note": "Audit script now: (1) displays reasoning_recovery_path per-run, (2) prints aggregate reasoning_recovery_path distribution (count per branch) after all runs, (3) prints watchlist-actions summary with counts of watchlist_add and watchlist_update calls from metadata.agent_trace.watchlist_actions. The dev embed footer in _build_reasoning_embed now includes recovery_path alongside run_id and model via embed.set_footer().",
+      "sense_check_id": "SC12",
+      "executor_note": "Audit script now: (1) displays reasoning_recovery_path per-run, (2) prints aggregate reasoning_recovery_path distribution (count per branch) after all runs, (3) prints watchlist-actions summary with counts of watchlist_add and watchlist_update calls from metadata.agent_trace.watchlist_actions. The dev embed footer in _build_reasoning_embed now includes recovery_path alongside run_id and model via embed.set_footer()."
+    },
+    {
+      "id": "SC13",
+      "task_id": "T13",
+      "verdict": "blocked",
+      "note": "T13 cannot execute. Migration U1 (live_update_watchlist_lifecycle.sql) has not been applied \u2014 column 'expires_at' does not exist on the live_update_watchlist table. T13 lifecycle tests require these schema additions to be in place. Marked `awaiting U1`.",
+      "sense_check_id": "SC13",
+      "executor_note": "T13 cannot execute. Migration U1 (live_update_watchlist_lifecycle.sql) has not been applied \u2014 column 'expires_at' does not exist on the live_update_watchlist table. T13 lifecycle tests require these schema additions to be in place. Marked `awaiting U1`."
+    }
+  ]
+}

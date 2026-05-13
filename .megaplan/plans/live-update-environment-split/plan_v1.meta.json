@@ -1,0 +1,131 @@
+{
+  "version": 1,
+  "timestamp": "2026-05-11T09:43:42Z",
+  "hash": "sha256:cc6d996b3f2d644730656725869447e9735203324a3e118afb6c5a61f8270475",
+  "questions": [
+    "Should `live_update_duplicate_state` (touched via `find_live_update_duplicate` / `upsert_live_update_duplicate_state` at storage_handler.py:799,825) also get the `environment` column? The brief omits it, but the editor's per-run dedupe lookups will cross-pollinate dev/prod without it. Default assumption: yes, include it.",
+    "On the `max_posts` cap removal \u2014 drop entirely, or keep a high safety belt (e.g. 50)? Default assumption: keep a `MAX_POSTS_SAFETY_BELT = 50` to avoid runaway floods if the dedupe lookup ever regresses.",
+    "Should the `dry_run` constructor kwarg be deleted outright (with all internal callers updated in lockstep), or kept as a deprecated alias that just sets `environment='dev'`? Default assumption: delete it \u2014 the brief signals a clean cut and there are no external consumers in this repo."
+  ],
+  "success_criteria": [
+    {
+      "criterion": "Migration adds `environment text not null default 'prod'` to every listed table plus a unique index on `live_top_creation_posts (environment, duplicate_key)` filtered to status='posted'",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Every read in `storage_handler.py` that touches a live-update or live-top-creation table filters by `environment` (grep audit yields zero unfiltered selects)",
+      "priority": "must",
+      "requires": [
+        "run_shell",
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Every write in `storage_handler.py` that touches a live-update or live-top-creation table includes `environment` in the payload (or eq-filter for updates)",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "`db_handler.py` wrappers accept and forward `environment` for every method touched",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "`LiveUpdateEditor.run_once` no longer branches on `dry_run`; checkpoint seeding for dev is folded into the main path",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "`LiveTopCreations._publish_candidate` calls `get_live_top_creation_post_by_duplicate_key` before sending and skips if a posted row exists",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "`LiveTopCreations` routes only to the summary channel; no reads of `DEV_TOP_GENS_CHANNEL_ID` or server `top_gens_channel_id` remain",
+      "priority": "must",
+      "requires": [
+        "run_shell",
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "`max_posts` per-pass cap is removed (or replaced with a documented high safety ceiling)",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Cog and dev script pass `environment` explicitly; `LiveUpdateEditor`/`LiveTopCreations` no longer receive `dry_run` (or it is a no-op alias)",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "New test asserts running top-creations twice over the same archived message produces exactly one post row and one Discord send",
+      "priority": "must",
+      "requires": [
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "New test asserts dev-environment rows are invisible to prod reads (`get_recent_live_update_feed_items`, watchlist, editorial memory, top-creation dedupe lookup)",
+      "priority": "must",
+      "requires": [
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "All existing `tests/test_live_*` tests pass after being flipped from dry-run-skips-persistence to dev-persists-with-environment",
+      "priority": "must",
+      "requires": [
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "Full `pytest` suite passes",
+      "priority": "must",
+      "requires": [
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "`_run_dry_once` and `_publish_dry_run_debug_report` deleted from `live_update_editor.py` and equivalent dry-run helper deleted from `live_top_creations.py`",
+      "priority": "should",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Running `scripts/run_live_update_dev.py --once` against a real Supabase writes rows tagged `environment='dev'`; a subsequent prod pass does not surface them",
+      "priority": "info",
+      "requires": [
+        "observe_runtime_logs",
+        "subjective_judgment"
+      ]
+    }
+  ],
+  "assumptions": [
+    "Migration tool is the plain-SQL `.migrations_staging/` directory using `YYYYMMDDhhmmss_description.sql`; applying happens out-of-band (no app-side runner to wire).",
+    "`live_update_duplicate_state` is included in the environment-discriminator set even though the brief omits it, because the editor's dedupe lookups would otherwise cross-pollinate dev and prod.",
+    "`dry_run` constructor kwarg is removed cleanly from `LiveUpdateEditor` and `LiveTopCreations`; all callers (cog, dev script, tests) are updated in lockstep rather than maintaining a back-compat alias.",
+    "`max_posts` is removed in favor of a single high safety ceiling (50) instead of pure unbounded iteration, to keep a guardrail if the dedupe lookup regresses.",
+    "The unique constraint on `live_top_creation_posts (environment, duplicate_key)` uses a partial index `where status = 'posted'` so failed/skipped rows can coexist; planner committing to the partial form unless the existing status enum makes that awkward.",
+    "Test fakes (in-memory DB stand-ins under `tests/`) will be extended to honor the `environment` filter rather than assuming all rows are visible.",
+    "The `dry_run_lookback_hours` parameter is preserved (no rename) and only triggers checkpoint seeding when `environment == 'dev'` and no checkpoint row exists.",
+    "Debug-report behavior from `_publish_dry_run_debug_report` is dropped entirely (no log-side-effect replacement) unless trivial to keep."
+  ],
+  "structure_warnings": []
+}

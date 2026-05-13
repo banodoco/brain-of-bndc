@@ -1,0 +1,243 @@
+{
+  "checks": [],
+  "pre_check_flags": [],
+  "verified_flag_ids": [
+    "FLAG-001",
+    "FLAG-002",
+    "FLAG-003",
+    "FLAG-004",
+    "FLAG-005",
+    "FLAG-006",
+    "FLAG-007",
+    "FLAG-008",
+    "FLAG-009",
+    "FLAG-010",
+    "FLAG-011"
+  ],
+  "disputed_flag_ids": [],
+  "review_verdict": "approved",
+  "criteria": [
+    {
+      "name": "File exists at exact path with non-empty content",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "docs/live-update-editor-phase-2-runbook.md exists; 676 lines."
+    },
+    {
+      "name": "Fast Triage SQL queries topics grouped by publication_status scoped to environment='prod'",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "\u00a72 contains the exact SQL block grouped by publication_status WHERE environment='prod' AND last_published_at >= now() - interval '1 hour'."
+    },
+    {
+      "name": "\u00a71 provisional banner enumerates TODO(phase-1) items + explicit out-of-scope clause for third mechanism",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "\u00a71 enumerates SIX TODO(phase-1) items (a)-(f) per gate guidance (criterion text said five; gate warnings #1 required the sixth for run-source discriminator). Out-of-scope clause at lines 54-58 explicitly aborts on hybrid/per-guild/per-channel/partial-guild OR missing discriminator."
+    },
+    {
+      "name": "\u00a73 preconditions includes 'Phase 1 shipped Branch A or Branch B (not a third mechanism)' as a gate",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "\u00a73 table contains 'Phase 1 shipped Branch A or Branch B' AND 'Run-source discriminator present' as separate gate rows, plus 'All SIX Phase-1 TODOs resolved' row."
+    },
+    {
+      "name": "GO/TUNE/ABORT shadow-mode rubric keyed on listed signals with Phase-1 shadow partials from telemetry",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "\u00a74 table covers replay-divergence, collision-override rate, record_observation, Phase-1 shadow-attempted-publish partials (annotated as sourced from telemetry NOT topics WHERE environment='dev'), schema-rejection rate, cost/run, latency/run."
+    },
+    {
+      "name": "Publishing-flag-flip procedure with placeholder, branch A/B verification, next-observed-run anchoring",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "\u00a75 contains 8-step procedure using <LIVE_EDITOR_PUBLISH_TOGGLE>; step 4 polls live_update_editor_runs until status='completed' (not a fixed window) noting hourly cadence per :633."
+    },
+    {
+      "name": "Branch B verification names Discord-side count as PRIMARY signal, SQL marker as nice-to-have secondary",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "\u00a75 Branch B explicitly labels 'Primary signal (Discord-side count)' and demotes SQL suppression marker to 'Secondary, nice-to-have' with explicit fallback note."
+    },
+    {
+      "name": "Verification does NOT check 'zero new rows in legacy live_update_feed_items'",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "\u00a75 contains explicit 'Do not use \"zero new rows in legacy live_update_feed_items\" as a verification signal. Per :651...'"
+    },
+    {
+      "name": "Four partial-publish detection SQL queries + prod-only trip-wire count + Phase-1 telemetry instruction",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "\u00a76 contains queries (a)-(d) scoped prod with dev-swap comments; prod-only trip-wire SQL `prod_partials_since_cutover`; explicit instruction to add Phase-1 shadow telemetry count NOT from topics WHERE environment='dev', citing :611/:627/:633."
+    },
+    {
+      "name": "Decision tree maps partial-publish trip-wire to cumulative \u2265 2 \u2192 ABORT + restore topic_publications citing :600-601",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "\u00a77 second row: '(Phase-1 telemetry shadow partials) + (Phase-2 prod partials from \u00a76) cumulative \u2265 2 per :600-601 \u2192 ABORT + restore topic_publications'."
+    },
+    {
+      "name": "Decision tree splits lease symptoms into three distinct rows AND includes third-mechanism row",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "\u00a77 has three lease-symptom rows (self-contention HOT-FIX, legacy writing to NEW tables ABORT, run-row overlap ABORT) and a final third-mechanism / discriminator-absent ABORT row."
+    },
+    {
+      "name": "Rollback leaves topics untouched, distinguishes pre/post-rename, cites :596, covers Branch-A/B verification",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "\u00a78 has pre-rename variant (5 steps, step 5 'Leave topics rows alone' citing :596) and post-rename variant (toggle + reverse-rename via \u00a79 chain); both Branch-A and Branch-B verification shapes documented."
+    },
+    {
+      "name": "Table-rename migration renames six legacy tables to _legacy_<name>, retains live_update_editor_runs, BEGIN/COMMIT with dry-run note, row-count parity, constraint preservation",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "\u00a79 migration body contains the six ALTER TABLE...RENAME TO statements inside begin/commit with 'swap to rollback; for dry-run preview' comment; explicit 'live_update_editor_runs is NOT renamed' comment; pre/post UNION ALL row-count queries; constraint-preservation note for indexes/sequences/FK/RLS."
+    },
+    {
+      "name": "Names full migration hand-off chain",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "\u00a79 hand-off chain (4 numbered steps): author in .migrations_staging/ \u2192 copy verbatim to /Users/peteromalley/Documents/banodoco-workspace/supabase/migrations/ \u2192 supabase db push \u2192 verify in supabase_migrations.schema_migrations."
+    },
+    {
+      "name": "\u00a79 cross-checks against redesign.md:212-223 + storage_handler.py:652-1968 NOT legacy-boundaries.md",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "\u00a79 migration body comment explicitly: 'per docs/live-update-editor-redesign.md:212-223 (cross-checked against src/common/storage_handler.py:652-1968 \u2014 not docs/live-update-editor-legacy-boundaries.md, which is about daily_summaries)'."
+    },
+    {
+      "name": "Rename runs only AFTER 24-48h watch passes",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "\u00a79 opens 'Run this only after the 24-48h watch has passed cleanly'; \u00a78 reiterates 'Run \u00a79 rename only after the 24-48h watch passes. This keeps rollback to a single toggle flip during the watch window.'"
+    },
+    {
+      "name": "Deletion section with operator-filled blank, DROP TABLE via same hand-off, bring-forward/push-out circumstances",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "\u00a710 'Rename applied on: __________' and '_legacy_* deletion scheduled for: __________' with 'Do not hardcode a date in this doc' instruction; DROP migration via same hand-off chain; bring-forward and push-out circumstances enumerated."
+    },
+    {
+      "name": "References redesign.md for schema + ABORT footer",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "\u00a711 lists 14 named redesign anchors and 3 trip-wire signals; redesign.md referenced throughout for schema shape, not duplicated."
+    },
+    {
+      "name": "References _publish_accepted_candidates / _select_publishable_candidates as legacy fallback path",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "\u00a71 Primary tools, \u00a75 Branch B, \u00a77 duplicate-post HOT-FIX row, and \u00a78 step 3 all reference live_update_editor.py:84-107 and :261."
+    },
+    {
+      "name": "Document length comparable to runbook-payments.md (~400 lines, 200-700 acceptable)",
+      "priority": "should",
+      "pass": "pass",
+      "evidence": "676 lines \u2014 at upper bound of acceptable range; budget driven by 6 SQL query blocks, 12-row precondition table, 15-row decision tree, and migration body."
+    },
+    {
+      "name": "Tone matches runbook-payments.md \u2014 terse, imperative, copy-paste SQL ready",
+      "priority": "should",
+      "pass": "pass",
+      "evidence": "Subjective judgment: Fast Triage opener, table-driven preconditions/rubric/decision-tree, copy-paste SQL blocks, minimal narrative prose \u2014 matches the runbook-payments pattern."
+    },
+    {
+      "name": "Every TODO(phase-1) placeholder clearly labeled (criterion says five; gate guidance overrode to six)",
+      "priority": "should",
+      "pass": "pass",
+      "evidence": "Six TODO(phase-1) markers (a)-(f) enumerated in \u00a71; gate warning #1 explicitly required adding the sixth for run-source discriminator. Spirit of criterion (clear labeling) is met."
+    },
+    {
+      "name": "No code edits outside the runbook; tests unchanged",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "Only docs/live-update-editor-phase-2-runbook.md was added; executor commands show no edits to source code or tests."
+    }
+  ],
+  "issues": [],
+  "rework_items": [],
+  "summary": "Approved. The 676-line runbook implements all 8 settled decisions (SD-1 through SD-8) and the gate warnings (especially the sixth TODO(phase-1) f for the run-source discriminator). All 11 critique flags including the previously-open FLAG-011 are resolved by the document content: \u00a71 enumerates six TODO(phase-1) items, \u00a73 has the discriminator-present gate, \u00a75 names Branch-B Discord-side count as primary signal and anchors verification on next observed run, \u00a76 trip-wire is two-sourced and prod-only on the SQL side, \u00a77 splits lease symptoms into three rows plus third-mechanism ABORT row, \u00a78 leaves topics untouched citing :596, \u00a79 names the full migration hand-off chain with correct cross-reference to redesign.md:212-223 + storage_handler.py:652-1968. Length is at the upper bound (676 lines) of the acceptable 200-700 range; tone matches runbook-payments.md.",
+  "task_verdicts": [
+    {
+      "task_id": "T1",
+      "reviewer_verdict": "Pass. Audit confirmed output path was unused, anchors re-read, and the absent run-source discriminator column on live_update_editor_runs flagged as the sixth TODO(phase-1).",
+      "evidence_files": [
+        "docs/live-update-editor-phase-2-runbook.md"
+      ]
+    },
+    {
+      "task_id": "T2",
+      "reviewer_verdict": "Pass. \u00a71 banner enumerates SIX TODO(phase-1) items with explicit third-mechanism abort clause; \u00a72 Fast Triage SQL scopes environment='prod' with the dev-swap comment and the no-partials-in-dev annotation.",
+      "evidence_files": [
+        "docs/live-update-editor-phase-2-runbook.md"
+      ]
+    },
+    {
+      "task_id": "T3",
+      "reviewer_verdict": "Pass. \u00a73 precondition table includes both 'Phase 1 shipped Branch A or Branch B' and 'Run-source discriminator present' as separate gates; \u00a74 rubric annotates partial-publish row as sourced from Phase-1 telemetry NOT topics WHERE environment='dev'.",
+      "evidence_files": [
+        "docs/live-update-editor-phase-2-runbook.md"
+      ]
+    },
+    {
+      "task_id": "T4",
+      "reviewer_verdict": "Pass. \u00a75 Branch B labels Discord-side count PRIMARY and SQL marker secondary; anchors verification on next observed run; explicit ban on 'zero new rows in legacy live_update_feed_items' check. \u00a76 uses prod-only SQL count + explicit Phase-1 telemetry instruction.",
+      "evidence_files": [
+        "docs/live-update-editor-phase-2-runbook.md"
+      ]
+    },
+    {
+      "task_id": "T5",
+      "reviewer_verdict": "Pass. \u00a77 splits lease symptoms into three distinct rows and includes a third-mechanism / discriminator-absent ABORT row; \u00a78 leaves topics rows alone citing :596 and distinguishes pre-rename from post-rename rollback variants with Branch-A and Branch-B verification.",
+      "evidence_files": [
+        "docs/live-update-editor-phase-2-runbook.md"
+      ]
+    },
+    {
+      "task_id": "T6",
+      "reviewer_verdict": "Pass. \u00a79 names the full migration hand-off chain (staging \u2192 workspace migrations \u2192 supabase db push \u2192 verify in supabase_migrations.schema_migrations), renames the correct six legacy tables, retains live_update_editor_runs, uses BEGIN/COMMIT with dry-run note, has pre/post row-count UNION ALL, and includes constraint-preservation note. \u00a710 uses the same chain for DROP and leaves the deletion date as an operator-filled blank.",
+      "evidence_files": [
+        "docs/live-update-editor-phase-2-runbook.md"
+      ]
+    },
+    {
+      "task_id": "T7",
+      "reviewer_verdict": "Pass. \u00a711 footer lists 14 named redesign anchors and re-states the three trip-wire signals from :599-604. Self-review polish pass items all met.",
+      "evidence_files": [
+        "docs/live-update-editor-phase-2-runbook.md"
+      ]
+    }
+  ],
+  "sense_check_verdicts": [
+    {
+      "sense_check_id": "SC1",
+      "verdict": "Confirmed. Output path was unused; anchors re-read; the absence of any run_source/editor_source/run_type column on live_update_editor_runs justifies the sixth TODO(phase-1)."
+    },
+    {
+      "sense_check_id": "SC2",
+      "verdict": "Confirmed. \u00a71 banner lists six TODO(phase-1) items with explicit out-of-scope clause; \u00a72 Fast Triage SQL is prod-scoped with the correct annotations."
+    },
+    {
+      "sense_check_id": "SC3",
+      "verdict": "Confirmed. \u00a73 includes both Branch A/B gate and run-source-discriminator-present gate; \u00a74 partial-publish row annotated to source from Phase-1 telemetry not topics WHERE environment='dev'."
+    },
+    {
+      "sense_check_id": "SC4",
+      "verdict": "Confirmed. \u00a75 Branch B names Discord-side count as PRIMARY and SQL marker as secondary; anchors on next observed run; explicit ban on legacy live_update_feed_items check. \u00a76 trip-wire is prod-only SQL + Phase-1 telemetry instruction."
+    },
+    {
+      "sense_check_id": "SC5",
+      "verdict": "Confirmed. \u00a77 splits lease symptoms into three rows; partial-publish trip-wire phrased exactly as required citing :600-601; third-mechanism row covers run-source-discriminator-absent. \u00a78 leaves topics rows alone citing :596; pre- and post-rename rollback are distinct with both Branch A and Branch B verification."
+    },
+    {
+      "sense_check_id": "SC6",
+      "verdict": "Confirmed. \u00a79 names the full migration hand-off chain in four numbered steps; renames the six legacy tables to _legacy_<name>; retains live_update_editor_runs with inline comment; BEGIN/COMMIT with dry-run rollback note; pre/post row-count UNION ALL; constraint-preservation note; six-table cross-reference cites :212-223 and storage_handler.py:652-1968, explicitly NOT legacy-boundaries.md. \u00a710 DROP uses the same hand-off chain and the deletion date is an operator-filled blank."
+    },
+    {
+      "sense_check_id": "SC7",
+      "verdict": "Confirmed. \u00a711 footer lists the 14 named redesign anchors and re-lists the three trip-wire signals from :599-604. Self-review polish pass items met: 676-line length is at upper bound of acceptable 200-700 range, six TODO(phase-1) markers visibly labeled, _legacy_* deletion date is an operator-filled blank, tone matches runbook-payments.md."
+    }
+  ]
+}

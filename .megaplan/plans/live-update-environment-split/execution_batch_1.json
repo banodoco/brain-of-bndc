@@ -1,0 +1,56 @@
+{
+  "output": "T10 complete. All before_execute user actions programmatically verified:\n\nU2: Set DEV_SUMMARY_CHANNEL_ID and DEV_LIVE_UPDATE_CHANNEL_ID env vars\n- DEV_SUMMARY_CHANNEL_ID=1316024582041243668 \u2713 (.env:24)\n- DEV_LIVE_UPDATE_CHANNEL_ID=1316024582041243668 \u2713 (.env:73)\n- Both are read by live_update_editor.py (L1348) and live_top_creations.py (L408)\n- DEV_TOP_GENS_CHANNEL_ID is present but will be retired per plan\n\nAdditional verifications:\n- Supabase connectivity confirmed (table live_update_editor_runs accessible, 2 rows)\n- environment column does NOT yet exist (expected, migration T1 pending)\n- Baseline test run: 27/27 passed (test_live_storage_wrappers, test_live_top_creations, test_live_update_editor_publishing, test_live_update_editor_lifecycle, test_live_runtime_wiring)\n- test_live_admin_health.py has pre-existing import error (missing base58 module) unrelated to this plan\n\nNo blockers. Ready to proceed to T1 (migration).",
+  "files_changed": [
+    "/Users/peteromalley/Documents/banodoco-workspace/brain-of-bndc/.megaplan/plans/live-update-environment-split/execution_batch_1.json"
+  ],
+  "commands_run": [
+    "grep -n 'DEV_SUMMARY_CHANNEL_ID' .env",
+    "grep -n 'DEV_LIVE_UPDATE_CHANNEL_ID' .env",
+    "grep -rn 'DEV_SUMMARY_CHANNEL_ID|DEV_LIVE_UPDATE_CHANNEL_ID' src/features/summarising/ --include='*.py'",
+    "python3 -c 'verify supabase credentials + connectivity + column absence'",
+    "pytest tests/test_live_storage_wrappers.py tests/test_live_top_creations.py tests/test_live_update_editor_publishing.py tests/test_live_update_editor_lifecycle.py tests/test_live_runtime_wiring.py --tb=line -q --no-header"
+  ],
+  "deviations": [
+    "Advisory observation mismatch: executor claimed files not observed in git status/content hash delta: .megaplan/plans/live-update-environment-split/execution_batch_1.json",
+    "Advisory: done tasks rely on non-file evidence (FLAG-006 softening): T10",
+    "Advisory audit finding: Git status shows changed files not claimed by any task: .megaplan/briefs/, .megaplan/plans/live-update-environment-split/, .megaplan/schemas/directors_notes.json, .megaplan/schemas/execution_doc.json, .megaplan/schemas/finalize.json, .megaplan/schemas/review.json, .megaplan/schemas/revise.json, docs/debug-utility-validation.md, docs/live-update-editor-legacy-boundaries.md, main.py, scripts/backfill_guild_ids.py, scripts/debug.py, scripts/discord_tools.py, scripts/run_live_update_dev.py, scripts/send_social_picks.py, src/common/db_handler.py, src/common/storage_handler.py, src/features/admin_chat/agent.py, src/features/admin_chat/tools.py, src/features/archive/archive_cog.py, src/features/gating/intro_embed.py, src/features/health/health_check_cog.py, src/features/summarising/live_top_creations.py, src/features/summarising/live_update_editor.py, src/features/summarising/live_update_prompts.py, src/features/summarising/summariser.py, src/features/summarising/summariser_cog.py, structure.md, tests/test_live_admin_health.py, tests/test_live_runtime_wiring.py, tests/test_live_storage_wrappers.py, tests/test_live_top_creations.py, tests/test_live_update_editor_lifecycle.py, tests/test_live_update_editor_publishing.py, tests/test_live_update_prompts.py, tests/test_social_route_tools.py",
+    "Advisory audit finding: Sense check SC1 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC2 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC3 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC4 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC5 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC6 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC7 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC8 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC9 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC10 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC11 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC12 is missing an executor acknowledgment.",
+    "Advisory audit finding: Tasks left pending after execute (executor never started them): T1, T2, T3, T4, T5, T6, T7, T8, T9"
+  ],
+  "task_updates": [
+    {
+      "id": "T10",
+      "status": "done",
+      "executor_notes": "U2 verification: DEV_SUMMARY_CHANNEL_ID=1316024582041243668 (.env:24) and DEV_LIVE_UPDATE_CHANNEL_ID=1316024582041243668 (.env:73) are both present and read by live_update_editor.py (L1348) and live_top_creations.py (L408). Supabase connection verified: live_update_editor_runs table accessible, environment column absent as expected. Baseline 27 tests pass. No before_execute user actions remain unverified. Ready to proceed.",
+      "commands_run": [
+        "grep -n 'DEV_SUMMARY_CHANNEL_ID' .env",
+        "grep -n 'DEV_LIVE_UPDATE_CHANNEL_ID' .env",
+        "grep -rn 'DEV_SUMMARY_CHANNEL_ID|DEV_LIVE_UPDATE_CHANNEL_ID' src/features/summarising/ --include='*.py'",
+        "python3 supabase connectivity check",
+        "pytest baseline run: 27 passed"
+      ],
+      "files_changed": [],
+      "reviewer_verdict": "",
+      "task_id": "T10"
+    }
+  ],
+  "sense_check_acknowledgments": [
+    {
+      "id": "SC13",
+      "verdict": "PASS - All before_execute user actions were programmatically verified: DEV_SUMMARY_CHANNEL_ID and DEV_LIVE_UPDATE_CHANNEL_ID both present in .env, confirmed read by code, Supabase connectivity confirmed, baseline tests pass.",
+      "sense_check_id": "SC13",
+      "executor_note": "(not provided)"
+    }
+  ]
+}

@@ -1,0 +1,67 @@
+{
+  "name": "execute-the-live-update-20260513-2216",
+  "idea": "Execute the live-update editor redesign per docs/live-update-editor-sprint-plan.md as a single sprint: build the new editor end-to-end and flip publishing to it in prod. The sprint plan locks 6 decisions (canonicalizer, similarity threshold, observations retention, rejected-call schema, defer dropped, checkpoint ownership) and lists the ordered work. Design reference: docs/live-update-editor-redesign.md (v6). Cutover ops reference: docs/live-update-editor-phase-2-runbook.md. The work covers: complete Supabase OAuth + apply backlog migration; write & apply the Phase-1 migration (5 new tables + topic_editor_runs); backfill prod feed_items/watchlist into topics+sources; build src/features/summarising/topic_editor.py with the 10 tools (4 read + 6 decision), all 4 dispatcher invariants including v6 collision-override path, canonicalizer + alias resolution, idempotency, rejection logging; pure render_topic publisher with trace embed posting to #daily-updates; concurrent-run lease; checkpoint mirror logic per locked decision #6; wire as primary in the runner and disable the legacy editor; one sanity replay with publishing OFF; flip publishing ON in prod. Old live_update_* tables stay in place as zero-cost rollback. No shadow mode, no decision gates, no formal validation window \u2014 fix what breaks in prod after the flip. Hard scope guards: do not modify src/features/summarising/live_update_editor.py or live_update_prompts.py except to disable invocation; the existing tests for the legacy editor must remain passing or be marked legacy.",
+  "current_state": "aborted",
+  "iteration": 0,
+  "created_at": "2026-05-13T20:16:45Z",
+  "config": {
+    "project_dir": "/Users/peteromalley/Documents/banodoco-workspace/brain-of-bndc",
+    "auto_approve": true,
+    "robustness": "standard",
+    "mode": "code",
+    "strict_notes": false,
+    "agent": "",
+    "profile": "thoughtful",
+    "vendor": "codex",
+    "depth": "medium",
+    "with_prep": true,
+    "from_doc": "docs/live-update-editor-sprint-plan.md",
+    "phase_model": [
+      "plan=codex:medium",
+      "prep=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "critique=codex:low",
+      "revise=codex:medium",
+      "gate=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "finalize=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "execute=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "loop_plan=codex:medium",
+      "loop_execute=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "review=codex:low",
+      "tiebreaker_researcher=codex:medium",
+      "tiebreaker_challenger=codex:medium",
+      "feedback=claude:low"
+    ]
+  },
+  "sessions": {},
+  "plan_versions": [],
+  "history": [
+    {
+      "step": "init",
+      "timestamp": "2026-05-13T20:16:45Z",
+      "duration_ms": 0,
+      "cost_usd": 0.0,
+      "result": "success",
+      "environment": {
+        "claude": true,
+        "codex": true
+      }
+    }
+  ],
+  "meta": {
+    "significant_counts": [],
+    "weighted_scores": [],
+    "plan_deltas": [],
+    "recurring_critiques": [],
+    "total_cost_usd": 0.0,
+    "overrides": [
+      {
+        "action": "abort",
+        "timestamp": "2026-05-13T20:17:53Z",
+        "reason": "hermes backend not installed; need codex on mechanical phases"
+      }
+    ],
+    "notes": [],
+    "imported_decisions": []
+  },
+  "last_gate": {}
+}

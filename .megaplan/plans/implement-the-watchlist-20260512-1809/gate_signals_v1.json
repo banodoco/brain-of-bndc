@@ -1,0 +1,138 @@
+{
+  "robustness": "standard",
+  "signals": {
+    "iteration": 1,
+    "idea": "Implement the watchlist-driven live update editor improvements specified in docs/live-editor-watchlist-plan.md. Read that file first \u2014 it is the authoritative brief for this run. Key deliverables: (1) model-driven watchlist tool calls watchlist_add and watchlist_update with publish_now/extend/discard actions, no auto-population; (2) watchlist lifecycle with 72h TTL, 6h/24h revisit checkpoints, state-grouped prompt rendering capped at 20/state; (3) additive schema additions (expires_at, next_revisit_at, revisit_count, origin_reason, evidence) and status broadening; (4) fix the prompt rendering bug where watch_type/description don't exist in the schema (should be subject_type/notes); (5) remove DEFAULT_MAX_PUBLISH_PER_RUN=1 and the at-most-one prompt language; (6) lower the publish bar (showcase/top_creation reactions>=5 \u2192 >=3, quiet-hour rule when <50 scanned messages, last-call watchlist bar); (7) make editor_reasoning bulletproof \u2014 persist raw_text on every run, REASONING: prefix convention, parser fallback chain with recovery_path telemetry, alias keys, prose-prefix recovery. Tests for lifecycle and parser branches. Out of scope: live_top_creations, legacy summariser, lookback changes.",
+    "significant_flags": 17,
+    "unresolved_flags": [],
+    "resolved_flags": [
+      {
+        "id": "verifiability-0",
+        "concern": "Criterion 13: requires human verification (observe_runtime_logs, subjective_judgment).",
+        "resolution": ""
+      }
+    ],
+    "weighted_score": 0,
+    "weighted_history": [
+      28.5
+    ],
+    "plan_delta_from_previous": null,
+    "recurring_critiques": [],
+    "scope_creep_flags": [],
+    "loop_summary": "Iteration 1. Weighted score trajectory: 28.5 -> 0. Plan deltas: n/a. Recurring critiques: 0. Resolved flags: 1. Open significant flags: 0.",
+    "debt_overlaps": [],
+    "escalated_debt_subsystems": []
+  },
+  "warnings": [],
+  "criteria_check": {
+    "count": 13,
+    "items": [
+      {
+        "criterion": "Migration file added under `.migrations_staging/` with timestamped name adding `expires_at`, `next_revisit_at`, `revisit_count`, `origin_reason`, `evidence` to `live_update_watchlist` and backfilling existing rows",
+        "priority": "must",
+        "requires": [
+          "read_files",
+          "parse_diff"
+        ]
+      },
+      {
+        "criterion": "`db_handler.py` exposes `insert_live_update_watchlist` and `update_live_update_watchlist` and `get_live_update_watchlist` returns state-grouped results capped at 20/state with TTL auto-archive and 50-row active cap",
+        "priority": "must",
+        "requires": [
+          "read_files",
+          "run_tests"
+        ]
+      },
+      {
+        "criterion": "`watchlist_add` and `watchlist_update` tools appear in `available_tools` and are dispatched via `_run_requested_tool`, with tool calls recorded in agent trace",
+        "priority": "must",
+        "requires": [
+          "read_files",
+          "run_tests"
+        ]
+      },
+      {
+        "criterion": "Watchlist rendering uses schema-correct field names (`subject_type`, `notes`) and the state-grouped structure replaces the prior broken block",
+        "priority": "must",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "`DEFAULT_MAX_PUBLISH_PER_RUN` is `None`; the per-run publish slice is skipped when unset; `LIVE_UPDATE_MAX_POSTS_PER_RUN` still throttles when present",
+        "priority": "must",
+        "requires": [
+          "read_files",
+          "run_tests"
+        ]
+      },
+      {
+        "criterion": "Prompt no longer contains the 'at most one' / 'much more willing to return zero' language and now states reasoning prefix + per-run-cap removal per brief",
+        "priority": "must",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "`_meets_editorial_bar` reflects new thresholds (showcase \u22653 reactions OR \u22652 replies OR high-signal, top_creation \u22653) plus quiet-hour and last-call tiers",
+        "priority": "must",
+        "requires": [
+          "read_files",
+          "run_tests"
+        ]
+      },
+      {
+        "criterion": "`raw_text` (truncated to 50k) is persisted into `live_update_editor_runs.metadata.agent_trace` on every run, including zero-candidate runs",
+        "priority": "must",
+        "requires": [
+          "read_files",
+          "run_tests"
+        ]
+      },
+      {
+        "criterion": "`_parse_raw_candidates` implements the full fallback chain (top_level \u2192 alias \u2192 per_candidate \u2192 reasoning_prefix \u2192 prose_first_paragraph) and records `reasoning_recovery_path` in agent trace",
+        "priority": "must",
+        "requires": [
+          "read_files",
+          "run_tests"
+        ]
+      },
+      {
+        "criterion": "New tests for watchlist lifecycle (insert/update/state transitions/TTL) and parser fallback (all 5 branches + none) pass",
+        "priority": "must",
+        "requires": [
+          "run_tests"
+        ]
+      },
+      {
+        "criterion": "Existing test suite still passes",
+        "priority": "must",
+        "requires": [
+          "run_tests"
+        ]
+      },
+      {
+        "criterion": "`scripts/debug_live_editor_audit.py` surfaces `reasoning_recovery_path` distribution and a watchlist actions summary",
+        "priority": "should",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Diff stays focused on listed files; no unrelated edits to `live_top_creations`, legacy summariser, or lookback config",
+        "priority": "should",
+        "requires": [
+          "parse_diff"
+        ]
+      }
+    ]
+  },
+  "preflight_results": {
+    "project_dir_exists": true,
+    "project_dir_writable": true,
+    "success_criteria_present": true,
+    "claude_available": true,
+    "codex_available": true
+  },
+  "unresolved_flags": []
+}

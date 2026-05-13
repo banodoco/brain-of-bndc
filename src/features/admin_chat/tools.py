@@ -74,6 +74,14 @@ QUERYABLE_TABLES = {
     'daily_summaries', 'channel_summary', 'shared_posts',
     'pending_intros', 'intro_votes', 'timed_mutes',
     'social_publications', 'social_channel_routes',
+    'topic_editor_runs', 'topics', 'topic_sources', 'topic_aliases',
+    'topic_transitions', 'editorial_observations', 'topic_editor_checkpoints',
+    'live_update_editor_runs', 'live_update_candidates',
+    'live_update_decisions', 'live_update_feed_items',
+    'live_update_editorial_memory', 'live_update_watchlist',
+    'live_update_duplicate_state', 'live_update_checkpoints',
+    'live_top_creation_runs', 'live_top_creation_posts',
+    'live_top_creation_checkpoints',
 }
 assert 'payment_requests' not in QUERYABLE_TABLES
 assert 'payment_channel_routes' not in QUERYABLE_TABLES
@@ -783,7 +791,7 @@ TOOLS = [
     },
     {
         "name": "get_daily_summaries",
-        "description": "Get the bot-generated daily summaries for active channels. Great for getting a high-level overview of what happened without reading every message.",
+        "description": "Get legacy bot-generated daily_summaries history. This is not the active overview system; use get_live_update_status for current live-editor state.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -794,6 +802,24 @@ TOOLS = [
                 "channel_id": {
                     "type": "string",
                     "description": "Optional: filter to a specific channel"
+                }
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "get_live_update_status",
+        "description": "Inspect active topic-editor state: recent topic_editor_runs, topic counts, transitions/rejections, publication failures, override rate, and legacy live-update rollback state.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "hours": {
+                    "type": "integer",
+                    "description": "How far back to inspect recent live-editor activity (default 24, max 168)"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max rows per recent section (default 5, max 25)"
                 }
             },
             "required": []
@@ -2051,11 +2077,11 @@ async def execute_share_to_social(
             if not result.success:
                 return {"success": False, "error": result.error or "Sharing failed"}
 
-            provider_url = result.provider_url or result.tweet_url
-            provider_ref = result.provider_ref or result.tweet_id
-            tweet_url = result.tweet_url
-            tweet_id = result.tweet_id
-            publication_id = result.publication_id
+            tweet_url = getattr(result, 'tweet_url', None)
+            tweet_id = getattr(result, 'tweet_id', None)
+            provider_url = getattr(result, 'provider_url', None) or tweet_url
+            provider_ref = getattr(result, 'provider_ref', None) or tweet_id
+            publication_id = getattr(result, 'publication_id', None)
 
             response_message = _social_posted_message(platform, action, provider_url)
 
@@ -2221,11 +2247,11 @@ async def execute_share_to_social(
         if not result.success:
             return {"success": False, "error": result.error or "Sharing failed"}
 
-        provider_url = result.provider_url or result.tweet_url
-        provider_ref = result.provider_ref or result.tweet_id
-        tweet_url = result.tweet_url
-        tweet_id = result.tweet_id
-        publication_id = result.publication_id
+        tweet_url = getattr(result, 'tweet_url', None)
+        tweet_id = getattr(result, 'tweet_id', None)
+        provider_url = getattr(result, 'provider_url', None) or tweet_url
+        provider_ref = getattr(result, 'provider_ref', None) or tweet_id
+        publication_id = getattr(result, 'publication_id', None)
 
         if platform == 'twitter' and tweet_url:
             await sharer._announce_tweet_url(
@@ -2363,6 +2389,183 @@ async def execute_get_daily_summaries(
         }
     except Exception as e:
         logger.error(f"[AdminChat] Error in get_daily_summaries: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+async def execute_get_live_update_status(
+    params: Dict[str, Any],
+    resolved_guild_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Inspect active topic-editor state with legacy rollback visibility."""
+    hours = min(int(params.get('hours') or 24), 168)
+    limit = min(int(params.get('limit') or 5), 25)
+    cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+
+    def _recent(sb, table: str, select_cols: str, order_col: str = 'created_at') -> List[Dict[str, Any]]:
+        query = sb.table(table).select(select_cols)
+        if resolved_guild_id:
+            query = query.eq('guild_id', resolved_guild_id)
+        return query.gte(order_col, cutoff).order(order_col, desc=True).limit(limit).execute().data or []
+
+    def _count(
+        sb,
+        table: str,
+        since_col: Optional[str] = None,
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        query = sb.table(table).select('*', count='exact').limit(1)
+        if resolved_guild_id:
+            query = query.eq('guild_id', resolved_guild_id)
+        for key, value in (filters or {}).items():
+            query = query.eq(key, value)
+        if since_col:
+            query = query.gte(since_col, cutoff)
+        result = query.execute()
+        return result.count if result.count is not None else len(result.data or [])
+
+    try:
+        resolved_guild_id = resolved_guild_id or _resolve_guild_id(params)
+        sb = _get_supabase()
+
+        runs = _recent(
+            sb,
+            'topic_editor_runs',
+            'run_id,status,trigger,started_at,completed_at,source_message_count,tool_call_count,accepted_count,rejected_count,override_count,observation_count,published_count,failed_publish_count,input_tokens,output_tokens,cost_usd,latency_ms,publishing_enabled,error_message',
+            order_col='started_at',
+        )
+        transitions = _recent(
+            sb,
+            'topic_transitions',
+            'transition_id,topic_id,run_id,action,from_state,to_state,reason,payload,created_at',
+        )
+        recent_topics = _recent(
+            sb,
+            'topics',
+            'topic_id,state,headline,canonical_key,publication_status,publication_error,discord_message_ids,publication_attempts,last_published_at,updated_at',
+            order_col='updated_at',
+        )
+        observations = _recent(
+            sb,
+            'editorial_observations',
+            'observation_id,run_id,observation_kind,reason,source_message_ids,created_at',
+        )
+        rejected_transitions = [
+            row for row in transitions if str(row.get('action') or '').startswith('rejected_')
+        ]
+        override_transitions = [row for row in transitions if row.get('action') == 'override']
+        decision_transition_count = sum(
+            1 for row in transitions
+            if row.get('action') not in {None, 'observation'}
+        )
+        override_rate = (
+            len(override_transitions) / decision_transition_count
+            if decision_transition_count else 0.0
+        )
+
+        topic_counts = {
+            "posted": _count(sb, 'topics', filters={'state': 'posted'}),
+            "watching": _count(sb, 'topics', filters={'state': 'watching'}),
+            "discarded": _count(sb, 'topics', filters={'state': 'discarded'}),
+            "recent_updated": _count(sb, 'topics', since_col='updated_at'),
+        }
+        publication_problem_topics = [
+            row for row in recent_topics
+            if row.get('publication_status') in {'failed', 'partial'}
+        ]
+        recent_failed_runs = [
+            row for row in runs
+            if row.get('status') == 'failed' or int(row.get('failed_publish_count') or 0) > 0
+        ]
+
+        legacy_runs = _recent(
+            sb,
+            'live_update_editor_runs',
+            'run_id,status,trigger,created_at,completed_at,candidate_count,accepted_count,error_message',
+        )
+        legacy_feed_count = _count(sb, 'live_update_feed_items', since_col='created_at')
+        legacy_watchlist_count = _count(sb, 'live_update_watchlist')
+        legacy_duplicate_count = _count(sb, 'live_update_duplicate_state')
+
+        latest_run = runs[0] if runs else None
+        summary_lines = [
+            f"Topic-editor primary status for last {hours}h",
+            f"Recent topic_editor_runs: {len(runs)}",
+            "Topics: posted={posted} watching={watching} discarded={discarded} recent_updated={recent_updated}".format(**topic_counts),
+            f"Recent transitions: {len(transitions)} rejections={len(rejected_transitions)} overrides={len(override_transitions)} override_rate={override_rate:.1%}",
+            f"Recent observations: {len(observations)}",
+            f"Failed/partial publications: {len(publication_problem_topics)} topics; runs with failures={len(recent_failed_runs)}",
+        ]
+        if latest_run:
+            summary_lines.append(
+                "Latest topic run: {status} trigger={trigger} sources={sources} tools={tools} accepted={accepted} rejected={rejected} published={published} failed_publish={failed_publish}".format(
+                    status=latest_run.get('status'),
+                    trigger=latest_run.get('trigger'),
+                    sources=latest_run.get('source_message_count'),
+                    tools=latest_run.get('tool_call_count'),
+                    accepted=latest_run.get('accepted_count'),
+                    rejected=latest_run.get('rejected_count'),
+                    published=latest_run.get('published_count'),
+                    failed_publish=latest_run.get('failed_publish_count'),
+                )
+            )
+        if rejected_transitions:
+            summary_lines.append("Recent rejections:")
+            for item in rejected_transitions[:3]:
+                summary_lines.append(
+                    f"- {item.get('action')} topic={item.get('topic_id') or 'n/a'} reason={item.get('reason') or ''}"
+                )
+        if transitions:
+            summary_lines.append("Recent transitions:")
+            for item in transitions[:3]:
+                summary_lines.append(
+                    f"- {item.get('action')} {item.get('from_state') or '-'}->{item.get('to_state') or '-'} topic={item.get('topic_id') or 'n/a'}"
+                )
+        if publication_problem_topics:
+            summary_lines.append("Publication problems:")
+            for item in publication_problem_topics[:3]:
+                summary_lines.append(
+                    f"- {item.get('headline') or item.get('topic_id')}: {item.get('publication_status')} {item.get('publication_error') or ''}".strip()
+                )
+        summary_lines.append(
+            "Rollback legacy live-update state only: runs={runs} recent_feed_items={feed} watchlist={watchlist} duplicate_state={duplicates}".format(
+                runs=len(legacy_runs),
+                feed=legacy_feed_count,
+                watchlist=legacy_watchlist_count,
+                duplicates=legacy_duplicate_count,
+            )
+        )
+
+        return {
+            "success": True,
+            "guild_id": resolved_guild_id,
+            "hours": hours,
+            "summary": "\n".join(summary_lines),
+            "runs": runs,
+            "topics": recent_topics,
+            "topic_counts": topic_counts,
+            "transitions": transitions,
+            "rejections": rejected_transitions,
+            "observations": observations,
+            "publication_problems": publication_problem_topics,
+            "override_rate": override_rate,
+            "state_counts": {
+                **topic_counts,
+                "recent_transitions": len(transitions),
+                "recent_rejections": len(rejected_transitions),
+                "recent_overrides": len(override_transitions),
+                "recent_observations": len(observations),
+                "publication_problems": len(publication_problem_topics),
+                "failed_or_partial_publication_runs": len(recent_failed_runs),
+            },
+            "legacy_rollback_state": {
+                "runs": legacy_runs,
+                "recent_feed_items": legacy_feed_count,
+                "watchlist": legacy_watchlist_count,
+                "duplicate_state": legacy_duplicate_count,
+            },
+        }
+    except Exception as e:
+        logger.error(f"[AdminChat] Error in get_live_update_status: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
 
 
@@ -3869,6 +4072,8 @@ async def execute_get_bot_status(bot: discord.Client) -> Dict[str, Any]:
         uptime_seconds = None
         if hasattr(bot, 'start_time'):
             uptime_seconds = int(time.time() - bot.start_time)
+        summarizer_cog = bot.get_cog("SummarizerCog") if hasattr(bot, "get_cog") else None
+        live_pass_loop = getattr(summarizer_cog, "run_live_pass", None)
 
         return {
             "success": True,
@@ -3878,6 +4083,10 @@ async def execute_get_bot_status(bot: discord.Client) -> Dict[str, Any]:
                 "uptime_seconds": uptime_seconds,
                 "dev_mode": getattr(bot, 'dev_mode', False),
                 "guilds": len(bot.guilds),
+                "live_pass_loop_running": bool(
+                    live_pass_loop and hasattr(live_pass_loop, "is_running") and live_pass_loop.is_running()
+                ),
+                "daily_summaries_mode": "legacy/backfill only",
             }
         }
 
@@ -4156,10 +4365,20 @@ async def execute_query_table(params: Dict[str, Any]) -> Dict[str, Any]:
         query = sb.table(table).select(select_cols)
 
         # Auto-scope guild_id for tables that have it
-        GUILD_SCOPED_TABLES = {'discord_messages', 'discord_channels', 'daily_summaries',
-                               'shared_posts', 'pending_intros', 'discord_reactions',
-                               'discord_reaction_log', 'competitions', 'social_publications',
-                               'social_channel_routes'}
+        GUILD_SCOPED_TABLES = {
+            'discord_messages', 'discord_channels', 'daily_summaries',
+            'shared_posts', 'pending_intros', 'discord_reactions',
+            'discord_reaction_log', 'competitions', 'social_publications',
+            'social_channel_routes', 'topic_editor_runs', 'topics',
+            'topic_sources', 'topic_aliases', 'topic_transitions',
+            'editorial_observations', 'topic_editor_checkpoints',
+            'live_update_editor_runs',
+            'live_update_candidates', 'live_update_decisions',
+            'live_update_feed_items', 'live_update_editorial_memory',
+            'live_update_watchlist', 'live_update_duplicate_state',
+            'live_update_checkpoints', 'live_top_creation_runs',
+            'live_top_creation_posts', 'live_top_creation_checkpoints',
+        }
         if table in GUILD_SCOPED_TABLES and 'guild_id' not in filters:
             if resolved_guild_id:
                 query = query.eq('guild_id', resolved_guild_id)
@@ -4450,6 +4669,11 @@ async def execute_tool(
         return await execute_get_daily_summaries(
             trusted_tool_input,
             visible_channels=visible_channels,
+            resolved_guild_id=resolved_guild_id,
+        )
+    elif tool_name == "get_live_update_status":
+        return await execute_get_live_update_status(
+            trusted_tool_input,
             resolved_guild_id=resolved_guild_id,
         )
     elif tool_name == "get_member_info":

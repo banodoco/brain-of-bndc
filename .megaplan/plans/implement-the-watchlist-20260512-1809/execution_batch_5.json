@@ -1,0 +1,53 @@
+{
+  "output": "Successfully executed T6. Wired watchlist tool dispatch in _run_editor_tool: watchlist_add calls self.db.insert_live_update_watchlist(...) and watchlist_update calls self.db.update_live_update_watchlist(...). Both return structured success/error payloads. Watchlist actions recorded into self.candidate_generator.watchlist_actions list alongside tool_trace in last_agent_trace. environment and guild_id threaded from editor context. All 36 existing tests pass.",
+  "files_changed": [
+    "src/features/summarising/live_update_editor.py",
+    "src/features/summarising/live_update_prompts.py",
+    ".megaplan/plans/implement-the-watchlist-20260512-1809/execution.json",
+    ".megaplan/plans/implement-the-watchlist-20260512-1809/execution_audit.json",
+    ".megaplan/plans/implement-the-watchlist-20260512-1809/execution_batch_2.json",
+    ".megaplan/plans/implement-the-watchlist-20260512-1809/execution_batch_3.json",
+    ".megaplan/plans/implement-the-watchlist-20260512-1809/execution_batch_4.json",
+    ".megaplan/plans/implement-the-watchlist-20260512-1809/execution_batch_5.json",
+    ".megaplan/plans/implement-the-watchlist-20260512-1809/step_receipt_execute_v1.json"
+  ],
+  "commands_run": [
+    "python -m pytest tests/test_live_update_prompts.py tests/test_live_update_editor_lifecycle.py tests/test_live_update_editor_publishing.py -x -v --tb=short"
+  ],
+  "deviations": [
+    "Advisory quality: code changes lacked test updates: src/features/summarising/live_update_editor.py, src/features/summarising/live_update_prompts.py.",
+    "Auto-attributed 7 unclaimed file(s) to task T6 (worker reported empty files_changed): .megaplan/plans/implement-the-watchlist-20260512-1809/execution.json, .megaplan/plans/implement-the-watchlist-20260512-1809/execution_audit.json, .megaplan/plans/implement-the-watchlist-20260512-1809/execution_batch_2.json, .megaplan/plans/implement-the-watchlist-20260512-1809/execution_batch_3.json, .megaplan/plans/implement-the-watchlist-20260512-1809/execution_batch_4.json, .megaplan/plans/implement-the-watchlist-20260512-1809/execution_batch_5.json, .megaplan/plans/implement-the-watchlist-20260512-1809/step_receipt_execute_v1.json",
+    "Advisory observation mismatch: git status/content hash delta found unclaimed files: .megaplan/briefs/live-update-environment-split.md, .megaplan/plans/implement-the-watchlist-20260512-1809/.plan.lock, .megaplan/plans/implement-the-watchlist-20260512-1809/critique_output.json, .megaplan/plans/implement-the-watchlist-20260512-1809/critique_v1.json, .megaplan/plans/implement-the-watchlist-20260512-1809/execution_batch_1.json, .megaplan/plans/implement-the-watchlist-20260512-1809/faults.json, .megaplan/plans/implement-the-watchlist-20260512-1809/final.md, .megaplan/plans/implement-the-watchlist-20260512-1809/finalize.json, .megaplan/plans/implement-the-watchlist-20260512-1809/finalize_output.json, .megaplan/plans/implement-the-watchlist-20260512-1809/finalize_snapshot.json, .megaplan/plans/implement-the-watchlist-20260512-1809/finalize_v1_raw.txt, .megaplan/plans/implement-the-watchlist-20260512-1809/gate.json, .megaplan/plans/implement-the-watchlist-20260512-1809/gate_signals_v1.json, .megaplan/plans/implement-the-watchlist-20260512-1809/phase_result.json, .megaplan/plans/implement-the-watchlist-20260512-1809/plan_v1.md, .megaplan/plans/implement-the-watchlist-20260512-1809/plan_v1.meta.json, .megaplan/plans/implement-the-watchlist-20260512-1809/state.json, .megaplan/plans/implement-the-watchlist-20260512-1809/step_receipt_critique_v1.json, .megaplan/plans/implement-the-watchlist-20260512-1809/step_receipt_finalize_v1.json, .megaplan/plans/implement-the-watchlist-20260512-1809/step_receipt_gate_v1.json, .megaplan/plans/implement-the-watchlist-20260512-1809/step_receipt_plan_v1.json, .megaplan/plans/implement-the-watchlist-20260512-1809/user_actions.md, .megaplan/plans/live-update-environment-split/.plan.lock, .megaplan/plans/live-update-environment-split/critique_output.json, .megaplan/plans/live-update-environment-split/critique_v1.json, .megaplan/plans/live-update-environment-split/execution.json, .megaplan/plans/live-update-environment-split/execution_audit.json, .megaplan/plans/live-update-environment-split/execution_batch_1.json, .megaplan/plans/live-update-environment-split/execution_batch_2.json, .megaplan/plans/live-update-environment-split/execution_batch_3.json, .megaplan/plans/live-update-environment-split/execution_batch_4.json, .megaplan/plans/live-update-environment-split/execution_batch_5.json, .megaplan/plans/live-update-environment-split/execution_batch_6.json, .megaplan/plans/live-update-environment-split/execution_batch_7.json, .megaplan/plans/live-update-environment-split/execution_batch_8.json, .megaplan/plans/live-update-environment-split/execution_batch_9.json, .megaplan/plans/live-update-environment-split/faults.json, .megaplan/plans/live-update-environment-split/final.md, .megaplan/plans/live-update-environment-split/finalize.json, .megaplan/plans/live-update-environment-split/finalize_output.json, .megaplan/plans/live-update-environment-split/finalize_snapshot.json, .megaplan/plans/live-update-environment-split/gate.json, .megaplan/plans/live-update-environment-split/plan_v1.md, .megaplan/plans/live-update-environment-split/plan_v1.meta.json, .megaplan/plans/live-update-environment-split/plan_v2.md, .megaplan/plans/live-update-environment-split/plan_v2.meta.json, .megaplan/plans/live-update-environment-split/review.json, .megaplan/plans/live-update-environment-split/state.json, .megaplan/plans/live-update-environment-split/step_receipt_critique_v1.json, .megaplan/plans/live-update-environment-split/step_receipt_execute_v2.json, .megaplan/plans/live-update-environment-split/step_receipt_finalize_v2.json, .megaplan/plans/live-update-environment-split/step_receipt_plan_v1.json, .megaplan/plans/live-update-environment-split/step_receipt_revise_v2.json, .megaplan/plans/live-update-environment-split/user_actions.md",
+    "Advisory audit finding: Sense check SC12 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC13 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC16 is missing an executor acknowledgment.",
+    "Advisory audit finding: Tasks left pending after execute (executor never started them): T12, T13, T16"
+  ],
+  "task_updates": [
+    {
+      "id": "T6",
+      "status": "done",
+      "executor_notes": "Added watchlist_add and watchlist_update handlers in _run_editor_tool (live_update_editor.py). watchlist_add calls self.db.insert_live_update_watchlist with watch_key, title, reason (mapped to origin_reason), source_message_ids, channel_id, subject_type, environment=self.environment, guild_id=guild_id. watchlist_update calls self.db.update_live_update_watchlist with watch_key, action, notes, environment=self.environment. Both return structured {ok: bool, watchlist_entry/error, action} payloads. Watchlist actions recorded into self.candidate_generator.watchlist_actions list (initialized in LiveUpdateCandidateGenerator.__init__, reset in generate_candidates). watchlist_actions included in last_agent_trace alongside tool_trace. Also added watchlist_actions to _agent_run_metadata for metadata persistence. All 36 tests pass.",
+      "task_id": "T6",
+      "files_changed": [
+        ".megaplan/plans/implement-the-watchlist-20260512-1809/execution.json",
+        ".megaplan/plans/implement-the-watchlist-20260512-1809/execution_audit.json",
+        ".megaplan/plans/implement-the-watchlist-20260512-1809/execution_batch_2.json",
+        ".megaplan/plans/implement-the-watchlist-20260512-1809/execution_batch_3.json",
+        ".megaplan/plans/implement-the-watchlist-20260512-1809/execution_batch_4.json",
+        ".megaplan/plans/implement-the-watchlist-20260512-1809/execution_batch_5.json",
+        ".megaplan/plans/implement-the-watchlist-20260512-1809/step_receipt_execute_v1.json"
+      ],
+      "commands_run": [],
+      "auto_attributed_files": true
+    }
+  ],
+  "sense_check_acknowledgments": [
+    {
+      "id": "SC6",
+      "verdict": "PASS",
+      "executor_note": "Both watchlist_add and watchlist_update are dispatched in _run_editor_tool (editor.py), not _run_requested_tool (prompts.py). Each returns structured {ok, watchlist_entry/error, action} payload. Watchlist actions are recorded into self.candidate_generator.watchlist_actions (a List[Dict[str,Any]]) and included in last_agent_trace alongside tool_trace. environment and guild_id are threaded from editor context (self.environment, guild_id method parameter).",
+      "sense_check_id": "SC6"
+    }
+  ]
+}

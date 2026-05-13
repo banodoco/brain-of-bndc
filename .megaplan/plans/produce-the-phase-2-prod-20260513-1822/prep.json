@@ -1,0 +1,168 @@
+{
+  "skip": false,
+  "task_summary": "Author docs/live-update-editor-phase-2-runbook.md as the operator's source of truth for cutting the BNDC live-update editor over to prod after Phase 1 ships the redesign in dev with publishing OFF. The runbook must cover the publish-flag flip, the shadow-mode-vs-cutover readiness rubric, partial-publish detection SQL, the 24-48h side-by-side decision tree, the legacy table rename + deferred deletion migration, and a runner-pointer rollback that doesn't rewrite state.",
+  "key_evidence": [
+    {
+      "point": "Phase 2 in the v6 redesign: enable publishing on new editor, run new + old editors concurrently in prod 24-48h with only the new editor publishing (old suppressed), watch topics.publication_status='partial', rename old tables to _legacy_*, schedule deletion in 2-4 weeks. Roughly 2-3 days of focused work after Phase 1 gate passes.",
+      "source": "docs/live-update-editor-redesign.md:646-653",
+      "relevance": "high"
+    },
+    {
+      "point": "publication_status lives directly on topics (folded from v4's topic_publications) with values pending | sent | partial | failed | null, plus publication_error, discord_message_ids bigint[], publication_attempts, last_published_at. Partial-publish detection queries topics, not a join.",
+      "source": "docs/live-update-editor-redesign.md:117-123, 223",
+      "relevance": "high"
+    },
+    {
+      "point": "Operational trip-wire: if partial-publish incidents happen twice during shadow-mode or prod, restore the separate topic_publications table for full per-attempt history. This is the explicit abort-class signal the runbook should call out.",
+      "source": "docs/live-update-editor-redesign.md:600-604",
+      "relevance": "high"
+    },
+    {
+      "point": "Mapping from legacy to new tables: live_update_feed_items -> topics(state='posted'), live_update_watchlist -> topics(state='watching'), live_update_duplicate_state -> canonical_key + topic_aliases, live_update_editorial_memory -> search_topics tool, live_update_candidates -> gone, live_update_decisions -> topic_transitions. live_update_editor_runs stays.",
+      "source": "docs/live-update-editor-redesign.md:212-223, 562",
+      "relevance": "high"
+    },
+    {
+      "point": "Rollback per design: 'old tables kept as _legacy_* for 2+ weeks; runner-pointer flip is the rollback.' Rollback is flipping the runner back to the old editor \u2014 not a data restore \u2014 so rename ordering matters: pre-rename rollback is trivial, post-rename rollback needs reverse rename.",
+      "source": "docs/live-update-editor-redesign.md:596",
+      "relevance": "high"
+    },
+    {
+      "point": "Phase 1 shadow-mode artifacts to grade against: trace embed in #main_test showing source-message count, tool calls fired, topics posted/watched/updated/discarded, near-miss observations, cost, latency, comparison vs today's editor. 20+ replay windows. End-of-week gate is POM answering 'would I be comfortable letting this system publish to prod?'",
+      "source": "docs/live-update-editor-redesign.md:611-644",
+      "relevance": "high"
+    },
+    {
+      "point": "Three named trip-wires beyond partial-publish: collision-override rate exceeding ~10% (similarity threshold too tight), record_observation invoked <1x/run (drop the tool), and indexes that exist on the new schema (topics_state_idx, topics_revisit_idx, topics_headline_trgm, transitions_*). These are the signals the decision tree references.",
+      "source": "docs/live-update-editor-redesign.md:130-132, 188-191, 600-604",
+      "relevance": "medium"
+    },
+    {
+      "point": "Concurrent-run protection via lease keyed on (environment, guild_id, live_channel_id) is a Phase-1 deliverable; both editors writing to their own table families is the design's intended side-by-side.",
+      "source": "docs/live-update-editor-redesign.md:684",
+      "relevance": "medium"
+    },
+    {
+      "point": "docs/runbook-payments.md is the in-repo prior art: Fast Triage SQL block, named Scenarios, decision tree as markdown table, explicit escalation criteria, Recommended Minimum / scheduler section. Match its tone and structure.",
+      "source": "docs/runbook-payments.md:1-92, 286-407",
+      "relevance": "high"
+    },
+    {
+      "point": "Task constraint: 'Assume Phase 1 lands per spec; deviations get a consult-the-doc escape hatch, not detailed branching.' Runbook does not re-derive Phase 1 design and prefers ABORT-to-rollback over improvisation.",
+      "source": "task description",
+      "relevance": "high"
+    },
+    {
+      "point": "live_update_editor.py is the current production editor entrypoint (legacy path the runner-pointer flip falls back to). Publish wiring is at _publish_accepted_candidates / _select_publishable_candidates. The runbook should reference the Phase-1-chosen toggle name rather than re-specifying it.",
+      "source": "src/features/summarising/live_update_editor.py:60, 84-107, 261-346",
+      "relevance": "medium"
+    }
+  ],
+  "relevant_code": [
+    {
+      "file_path": "docs/live-update-editor-redesign.md",
+      "why": "v6 redesign \u2014 authoritative source for table shapes, publication_status semantics, legacy-to-new mapping, trip-wires, and the Phase 2 outline. Cite anchors for the 'consult the doc' escape hatch.",
+      "functions": [
+        "Data model",
+        "Migration plan / Phase 2",
+        "Operational trip-wires",
+        "What we'd lose"
+      ]
+    },
+    {
+      "file_path": "docs/live-update-editor-legacy-boundaries.md",
+      "why": "Defines what counts as legacy runtime surface so the rename SQL covers the right set and side-by-side doesn't leave a forgotten table writing into prod.",
+      "functions": [
+        "Legacy Storage And Helpers",
+        "Direct Callers Found"
+      ]
+    },
+    {
+      "file_path": "docs/runbook-payments.md",
+      "why": "Closest in-repo runbook template \u2014 Fast Triage SQL block, scenario sections, decision-table format, escalation criteria.",
+      "functions": [
+        "Fast Triage",
+        "Decision Tree By last_error Prefix",
+        "When To Escalate Immediately"
+      ]
+    },
+    {
+      "file_path": "docs/live-editor-watchlist-plan.md",
+      "why": "Describes how the current production editor wires watchlist + publish cap + reasoning. Useful for naming the legacy code paths the runner-pointer flip toggles between.",
+      "functions": [
+        "Phase 1 \u2014 Watchlist as a model-driven tool",
+        "File-level change inventory"
+      ]
+    },
+    {
+      "file_path": "src/features/summarising/live_update_editor.py",
+      "why": "Current production editor entrypoint; runbook references it as the legacy path the runner pointer falls back to during rollback.",
+      "functions": [
+        "_publish_accepted_candidates",
+        "_select_publishable_candidates",
+        "_publish_dev_debug_report"
+      ]
+    }
+  ],
+  "test_expectations": [
+    {
+      "test_id": "Pre-flip preconditions",
+      "what_it_checks": "Lists every gate that must be GREEN before the publish flag flips: Phase 1 shadow-mode soak window length and pass criteria, schema migration applied in prod (5 new tables + indexes present), backfill of existing feed_items / watchlist into topics complete and verified by row-count parity, runner lease key in place, trace embed wired in prod monitoring channel, legacy editor still running and writing to its own tables, operator paged-in window booked.",
+      "status": "pass_to_pass"
+    },
+    {
+      "test_id": "Comparison rubric: shadow-mode -> cutover",
+      "what_it_checks": "Specific Phase-1 signals that map to GO / TUNE / ABORT. GO: replay-divergence runs are all explainable as 'agent made a valid different call'; near-miss observations within 0-3/run; collision-override rate under ~10%; canonical-key fuzz suite passes; partial-publish in dev = 0 over the soak; cost-per-run within 2-3x. TUNE: collision-override 10-25%, record_observation under 1/run, divergences include category drift without operator agreement. ABORT: partial-publish in dev, slug-drift fracturing real stories, schema-rejection rate over 50%, lease contention, false-negatives on must-publish stories.",
+      "status": "pass_to_pass"
+    },
+    {
+      "test_id": "Publishing flag flip procedure",
+      "what_it_checks": "Exact ordered steps \u2014 name the toggle (env var or config flag chosen by Phase 1) and where it lives; pre-flip verification command(s); the flip itself; post-flip verification within the next hourly run (trace embed should show publication_status='sent'); confirmation that the legacy editor's Discord-send call is suppressed. Include a single SQL one-liner the operator can re-run each watch tick.",
+      "status": "pass_to_pass"
+    },
+    {
+      "test_id": "Partial-publish detection SQL",
+      "what_it_checks": "Copy-paste queries oncall runs every ~15 min: (a) count topics WHERE publication_status='partial' in last hour / 24h / since cutover; (b) per-row deep-dive showing publication_status, publication_error, publication_attempts, last_published_at, discord_message_ids; (c) still-pending-too-long query; (d) rejection-rate query against topic_transitions WHERE action LIKE 'rejected_%' grouped by reason. Scoped to environment='prod'.",
+      "status": "pass_to_pass"
+    },
+    {
+      "test_id": "Rollback procedure (runner-pointer flip)",
+      "what_it_checks": "How to revert to the legacy editor without rewriting state in topics or _legacy_* tables. Names the toggle, the order (flip toggle, stop new-editor lease, confirm legacy editor takes its scheduler tick, verify next prod run publishes via legacy path, leave topics rows alone). Critical: pre-rename rollback is trivial; post-rename rollback needs reverse RENAME. Runbook resolves the ordering by running the rename only after the 24-48h watch passes.",
+      "status": "pass_to_pass"
+    },
+    {
+      "test_id": "Table-rename migration SQL",
+      "what_it_checks": "Ordered SQL to rename live_update_feed_items, live_update_watchlist, live_update_duplicate_state, live_update_editorial_memory, live_update_candidates, live_update_decisions to _legacy_<name>; note that Postgres preserves indexes / sequences / FK constraints / RLS policies across RENAME; handle dependent views explicitly; verification row-count parity SELECT before/after; dry-run BEGIN/ROLLBACK; explicit retention of live_update_editor_runs. Ordering: only AFTER 24-48h watch window completes successfully.",
+      "status": "pass_to_pass"
+    },
+    {
+      "test_id": "24-48h watch period decision tree",
+      "what_it_checks": "Symptom -> action table. Symptoms: partial-publish count (1 -> investigate; >=2 in 24h -> ABORT to rollback + restore topic_publications per redesign trip-wire); rejection rate spike (>50% -> consult doc, likely TUNE); collision-override rate spike (>10% -> TUNE); shape divergence vs Phase 1 baseline (TUNE if explainable / ABORT if not); lease contention or duplicate posts (HOT-FIX if isolated, ABORT if recurring); Discord 429s / auth errors (HOT-FIX channel routing); old editor accidentally posts to live channel (HOT-FIX suppression). Each row points at the section that implements the action.",
+      "status": "pass_to_pass"
+    },
+    {
+      "test_id": "Post-watch cleanup + deletion schedule",
+      "what_it_checks": "After 24-48h watch passes: run rename migration; record calendar date for _legacy_* deletion 2-4 weeks out; final verification queries; close-out checklist. Includes 'do not delete _legacy_*' floor and named circumstances under which deletion is brought forward or pushed out.",
+      "status": "pass_to_pass"
+    },
+    {
+      "test_id": "Consult-the-doc escape hatch",
+      "what_it_checks": "Every section that could fork on Phase-1 deviation ends with a one-line pointer to docs/live-update-editor-redesign.md anchor + instruction to ABORT to rollback rather than improvise.",
+      "status": "pass_to_pass"
+    }
+  ],
+  "constraints": [
+    "Audience: oncall operator (POM or delegate) during cutover; treat as source of truth, not background reading. Operator reads top-to-bottom while the flip is in flight.",
+    "Tone: terse, imperative, copy-paste SQL ready. Match docs/runbook-payments.md style.",
+    "Output path: docs/live-update-editor-phase-2-runbook.md.",
+    "Assume Phase 1 landed per spec; do not re-derive Phase 1 design. Deviations route back to the redesign doc with an ABORT-to-rollback default.",
+    "Required sections: pre-flip preconditions, exact publishing-flag-flip procedure, partial-publish detection SQL, rollback procedure (runner-pointer flip, no state rewrite), shadow-mode comparison rubric, table-rename migration SQL with ordering + constraint handling, 24-48h watch decision tree (abort / hot-fix / accept).",
+    "Cite the partial-publish trip-wire from the redesign explicitly: 2 partial-publish incidents -> restore separate topic_publications -> ABORT.",
+    "Reference but do not duplicate the schema; point at redesign anchors for table shape.",
+    "SQL scoped to environment='prod' where applicable; show how to swap to 'dev' for pre-flip verification.",
+    "No prescribed delete date \u2014 runbook says 'schedule deletion 2-4 weeks after rename' and lets the operator record the date inline.",
+    "Length budget: roughly the size of docs/runbook-payments.md (~400 lines). Optimize for skimmability over completeness."
+  ],
+  "primary_criterion": "An oncall operator who has not just read the redesign doc in full can execute the cutover end-to-end from this runbook alone: decide whether Phase 1 is ready to cut over (rubric), flip the publish toggle in the right order, detect partial-publish failures from copy-paste SQL, revert to the legacy editor without rewriting topics state, run the table rename only after the watch window passes, and recognize which 24-48h symptoms trigger ABORT vs HOT-FIX vs ACCEPT \u2014 with deviations pointing back to the redesign doc rather than improvising.",
+  "suggested_approach": "Mirror docs/runbook-payments.md structure. Outline:\n\n1. Header + audience + scope \u2014 1 paragraph: who reads this, when (during prod cutover after Phase 1 gate passes), what it covers, what it doesn't (Phase 1 design \u2014 see redesign doc).\n\n2. Fast Triage \u2014 single SQL block: SELECT publication_status, count(*) FROM topics WHERE environment='prod' GROUP BY publication_status; plus a one-line state summary the operator runs each watch tick.\n\n3. Pre-flip preconditions \u2014 checklist of GREEN gates (Phase 1 soak passed, migration applied, backfill row-count parity, lease in place, trace embed live, legacy editor still up, operator paged-in window). Each item has a verification command. Ends with 'if any are RED -> do not flip.'\n\n4. Shadow-mode -> cutover comparison rubric \u2014 GO / TUNE / ABORT table keyed on Phase-1 signals (divergence explainability, collision-override rate, partial-publish in dev, near-miss volume, cost delta). TUNE = delay the flip and consult the redesign doc; ABORT = walk away from Phase 2 this week.\n\n5. Publishing-flag-flip procedure \u2014 exact ordered steps. Reference the toggle by the Phase-1-chosen name with a TODO placeholder. Steps: verify preconditions, flip toggle, verify legacy editor's publish path is suppressed, wait for next hourly tick, confirm trace embed shows publication_status='sent' rows. Include the verification SQL one-liner.\n\n6. Partial-publish detection SQL \u2014 three queries: 15-min poll (count partials in last hour); per-row deep-dive (status, error, attempts, discord_message_ids, last_published_at); still-pending-too-long. Plus rejection-rate query against topic_transitions WHERE action LIKE 'rejected_%' over 1h.\n\n7. 24-48h watch decision tree \u2014 markdown table: SYMPTOM | THRESHOLD | ACTION (ABORT / HOT-FIX / ACCEPT) | POINTER. Rows: partial-publish count (1 -> investigate, 2+ -> ABORT and restore topic_publications per redesign trip-wire), rejection rate (>50% -> consult doc), collision-override rate (>10% -> TUNE), duplicate posts to live channel (HOT-FIX or ABORT if recurring), legacy editor accidentally publishing (HOT-FIX), Discord 429s (HOT-FIX), shape divergence vs Phase 1 baseline, lease contention.\n\n8. Rollback procedure \u2014 runner-pointer flip on the same toggle from section 5. Order: flip toggle off, drain new-editor in-flight run, confirm legacy editor's scheduler tick fires, verify next prod run publishes via legacy path, leave topics rows untouched. Critical clarification: rollback BEFORE rename = trivial; rollback AFTER rename = rename in reverse with explicit SQL. Recommend running the rename only after 24-48h watch passes so rollback stays trivial during the watch window.\n\n9. Table-rename migration SQL (post-watch) \u2014 ordered ALTER TABLE RENAME for the six legacy live_update_* tables plus a note that live_update_editor_runs stays. Constraint/index handling note: Postgres preserves indexes, sequences, FK constraints, and RLS across RENAME \u2014 do not recreate them. Include row-count parity SELECT before AND after, and a dry-run BEGIN; ROLLBACK; example. Final step: record the scheduled _legacy_* deletion date inline (operator picks within 2-4 weeks).\n\n10. Deletion schedule + close-out \u2014 what to verify before scheduled deletion fires, DROP TABLE block, close-out checklist.\n\n11. Consult-the-doc escape hatch \u2014 short footer pointing back to docs/live-update-editor-redesign.md anchors with ABORT-to-rollback as the default action while reading."
+}

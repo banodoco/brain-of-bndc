@@ -1,0 +1,185 @@
+{
+  "checks": [
+    {
+      "id": "issue_hints",
+      "question": "Did the work fully address the issue hints, user notes, and approved plan requirements?",
+      "guidance": "Cross-check the result against explicit user notes, critique corrections, and watch items. Flag anything the implementation ignored, contradicted, or only partially covered.",
+      "findings": [
+        {
+          "detail": "Checked the iteration-3 plan against the sprint constraints in `docs/live-update-editor-sprint-plan.md`. The plan still honors the hard scope guard by keeping new topic-editor logic out of `live_update_editor.py` and `live_update_prompts.py`, keeps one publishing-off replay instead of reintroducing shadow-mode gates, and now explicitly constrains rejected-call actions to the sprint's three locked names.",
+          "flagged": false
+        }
+      ],
+      "prior_findings": [
+        {
+          "detail": "Rechecked the revised plan against `docs/live-update-editor-sprint-plan.md` and the stale gates in `docs/live-update-editor-phase-2-runbook.md`. The plan now explicitly says the sprint plan supersedes the old soak/20-window/formal-gate requirements, adds a dedicated runbook reconciliation step, and changes validation to one publishing-off sanity replay before the prod flip, so the prior cutover-ops contradiction is contained in the plan.",
+          "flagged": false,
+          "status": "n/a"
+        },
+        {
+          "detail": "Checked the hard scope guard around legacy files. The revised plan still keeps new topic-editor logic out of `src/features/summarising/live_update_editor.py` and `src/features/summarising/live_update_prompts.py`, limiting those files to invocation suppression or legacy labeling, which matches the sprint constraint and preserves rollback implementation boundaries.",
+          "flagged": false,
+          "status": "n/a"
+        }
+      ]
+    },
+    {
+      "id": "correctness",
+      "question": "Are the proposed changes technically correct?",
+      "guidance": "Look for logic errors, invalid assumptions, broken invariants, schema mismatches, or behavior that would fail at runtime. When the fix adds a conditional branch, check whether it handles all relevant cases \u2014 not just the one reported in the issue.",
+      "findings": [
+        {
+          "detail": "Rechecked the `FLAG-006` area against the v6 tool surface. The plan now defines `topic_transitions.action` as accepted/base actions plus only `rejected_post_simple`, `rejected_post_sectioned`, and `rejected_watch`, and it maps invalid `update_topic_source_messages` / `discard_topic` calls to base-action audit rows with `payload.outcome='tool_error'`; this avoids inventing unapproved rejected actions while keeping an audit trail.",
+          "flagged": false
+        },
+        {
+          "detail": "Checked the dedicated run and lease model again against the current repo shape. The plan continues to avoid the mixed `live_update_editor_runs.metadata.editor` path, uses `topic_editor_runs` for the new editor, and specifies active-only lease uniqueness with stale lease expiry, so the previously identified run-table and lease correctness issues remain addressed.",
+          "flagged": false
+        }
+      ],
+      "prior_findings": [
+        {
+          "detail": "Rechecked the run lifecycle decision against `docs/live-update-editor-sprint-plan.md`, `docs/live-update-editor-redesign.md`, and current `storage_handler.create_live_update_run`. The revised plan now chooses `topic_editor_runs` as the single new-editor run table, keeps `live_update_editor_runs` as legacy rollback history, and updates runbook/admin/health verification to use the dedicated table, which resolves the previous mixed run-table model.",
+          "flagged": false,
+          "status": "n/a"
+        },
+        {
+          "detail": "Rechecked the lease semantics. The revised plan now requires a partial unique index scoped to active `status='running'` rows plus stale `lease_expires_at` expiry before acquisition, so completed or failed historical runs no longer block later hourly runs for the same `(environment, guild_id, live_channel_id)` tuple.",
+          "flagged": false,
+          "status": "n/a"
+        },
+        {
+          "detail": "Checked the rejected-call schema against the v6 tool surface. The sprint locks only `rejected_post_simple`, `rejected_post_sectioned`, and `rejected_watch`, while the tool surface also includes write tools `update_topic_source_messages` and `discard_topic`; the revised plan still says every dispatcher rejection uses the locked rejected-call names without defining what happens if an update/discard call is invalid or replayed. An executor could either invent unapproved rejected actions that violate the locked schema or fail to log those rejections as required.",
+          "flagged": true,
+          "status": "addressed"
+        }
+      ]
+    },
+    {
+      "id": "scope",
+      "question": "Search for related code that handles the same concept. Is the reported issue a symptom of something broader?",
+      "guidance": "Look at how the changed function is used across the codebase. Does the fix only address one caller's scenario while others remain broken? Flag missing required work or out-of-scope edits. A minimal patch is often right, but check whether the underlying problem is bigger than what the issue describes.",
+      "findings": [
+        {
+          "detail": "Searched the same operational surfaces (`admin_chat` tools/agent, health checks, runtime wiring, and tests) against the iteration-3 plan. The plan still includes admin/health migration to `topic_editor_runs`, `topics`, and `topic_transitions`, plus legacy status labeling for rollback, so it does not narrow back to only the editor module.",
+          "flagged": false
+        }
+      ],
+      "prior_findings": [
+        {
+          "detail": "Rechecked live-update operator surfaces in `src/features/admin_chat/tools.py`, `src/features/admin_chat/agent.py`, `src/features/health/health_check_cog.py`, and `tests/test_live_admin_health.py`. The revised plan adds a dedicated admin/health phase that moves primary status to `topic_editor_runs`, `topics`, and `topic_transitions` while keeping legacy table counts labeled as rollback state, which addresses the previous stale-visibility gap.",
+          "flagged": false,
+          "status": "n/a"
+        },
+        {
+          "detail": "Searched for existing topic-editor implementation symbols again and found the repo still only has the docs-level topic model; the plan remains appropriately end-to-end and does not pretend this can be solved by modifying a single existing function.",
+          "flagged": false,
+          "status": "n/a"
+        }
+      ]
+    },
+    {
+      "id": "all_locations",
+      "question": "Does the change touch all locations AND supporting infrastructure?",
+      "guidance": "Search for all instances of the symbol/pattern being changed. Also ask: does this feature require setup, registration, or integration code beyond the core logic? Missing glue code causes test failures even when the core fix is correct.",
+      "findings": [
+        {
+          "detail": "Checked supporting locations needed for the revised rejected-action mapping. The plan now updates migration vocabulary, dispatcher behavior, focused unit tests, and validation order for the base-action `tool_error` audit rows, so the `FLAG-006` fix is represented in schema, code, and tests rather than only prose.",
+          "flagged": false
+        },
+        {
+          "detail": "Rechecked the DB access-path concern: the plan still requires both async `storage_handler.py` helpers and synchronous `db_handler.py` wrappers for every new helper called by `TopicEditor`, matching the dependency shape currently used by `SummarizerCog` and `LiveUpdateEditor`.",
+          "flagged": false
+        }
+      ],
+      "prior_findings": [
+        {
+          "detail": "Rechecked the DB access path used by `SummarizerCog`: it injects `bot.db_handler`, and the legacy editor calls synchronous wrappers on that object. The revised plan now explicitly adds matching `src/common/db_handler.py` wrappers for every new `src/common/storage_handler.py` topic helper and makes `TopicEditor` call those wrappers, resolving the prior missing-glue issue.",
+          "flagged": false,
+          "status": "n/a"
+        },
+        {
+          "detail": "Checked supporting infrastructure coverage after the revision. The plan now includes migration staging, topic schema, backfill, storage and db wrappers, runtime wiring, admin/health surfaces, runbook edits, focused tests, legacy compatibility tests, and replay validation, so the main supporting locations for this cutover are represented.",
+          "flagged": false,
+          "status": "n/a"
+        }
+      ]
+    },
+    {
+      "id": "callers",
+      "question": "Find the callers of the changed function. What arguments do they actually pass? Does the fix handle all of them?",
+      "guidance": "Grep for call sites. For each caller, check what values it passes \u2014 especially edge cases like None, zero, empty, or composite inputs. Then ask: should this change be here, or in a caller, callee, or new method?",
+      "findings": [
+        {
+          "detail": "Rechecked active editor callers in `src/features/summarising/summariser_cog.py` and the runtime wiring tests. The plan still preserves `run_once(trigger)` for scheduled/startup/owner triggers and the injectable `live_update_editor` constructor seam, so the caller contract remains covered after the iteration-3 rejected-audit change.",
+          "flagged": false
+        }
+      ],
+      "prior_findings": [
+        {
+          "detail": "Rechecked `src/features/summarising/summariser_cog.py` caller arguments: scheduled, startup, and owner command paths pass trigger strings only. The revised plan preserves `TopicEditor.run_once(trigger)` compatibility and adds runtime wiring tests for scheduled/manual/startup paths, so those callers remain covered.",
+          "flagged": false,
+          "status": "n/a"
+        },
+        {
+          "detail": "Rechecked the constructor injection seam used by `tests/test_live_runtime_wiring.py`. The revised plan now explicitly keeps the `live_update_editor` keyword as the injectable active-editor seam, or requires deliberate renaming with all tests updated in the same change, which resolves the prior risk of breaking fakes and dependency injection while swapping the default concrete editor.",
+          "flagged": false,
+          "status": "n/a"
+        }
+      ]
+    }
+  ],
+  "flags": [
+    {
+      "id": "verifiability-0",
+      "concern": "Criterion 4: requires human verification (observe_runtime_logs).",
+      "category": "verifiability",
+      "severity_hint": "likely-minor",
+      "status": "open"
+    },
+    {
+      "id": "verifiability-1",
+      "concern": "Criterion 6: requires human verification (observe_runtime_logs).",
+      "category": "verifiability",
+      "severity_hint": "likely-minor",
+      "status": "open"
+    },
+    {
+      "id": "verifiability-2",
+      "concern": "Criterion 16: requires human verification (observe_runtime_logs).",
+      "category": "verifiability",
+      "severity_hint": "likely-minor",
+      "status": "open"
+    },
+    {
+      "id": "verifiability-3",
+      "concern": "Criterion 18: requires human verification (subjective_judgment).",
+      "category": "verifiability",
+      "severity_hint": "likely-minor",
+      "status": "open"
+    },
+    {
+      "id": "verifiability-4",
+      "concern": "Criterion 19: requires human verification (observe_runtime_logs).",
+      "category": "verifiability",
+      "severity_hint": "likely-minor",
+      "status": "open"
+    },
+    {
+      "id": "verifiability-5",
+      "concern": "Criterion 20: requires human verification (verify_physical_device).",
+      "category": "verifiability",
+      "severity_hint": "likely-minor",
+      "status": "open"
+    }
+  ],
+  "verified_flag_ids": [
+    "FLAG-001",
+    "FLAG-002",
+    "FLAG-003",
+    "FLAG-004",
+    "FLAG-005",
+    "FLAG-006"
+  ],
+  "disputed_flag_ids": []
+}

@@ -1,0 +1,43 @@
+{
+  "receipt_id": "8e7029ee-65a5-4a32-a85e-1cc0ccb6bcec",
+  "plan_id": "produce-the-phase-2-prod-20260513-1822",
+  "phase": "critique",
+  "iteration": 3,
+  "attempt": 1,
+  "timestamp_utc": "2026-05-13T16:48:27.573428+00:00",
+  "profile_name": "all-codex",
+  "agent": "claude",
+  "agent_mode": "persistent",
+  "model_configured": "claude",
+  "model_actual": null,
+  "session_id": "263dbc0c-7edf-44b9-afae-f26b71196d1c",
+  "megaplan_version": "0.8.1",
+  "schema_version": 1,
+  "prompt_hash_raw": "1289e5a5d7659e77e75181b1dce4b3e19fa728b0e2dbb162f15aafb231dda289",
+  "prompt_hash_canonical": "0b45f7efc97a858d5cdd4c2076e937d4a3a93c83afc10153bf4ffb937dfaec1a",
+  "canonicalization_version": 1,
+  "upstream_artifact_hashes": [
+    "sha256:900ec069f81209758e9d0117e31d8dca40f8a03f7b10f0e6b5c94f1fc64b2dc9"
+  ],
+  "cost_usd": 1.0057152500000002,
+  "duration_ms": 104473,
+  "prompt_tokens": 1016456,
+  "completion_tokens": 8305,
+  "verdict": null,
+  "metrics": {
+    "findings_per_check": {
+      "issue_hints": 3,
+      "correctness": 5,
+      "scope": 3,
+      "all_locations": 3,
+      "callers": 2
+    },
+    "severity_distribution": {
+      "unknown": 16
+    },
+    "clean_checks_count": 0,
+    "flagged_checks_count": 5,
+    "rubber_stamp_ratio": 0.0
+  },
+  "scope_drift_severity": null
+}

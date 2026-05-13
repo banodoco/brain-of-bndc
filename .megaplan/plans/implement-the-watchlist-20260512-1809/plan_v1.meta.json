@@ -1,0 +1,115 @@
+{
+  "version": 1,
+  "timestamp": "2026-05-12T16:11:37Z",
+  "hash": "sha256:ee67594fc84ced1477d118f82565cec27c2efbf534c93d0ea04bf9a365c783ca",
+  "questions": [
+    "Migrations live in `.migrations_staging/` rather than a `migrations/` directory \u2014 should the new migration go there, or is there a separate apply path I'm missing?",
+    "Does the existing `live_update_watchlist.status` column have a CHECK constraint or enum type that needs altering to admit `discarded | archived | published`, or is it a free-form text column?",
+    "`author_is_high_signal` is referenced in the new showcase bar \u2014 does that signal already exist on candidate payloads, or do we need to derive it (and from what)?",
+    "Should `LIVE_UPDATE_MAX_POSTS_PER_RUN` default remain unset (truly unlimited) in prod, or should we keep a soft default like 5 as a safety belt for the first week?"
+  ],
+  "success_criteria": [
+    {
+      "criterion": "Migration file added under `.migrations_staging/` with timestamped name adding `expires_at`, `next_revisit_at`, `revisit_count`, `origin_reason`, `evidence` to `live_update_watchlist` and backfilling existing rows",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "`db_handler.py` exposes `insert_live_update_watchlist` and `update_live_update_watchlist` and `get_live_update_watchlist` returns state-grouped results capped at 20/state with TTL auto-archive and 50-row active cap",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "`watchlist_add` and `watchlist_update` tools appear in `available_tools` and are dispatched via `_run_requested_tool`, with tool calls recorded in agent trace",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "Watchlist rendering uses schema-correct field names (`subject_type`, `notes`) and the state-grouped structure replaces the prior broken block",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "`DEFAULT_MAX_PUBLISH_PER_RUN` is `None`; the per-run publish slice is skipped when unset; `LIVE_UPDATE_MAX_POSTS_PER_RUN` still throttles when present",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "Prompt no longer contains the 'at most one' / 'much more willing to return zero' language and now states reasoning prefix + per-run-cap removal per brief",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "`_meets_editorial_bar` reflects new thresholds (showcase \u22653 reactions OR \u22652 replies OR high-signal, top_creation \u22653) plus quiet-hour and last-call tiers",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "`raw_text` (truncated to 50k) is persisted into `live_update_editor_runs.metadata.agent_trace` on every run, including zero-candidate runs",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "`_parse_raw_candidates` implements the full fallback chain (top_level \u2192 alias \u2192 per_candidate \u2192 reasoning_prefix \u2192 prose_first_paragraph) and records `reasoning_recovery_path` in agent trace",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "New tests for watchlist lifecycle (insert/update/state transitions/TTL) and parser fallback (all 5 branches + none) pass",
+      "priority": "must",
+      "requires": [
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "Existing test suite still passes",
+      "priority": "must",
+      "requires": [
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "`scripts/debug_live_editor_audit.py` surfaces `reasoning_recovery_path` distribution and a watchlist actions summary",
+      "priority": "should",
+      "requires": [
+        "read_files"
+      ]
+    }
+  ],
+  "assumptions": [
+    "Migration belongs in `.migrations_staging/` following the existing `YYYYMMDDHHMMSS_<slug>.sql` convention.",
+    "`live_update_watchlist.status` is a plain text column (or its CHECK can be dropped/replaced in the migration) \u2014 broadening values is a simple ALTER.",
+    "`author_is_high_signal` will be derived from existing per-author signal already available to `_meets_editorial_bar`; if not present, it gracefully degrades to `False` and the OR clause becomes a no-op.",
+    "`scanned_message_count` is already available where `_meets_editorial_bar` is invoked (or trivially threadable through the call site).",
+    "`LIVE_UPDATE_MAX_POSTS_PER_RUN` default unset in prod \u2014 no soft cap.",
+    "Tool-call dispatch reuses the existing `_run_requested_tool` path in `live_update_prompts.py`; no new dispatcher in `live_update_editor.py` is required beyond context wiring.",
+    "`evidence` jsonb is populated at insert time only (not updated on `extend`).",
+    "24h dev soak / publish-rate / watchlist-size gates from Phase 5 of the brief are post-merge manual checks, treated as `info` priority for this pipeline."
+  ],
+  "structure_warnings": []
+}

@@ -5,6 +5,10 @@ Backfill guild_id on existing tables and seed server_config / guild_members / se
 Safe to run multiple times (idempotent). All updates use WHERE guild_id IS NULL
 so already-tagged rows are skipped.
 
+Note: daily_summaries is legacy daily-summary history/backfill input. Active
+live-update editor state lives in live_update_* tables and is intentionally not
+blanket-retagged by this historical guild-id backfill script.
+
 Usage:
     python scripts/backfill_guild_ids.py [--dry-run]
 """
@@ -112,7 +116,8 @@ async def _fetch_guild_members(token: str, guild_id: int):
 def verify_no_foreign_guild_data(sb, guild_id: int):
     """Check that no rows already have a guild_id OTHER than the BNDC one.
     If they do, abort — the backfill would incorrectly re-tag them."""
-    tables = ['discord_messages', 'discord_channels', 'daily_summaries',
+    legacy_summary_tables = ['daily_summaries']
+    tables = ['discord_messages', 'discord_channels', *legacy_summary_tables,
               'shared_posts', 'pending_intros', 'discord_reactions', 'discord_reaction_log']
     for table in tables:
         try:
@@ -183,7 +188,7 @@ def _get_pk_column(table: str) -> str:
     pk_map = {
         'discord_messages': 'message_id',
         'discord_channels': 'channel_id',
-        'daily_summaries': 'daily_summary_id',
+        'daily_summaries': 'daily_summary_id',  # legacy summary history/backfill input
         'shared_posts': 'id',
         'pending_intros': 'id',
         'discord_reactions': 'message_id',  # composite PK; works for IN filter
@@ -600,7 +605,12 @@ def reassign_guild_for_channel_ids(sb, guild_id: int, channel_ids: list[int], dr
 # ==========================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description='Backfill guild_id on existing tables')
+    parser = argparse.ArgumentParser(
+        description=(
+            'Backfill guild_id on historical/core tables. daily_summaries is '
+            'legacy history; active live-update tables are not modified here.'
+        )
+    )
     parser.add_argument('--dry-run', action='store_true', help='Show what would be done without making changes')
     parser.add_argument('--skip-verify', action='store_true', help='Skip safety verification')
     parser.add_argument('--force-server-config', action='store_true',
@@ -628,7 +638,7 @@ def main():
     tables = [
         'discord_messages',
         'discord_channels',
-        'daily_summaries',
+        'daily_summaries',  # legacy daily-summary history/backfill input
         'shared_posts',
         'pending_intros',
         'discord_reactions',

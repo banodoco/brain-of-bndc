@@ -1,0 +1,42 @@
+{
+  "checks": [],
+  "flags": [
+    {
+      "id": "FLAG-001",
+      "concern": "No `.migrations_staging/` directory exists in the repo and there are zero `.sql` files anywhere. The plan incorrectly claims this is the established migration convention. The executor will need to either create it from scratch or locate the actual migration tooling (Supabase CLI, dashboard migrations, etc.) before writing the schema changes.",
+      "category": "correctness",
+      "severity_hint": "high",
+      "evidence": "Repository search for `.migrations/`, `migrations/`, `supabase/migrations/`, and `.sql` files returns zero results. No migration tooling is present."
+    },
+    {
+      "id": "FLAG-002",
+      "concern": "`scripts/send_social_picks.py` calls `db_handler.get_recent_live_update_feed_items(guild_id, live_channel_id, limit)` with positional arguments. Adding an `environment` parameter to that method (before or between existing params) will shift bindings and break this script at runtime.",
+      "category": "correctness",
+      "severity_hint": "medium",
+      "evidence": "`send_social_picks.py:116` calls `get_recent_live_update_feed_items(guild_id=int(guild_id), live_channel_id=int(live_channel_id), limit=limit)` — it uses keywords, so it may survive a trailing `environment` arg. But if `environment` is inserted before existing params or made positional, it will break."
+    },
+    {
+      "id": "FLAG-003",
+      "concern": "`self.dry_run` is referenced in `_publish_candidate`, `_resolve_top_channel_id`, `_resolve_art_channel_id`, and `_resolve_live_channel_id`. The plan deletes `dry_run` from constructors but does not clearly mandate replacing these references with `self.environment == 'dev'` checks. This will raise `AttributeError` at runtime.",
+      "category": "correctness",
+      "severity_hint": "high",
+      "evidence": "`live_top_creations.py:326` (`if self.dry_run:`), `live_top_creations.py:404` (`if self.dry_run:`), `live_top_creations.py:434` (`if self.dry_run:`), `live_update_editor.py:1347` (`if self.dry_run:`). The plan only mentions removing the `run_once` short-circuits and collapsing `_resolve_top_channel_id`."
+    },
+    {
+      "id": "FLAG-004",
+      "concern": "Checkpoint and duplicate-state upserts use single-column `on_conflict` keys (`checkpoint_key`, `duplicate_key`). Adding `environment` to the payload without changing the DB unique constraints means dev upserts will match and overwrite prod rows (or vice versa). The migration must change unique constraints to `(environment, checkpoint_key)` and `(environment, duplicate_key)`.",
+      "category": "correctness",
+      "severity_hint": "high",
+      "evidence": "`storage_handler.py:858` uses `_upsert_live_row('live_update_checkpoints', ..., on_conflict='checkpoint_key')`; `storage_handler.py:827` uses `on_conflict='duplicate_key'`; `storage_handler.py:1848` uses `on_conflict='checkpoint_key'` for top-creation checkpoints."
+    },
+    {
+      "id": "FLAG-005",
+      "concern": "`store_live_top_creation_post`, `upsert_live_update_editorial_memory`, and `upsert_live_update_watchlist` perform manual pre-insert lookups (`duplicate_key`+`guild_id`, `memory_key`+`guild_id`, `watch_key`+`guild_id`) to decide update-vs-insert. None of these lookups are scoped by `environment` in the plan, so a dev run could update an existing prod row instead of inserting a separate dev row.",
+      "category": "correctness",
+      "severity_hint": "high",
+      "evidence": "`storage_handler.py:1810-1817` queries `live_top_creation_posts` by `duplicate_key` and `guild_id`; `storage_handler.py:1673-1680` queries `live_update_editorial_memory` by `memory_key` and `guild_id`; `storage_handler.py:1726-1734` queries `live_update_watchlist` by `watch_key` and `guild_id`."
+    }
+  ],
+  "verified_flag_ids": [],
+  "disputed_flag_ids": []
+}

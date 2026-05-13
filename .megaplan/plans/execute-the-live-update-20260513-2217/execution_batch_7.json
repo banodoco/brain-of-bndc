@@ -1,0 +1,57 @@
+{
+  "output": "Batch 7 completed for T8. Implemented topic-editor dispatcher invariants and checkpointed the batch result to `.megaplan/plans/execute-the-live-update-20260513-2217/execution_batch_7.json`. Focused tests pass; full suite still fails only on the four previously observed legacy live-update tests.",
+  "files_changed": [
+    "src/features/summarising/topic_editor.py",
+    "tests/test_topic_editor_runtime.py",
+    ".megaplan/plans/execute-the-live-update-20260513-2217/execution_batch_7.json"
+  ],
+  "commands_run": [
+    "python -m py_compile src/features/summarising/topic_editor.py tests/test_topic_editor_runtime.py",
+    "pytest --tb=short -q --no-header tests/test_topic_editor_runtime.py tests/test_topic_editor_core.py tests/test_live_storage_wrappers.py",
+    "pytest --tb=no -q --no-header",
+    "rg -n \"rejected_update_sources|rejected_discard\" src/features/summarising/topic_editor.py tests/test_topic_editor_runtime.py .migrations_staging/20260513230500_live_update_topic_editor_phase1.sql",
+    "git diff --check -- src/features/summarising/topic_editor.py tests/test_topic_editor_runtime.py",
+    "python -m json.tool .megaplan/plans/execute-the-live-update-20260513-2217/execution_batch_7.json >/dev/null"
+  ],
+  "deviations": [
+    "Full test suite still fails with the four previously observed live-update failures: tests/test_live_top_creations.py::test_live_top_creations_dev_env_posts_and_persists_state, tests/test_live_update_editor_publishing.py::test_live_update_dev_env_posts_and_persists_with_environment_dev, tests/test_live_update_editor_publishing.py::test_live_update_dev_env_resolves_dev_live_update_channel_id, and tests/test_live_update_prompts.py::test_llm_prompt_exposes_agent_budget_and_media_reaction_guidance.",
+    "The no-forbidden-actions grep finds only the test assertion that verifies `rejected_update_sources` and `rejected_discard` are absent from emitted actions; production topic editor and migration SQL do not introduce those actions.",
+    "Advisory quality: tests/test_topic_editor_runtime.py has similar functions store_editorial_observation and update_topic (100% similarity).",
+    "Advisory observation mismatch: executor claimed files not observed in git status/content hash delta: .megaplan/plans/execute-the-live-update-20260513-2217/execution_batch_7.json",
+    "Advisory audit finding: Executor claimed changed files not present in git status: ../supabase/migrations/20260512185328_live_update_watchlist_lifecycle.sql, .migrations_staging/20260513230500_live_update_topic_editor_phase1.sql, .migrations_staging/README.md",
+    "Advisory audit finding: Git status shows changed files not claimed by any task: .claude/scheduled_tasks.lock, .megaplan/briefs/, .megaplan/debt.json, .megaplan/plans/build-phase-1-of-the-live-20260513-1821/, .megaplan/plans/build-phase-1-of-the-live-20260513-1822/, .megaplan/plans/execute-the-live-update-20260513-2216/, .megaplan/plans/implement-the-watchlist-20260512-1809/, .megaplan/plans/live-update-environment-split/, .megaplan/plans/produce-the-phase-2-prod-20260513-1821/, .megaplan/plans/produce-the-phase-2-prod-20260513-1822/, .megaplan/schemas/directors_notes.json, .megaplan/schemas/execution_doc.json, .megaplan/schemas/feedback.json, .megaplan/schemas/finalize.json, .megaplan/schemas/review.json, .megaplan/schemas/revise.json, docs/debug-utility-validation.md, docs/live-editor-watchlist-plan.md, docs/live-update-editor-legacy-boundaries.md, docs/live-update-editor-phase-2-runbook.md, docs/live-update-editor-redesign.md, docs/live-update-editor-sprint-plan.md, main.py, scripts/backfill_guild_ids.py, scripts/debug.py, scripts/debug_live_editor_audit.py, scripts/discord_tools.py, scripts/inspect_editor_reasoning.py, scripts/run_live_update_dev.py, scripts/send_social_picks.py, src/features/admin/admin_cog.py, src/features/admin_chat/agent.py, src/features/admin_chat/tools.py, src/features/archive/archive_cog.py, src/features/gating/intro_embed.py, src/features/health/health_check_cog.py, src/features/summarising/live_top_creations.py, src/features/summarising/live_update_editor.py, src/features/summarising/live_update_prompts.py, src/features/summarising/summariser.py, src/features/summarising/summariser_cog.py, structure.md, tests/test_live_admin_health.py, tests/test_live_runtime_wiring.py, tests/test_live_top_creations.py, tests/test_live_update_editor_lifecycle.py, tests/test_live_update_editor_publishing.py, tests/test_live_update_prompts.py, tests/test_social_route_tools.py",
+    "Advisory audit finding: Sense check SC9 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC10 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC11 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC12 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC13 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC14 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC15 is missing an executor acknowledgment.",
+    "Advisory audit finding: Tasks left pending after execute (executor never started them): T9, T10, T11, T12, T13, T14, T15"
+  ],
+  "task_updates": [
+    {
+      "task_id": "T8",
+      "status": "done",
+      "executor_notes": "Implemented dispatcher invariants in `TopicEditor`: `(run_id, tool_call_id)` duplicate calls short-circuit before write side effects; `post_simple_topic` rejects multi-author or 3+ source clusters as `rejected_post_simple`; post/watch writes run canonical-key/alias/headline collision detection and write `rejected_post_simple`, `rejected_post_sectioned`, or `rejected_watch` unless all collisions are overridden; accepted overrides log `override` rows; source IDs are deduped before topic_source writes; invalid `update_topic_source_messages` and `discard_topic` write base-action `update_sources`/`discard` rows with `payload.outcome='tool_error'`; valid update/discard/observation/create paths still write accepted transition rows; `record_observation` guidance now states the 3/run cap and dispatch stores only the first three observations. Focused tests cover all T8 invariants and pass. Full suite was rerun and only the four previously observed legacy live-update failures remain.",
+      "files_changed": [
+        "src/features/summarising/topic_editor.py",
+        "tests/test_topic_editor_runtime.py"
+      ],
+      "commands_run": [
+        "python -m py_compile src/features/summarising/topic_editor.py tests/test_topic_editor_runtime.py",
+        "pytest --tb=short -q --no-header tests/test_topic_editor_runtime.py tests/test_topic_editor_core.py tests/test_live_storage_wrappers.py",
+        "pytest --tb=no -q --no-header",
+        "rg -n \"rejected_update_sources|rejected_discard\" src/features/summarising/topic_editor.py tests/test_topic_editor_runtime.py .migrations_staging/20260513230500_live_update_topic_editor_phase1.sql",
+        "git diff --check -- src/features/summarising/topic_editor.py tests/test_topic_editor_runtime.py"
+      ],
+      "auto_attributed_files": null
+    }
+  ],
+  "sense_check_acknowledgments": [
+    {
+      "sense_check_id": "SC8",
+      "executor_note": "Yes. Duplicate tool-call ids short-circuit before side effects; invalid update/discard calls are audited as base `update_sources`/`discard` actions with `payload.outcome='tool_error'`; no `rejected_update_sources` or `rejected_discard` actions are introduced."
+    }
+  ]
+}

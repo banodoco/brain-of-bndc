@@ -1,0 +1,97 @@
+{
+  "version": 1,
+  "timestamp": "2026-05-13T21:49:38Z",
+  "hash": "sha256:6adc02a97b9c4681864a99ff0f88c4e6c3d82d3d3296c2473040313217abd5b0",
+  "questions": [
+    "Should the structured backfill parity report live under `reports/`, or is there an existing project-preferred artifact directory for validation outputs?",
+    "When expiring stale leases, should old running rows be marked `failed` or `skipped`? I will default to `failed` because a crashed runner is an abnormal termination."
+  ],
+  "success_criteria": [
+    {
+      "criterion": "The two `20260513230500_live_update_topic_editor_phase1.sql` migration copies are updated identically for `tool_call_sequence`, revised transition uniqueness, and stale lease expiry support.",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "A create/watch tool call with collision override persists both the accepted transition and override audit transition for the same Anthropic `tool_use_id` without violating uniqueness.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "Replaying the same write tool call after a simulated process restart returns the prior DB-stored result and performs no duplicate topic/source/transition side effects.",
+      "priority": "must",
+      "requires": [
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "Lease acquisition steals only stale running leases older than the configured timeout and still rejects active non-expired concurrent leases.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "`TOPIC_EDITOR_LEASE_TIMEOUT_MINUTES` controls the lease timeout and defaults to 30 minutes when unset.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Prod backfill parity is run in dry-run/read-only mode and a structured report records legacy feed/watchlist counts versus generated posted/watching topic counts and mismatches.",
+      "priority": "must",
+      "requires": [
+        "run_shell",
+        "read_build_output",
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "No changes are made to `src/features/summarising/live_update_editor.py` or `src/features/summarising/live_update_prompts.py`.",
+      "priority": "must",
+      "requires": [
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "Existing focused topic-editor tests remain green after the patch.",
+      "priority": "must",
+      "requires": [
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "The idempotency implementation keeps one canonical replay row per write tool call while allowing extra audit rows for distinct events such as overrides.",
+      "priority": "should",
+      "requires": [
+        "read_files",
+        "subjective_judgment"
+      ]
+    },
+    {
+      "criterion": "Backfill report output is easy for a reviewer to diff or parse without reading terminal logs.",
+      "priority": "should",
+      "requires": [
+        "read_files",
+        "subjective_judgment"
+      ]
+    }
+  ],
+  "assumptions": [
+    "The redesign doc\u2019s audit-trail requirement is authoritative, so the plan uses a sequence column rather than updating a rejected row in place.",
+    "The canonical idempotency result row is the transition with `tool_call_sequence = 0`; override rows use positive sequence values and are audit-only for replay purposes.",
+    "The prod Supabase credentials needed for the dry-run parity command are available in the local environment or `.env`.",
+    "Marking expired crashed leases as `failed` is acceptable unless the user prefers `skipped`.",
+    "Read-only tool calls do not need persisted replay because they have no write side effects and the explicit issue is double-execution of write tools."
+  ],
+  "structure_warnings": []
+}

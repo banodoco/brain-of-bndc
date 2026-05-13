@@ -1,0 +1,591 @@
+{
+  "name": "build-phase-1-of-the-live-20260513-1822",
+  "idea": "Build Phase 1 of the live-update editor redesign described in docs/live-update-editor-redesign.md (v6): a shadow-mode dev vertical slice with publishing OFF. Implement the 5-table schema (topics with publication columns, topic_sources, topic_aliases, topic_transitions, editorial_observations) plus the native Anthropic tool-use editor with 4 read tools + 6 decision tools, all 4 dispatcher invariants including the v6 collision-override path, and a pure publisher that posts comparison trace embeds in #main_test. Before any code, resolve the 5 locked decisions (canonicalizer algorithm with fuzz against historical headlines; editorial_observations retention policy; collision similarity threshold + override semantics; rejected-call logging shape \u2014 confirm topic_transitions single-table; defer audit on live live_update_candidates and decide whether pending_review is Day-1 schema). Build the runner to replay 20+ recent source-message windows from the prod archive against the new editor with publishing disabled, and post comparison trace embeds (source-message count, tool calls fired, topics posted/watched/updated/discarded, near-miss observations, cost, latency, divergence vs today's editor). Phase 2 prod cutover is explicitly OUT OF SCOPE \u2014 stop at the shadow-mode decision gate.",
+  "current_state": "aborted",
+  "iteration": 3,
+  "created_at": "2026-05-13T16:22:49Z",
+  "config": {
+    "project_dir": "/Users/peteromalley/Documents/banodoco-workspace/brain-of-bndc",
+    "auto_approve": true,
+    "robustness": "standard",
+    "mode": "code",
+    "strict_notes": false,
+    "agent": "",
+    "profile": "all-codex",
+    "depth": "medium",
+    "with_prep": true,
+    "from_doc": "docs/live-update-editor-redesign.md",
+    "phase_model": [
+      "plan=claude:medium",
+      "prep=claude",
+      "critique=claude",
+      "revise=claude:medium",
+      "gate=claude",
+      "finalize=claude",
+      "execute=claude",
+      "loop_plan=claude:medium",
+      "loop_execute=claude",
+      "review=claude",
+      "tiebreaker_researcher=claude:medium",
+      "tiebreaker_challenger=claude:medium",
+      "feedback=claude:low"
+    ]
+  },
+  "sessions": {
+    "claude_prep": {
+      "id": "4454e446-e954-4501-9858-72c444be916f",
+      "mode": "persistent",
+      "created_at": "2026-05-13T16:33:01Z",
+      "last_used_at": "2026-05-13T16:33:01Z",
+      "refreshed": false
+    },
+    "claude_planner": {
+      "id": "53d83b71-34ab-4cd0-a2b2-a11ea3ccb1c1",
+      "mode": "persistent",
+      "created_at": "2026-05-13T16:34:43Z",
+      "last_used_at": "2026-05-13T16:55:01Z",
+      "refreshed": false
+    },
+    "claude_critic": {
+      "id": "0b8577eb-c5c0-4624-afe6-7f8e1b9e7a82",
+      "mode": "persistent",
+      "created_at": "2026-05-13T16:42:03Z",
+      "last_used_at": "2026-05-13T16:57:05Z",
+      "refreshed": false
+    },
+    "claude_gatekeeper": {
+      "id": "e93b948e-d646-4e04-8318-e86de6b23137",
+      "mode": "persistent",
+      "created_at": "2026-05-13T16:43:21Z",
+      "last_used_at": "2026-05-13T16:59:19Z",
+      "refreshed": false
+    },
+    "claude_finalizer": {
+      "id": "52c502df-307a-476c-bb48-03adf5e65fe6",
+      "mode": "persistent",
+      "created_at": "2026-05-13T17:02:14Z",
+      "last_used_at": "2026-05-13T17:02:14Z",
+      "refreshed": false
+    },
+    "claude_executor": {
+      "id": "53fddd34-0949-4468-8611-3c646a7393b3",
+      "mode": "persistent",
+      "created_at": "2026-05-13T17:03:04Z",
+      "last_used_at": "2026-05-13T17:03:04Z",
+      "refreshed": false
+    }
+  },
+  "plan_versions": [
+    {
+      "version": 1,
+      "file": "plan_v1.md",
+      "hash": "sha256:4136ab72994213ce8c72645287a85436856ca116cdf6ff2128ec7f0a5b04ca6b",
+      "timestamp": "2026-05-13T16:34:43Z"
+    },
+    {
+      "version": 2,
+      "file": "plan_v2.md",
+      "hash": "sha256:ba62f2fc458780f142d104171a10495fd2b3770f1a8f85f7631dde3d1b89c434",
+      "timestamp": "2026-05-13T16:48:32Z"
+    },
+    {
+      "version": 3,
+      "file": "plan_v3.md",
+      "hash": "sha256:e63daf8613630931b5b343907f0059d94b4998b7c7113847d677d08769b34bc6",
+      "timestamp": "2026-05-13T16:55:01Z"
+    }
+  ],
+  "history": [
+    {
+      "step": "init",
+      "timestamp": "2026-05-13T16:22:49Z",
+      "duration_ms": 0,
+      "cost_usd": 0.0,
+      "result": "success",
+      "environment": {
+        "claude": true,
+        "codex": true
+      }
+    },
+    {
+      "step": "prep",
+      "timestamp": "2026-05-13T16:33:01Z",
+      "duration_ms": 605083,
+      "cost_usd": 3.53727025,
+      "result": "success",
+      "prompt_tokens": 2199191,
+      "completion_tokens": 62388,
+      "total_tokens": 2261579,
+      "session_mode": "persistent",
+      "session_id": "4454e446-e954-4501-9858-72c444be916f",
+      "agent": "claude",
+      "output_file": "prep.json",
+      "artifact_hash": "sha256:7b29ce6b3a00021a9e8a1824693b9a76c030211a4ab87f47a0869702515b6ea6"
+    },
+    {
+      "step": "plan",
+      "timestamp": "2026-05-13T16:34:43Z",
+      "duration_ms": 99866,
+      "cost_usd": 0.7050447500000001,
+      "result": "success",
+      "prompt_tokens": 162587,
+      "completion_tokens": 9768,
+      "total_tokens": 172355,
+      "session_mode": "persistent",
+      "session_id": "53d83b71-34ab-4cd0-a2b2-a11ea3ccb1c1",
+      "agent": "claude",
+      "output_file": "plan_v1.md",
+      "artifact_hash": "sha256:4136ab72994213ce8c72645287a85436856ca116cdf6ff2128ec7f0a5b04ca6b"
+    },
+    {
+      "step": "critique",
+      "timestamp": "2026-05-13T16:42:03Z",
+      "duration_ms": 438718,
+      "cost_usd": 2.6668232499999993,
+      "result": "success",
+      "prompt_tokens": 1772922,
+      "completion_tokens": 45022,
+      "total_tokens": 1817944,
+      "session_mode": "persistent",
+      "session_id": "0b8577eb-c5c0-4624-afe6-7f8e1b9e7a82",
+      "agent": "claude",
+      "output_file": "critique_v1.json",
+      "artifact_hash": "sha256:718e138019f39ff8cda4cddfc6a2681e9ff7822e9d4100767ea6dc877a3cf9bf",
+      "flags_count": 23
+    },
+    {
+      "step": "gate",
+      "timestamp": "2026-05-13T16:43:21Z",
+      "duration_ms": 76539,
+      "cost_usd": 0.6856214999999999,
+      "result": "success",
+      "prompt_tokens": 227481,
+      "completion_tokens": 7879,
+      "total_tokens": 235360,
+      "session_mode": "persistent",
+      "session_id": "e93b948e-d646-4e04-8318-e86de6b23137",
+      "agent": "claude",
+      "output_file": "gate.json",
+      "artifact_hash": "sha256:e47f9d9a95d620e19e37fc9182f2a0a6645d7bcd96a3ddcdb2122301a5573aaa",
+      "recommendation": "ITERATE"
+    },
+    {
+      "step": "revise",
+      "timestamp": "2026-05-13T16:48:32Z",
+      "duration_ms": 309300,
+      "cost_usd": 2.115555,
+      "result": "success",
+      "prompt_tokens": 728092,
+      "completion_tokens": 36569,
+      "total_tokens": 764661,
+      "session_mode": "persistent",
+      "session_id": "53d83b71-34ab-4cd0-a2b2-a11ea3ccb1c1",
+      "agent": "claude",
+      "output_file": "plan_v2.md",
+      "artifact_hash": "sha256:ba62f2fc458780f142d104171a10495fd2b3770f1a8f85f7631dde3d1b89c434",
+      "flags_addressed": [
+        {
+          "id": "FLAG-001",
+          "resolution": "addressed",
+          "reason": "Step 2 adds new `topic_editor_runs` table; Step 8.1 inserts only there. Reuse fallback removed."
+        },
+        {
+          "id": "FLAG-002",
+          "resolution": "addressed",
+          "reason": "Step 4 Python backfill script replaces SQL backfill; Step 2.5 removes backfill SQL from the migration."
+        },
+        {
+          "id": "FLAG-003",
+          "resolution": "addressed",
+          "reason": "Step 11 adds in-memory fake-store fixture matching the existing conftest.py stub pattern; tests do not require .migrations_staging/ apply."
+        },
+        {
+          "id": "FLAG-004",
+          "resolution": "addressed",
+          "reason": "Step 6.3 mandates env-scoped reads with `cross_env=False` as the only escape; Step 7.2 reiterates dispatcher-level env scoping."
+        },
+        {
+          "id": "issue_hints",
+          "resolution": "addressed",
+          "reason": "Same as FLAG-001 \u2014 new editor writes only to the 6 new tables."
+        },
+        {
+          "id": "correctness-1",
+          "resolution": "addressed",
+          "reason": "Step 4 calls canonicalize() in Python after migration apply; SQL never derives canonical_key."
+        },
+        {
+          "id": "correctness-2",
+          "resolution": "addressed",
+          "reason": "Step 4.2 resolves source_authors via get_live_update_context_for_message_ids."
+        },
+        {
+          "id": "correctness-3",
+          "resolution": "addressed",
+          "reason": "Step 4.2 parses JSONB in Python and inserts bigint topic_sources rows individually."
+        },
+        {
+          "id": "correctness-4",
+          "resolution": "addressed",
+          "reason": "Step 7.2 _resolve_authors derives distinct_authors from the archive, not tool args."
+        },
+        {
+          "id": "scope-1",
+          "resolution": "addressed",
+          "reason": "Step 8.3 and Overview explicitly mark concurrent-run lease as deferred to Phase 1.5; trace embed shows `lease: DEFERRED`."
+        },
+        {
+          "id": "scope-2",
+          "resolution": "addressed",
+          "reason": "Step 7.1 states search_topics is env-scoped at the dispatcher; no cross-env access on the agent surface."
+        },
+        {
+          "id": "scope-3",
+          "resolution": "addressed",
+          "reason": "Step 7.2 Inv 2 enumerates the similarity-scan read path: search_topics_by_headline + topic_sources join + authoritative archive authors."
+        },
+        {
+          "id": "all_locations-1",
+          "resolution": "addressed",
+          "reason": "Step 11 adds tests/fakes/topic_store.py + conftest fixture; no live DB needed for fail_to_pass tests."
+        },
+        {
+          "id": "all_locations-2",
+          "resolution": "addressed",
+          "reason": "Step 6.1 + 6.2 enumerate every db_handler.py accessor and require a matching storage_handler.py counterpart."
+        },
+        {
+          "id": "all_locations-3",
+          "resolution": "addressed",
+          "reason": "Step 6.3 mandates env-scoped reads; Step 7.2 reuses them for the collision scan."
+        },
+        {
+          "id": "all_locations-4",
+          "resolution": "addressed",
+          "reason": "Step 6.1 adds get_topic_transition_rates for rolling metrics; Step 10.1 wires it into the trace embed."
+        },
+        {
+          "id": "callers-1",
+          "resolution": "addressed",
+          "reason": "Same as FLAG-001 \u2014 fallback removed; new editor only inserts to topic_editor_runs."
+        },
+        {
+          "id": "callers-2",
+          "resolution": "addressed",
+          "reason": "Step 7.2 _resolve_authors derives distinct_authors from the archive, not tool args."
+        },
+        {
+          "id": "callers-3",
+          "resolution": "addressed",
+          "reason": "Step 3.1 makes source_messages optional with headline-only fallback; Step 4 resolves messages from the archive in Python before calling canonicalize()."
+        }
+      ]
+    },
+    {
+      "step": "critique",
+      "timestamp": "2026-05-13T16:51:56Z",
+      "duration_ms": 202533,
+      "cost_usd": 1.6209265,
+      "result": "success",
+      "prompt_tokens": 1581963,
+      "completion_tokens": 18559,
+      "total_tokens": 1600522,
+      "session_mode": "persistent",
+      "session_id": "0b8577eb-c5c0-4624-afe6-7f8e1b9e7a82",
+      "agent": "claude",
+      "output_file": "critique_v2.json",
+      "artifact_hash": "sha256:3c6eb0375eed5dd038bdc02af2faafba8bfcd3dbae940e784dd3ab3e79c5d132",
+      "flags_count": 22
+    },
+    {
+      "step": "gate",
+      "timestamp": "2026-05-13T16:53:01Z",
+      "duration_ms": 62831,
+      "cost_usd": 0.6076655,
+      "result": "success",
+      "prompt_tokens": 268896,
+      "completion_tokens": 5627,
+      "total_tokens": 274523,
+      "session_mode": "persistent",
+      "session_id": "e93b948e-d646-4e04-8318-e86de6b23137",
+      "agent": "claude",
+      "output_file": "gate.json",
+      "artifact_hash": "sha256:64ce4822bd871f49f4c7a9228ec7b504405cc9ca1ac7290d986dd16a979a38f5",
+      "recommendation": "ITERATE"
+    },
+    {
+      "step": "revise",
+      "timestamp": "2026-05-13T16:55:01Z",
+      "duration_ms": 118804,
+      "cost_usd": 0.88827825,
+      "result": "success",
+      "prompt_tokens": 410721,
+      "completion_tokens": 12224,
+      "total_tokens": 422945,
+      "session_mode": "persistent",
+      "session_id": "53d83b71-34ab-4cd0-a2b2-a11ea3ccb1c1",
+      "agent": "claude",
+      "output_file": "plan_v3.md",
+      "artifact_hash": "sha256:e63daf8613630931b5b343907f0059d94b4998b7c7113847d677d08769b34bc6",
+      "flags_addressed": [
+        {
+          "id": "correctness-1",
+          "resolution": "addressed",
+          "reason": "Step 6.1 adds new lean `get_message_author_ids` accessor; Step 7.2 dispatcher uses it on the hot path. Heavy context accessor stays for prompt assembly only."
+        },
+        {
+          "id": "correctness-2",
+          "resolution": "addressed",
+          "reason": "Step 1.2 + Step 3.4 introduce `tests/fixtures/similarity_pairs.json` pinned-oracle generated from real pg_trgm; threshold tuning asserts against the oracle, not difflib."
+        },
+        {
+          "id": "correctness-3",
+          "resolution": "addressed",
+          "reason": "Step 4.1 filters backfill to `status='posted' AND len(discord_message_ids) > 0`."
+        },
+        {
+          "id": "scope-1",
+          "resolution": "addressed",
+          "reason": "Step 6.3 + Overview explicitly limit the env-scoping invariant to new topic_* tables; existing live_update_* accessors are not modified."
+        },
+        {
+          "id": "scope-2",
+          "resolution": "addressed",
+          "reason": "Step 12.3 explicitly marks the live_update_* read as telemetry-only that never feeds dispatcher state."
+        },
+        {
+          "id": "all_locations-1",
+          "resolution": "addressed",
+          "reason": "Step 11 rescoped to Medium; stateful in-memory shim with UNIQUE enforcement, alias indexes, idempotency keys, transitions log \u2014 no longer framed as aligned with the stateless conftest stub idiom."
+        },
+        {
+          "id": "all_locations-2",
+          "resolution": "addressed",
+          "reason": "Step 2.3 declares `topic_transitions.run_id REFERENCES topic_editor_runs(run_id) ON DELETE RESTRICT` so orphan run_ids cannot enter the audit log."
+        },
+        {
+          "id": "all_locations-3",
+          "resolution": "addressed",
+          "reason": "Step 11.1 specifies the fake intercepts at the `DatabaseHandler` seam (production parity), not the StorageHandler lower layer."
+        },
+        {
+          "id": "callers-1",
+          "resolution": "addressed",
+          "reason": "Step 6.1 introduces `get_message_author_ids`; Step 4.2 + Step 7.2 both use it instead of the heavy context accessor, decoupling them from prompt-assembly contract changes."
+        },
+        {
+          "id": "callers-2",
+          "resolution": "addressed",
+          "reason": "Step 12.2 mandates two named env knobs `--archive-env prod` and `--topic-env dev` with explicit roles and trace-embed header surfacing."
+        },
+        {
+          "id": "callers-3",
+          "resolution": "addressed",
+          "reason": "Step 11.2 makes a caller-map docstring mandatory in `tests/fakes/topic_store.py`: every fake method \u2194 production DatabaseHandler accessor, with signature + return shape."
+        },
+        {
+          "id": "issue_hints-1",
+          "resolution": "addressed",
+          "reason": "Overview now explicitly flags the 6-vs-5-table count as a deliberate scope expansion required by the writes-ONLY-to-new-tables constraint."
+        },
+        {
+          "id": "issue_hints-2",
+          "resolution": "addressed",
+          "reason": "Step 1.4 adds the explicit defer-audit conditional branch: if \u22655/week acted-upon defers, append `state='pending_review'` to Step 2 DDL and `request_review_topic` to Step 7 tools before SQL freeze; otherwise defer to v2."
+        }
+      ]
+    },
+    {
+      "step": "critique",
+      "timestamp": "2026-05-13T16:57:05Z",
+      "duration_ms": 122162,
+      "cost_usd": 2.1112095,
+      "result": "success",
+      "prompt_tokens": 1173455,
+      "completion_tokens": 9946,
+      "total_tokens": 1183401,
+      "session_mode": "persistent",
+      "session_id": "0b8577eb-c5c0-4624-afe6-7f8e1b9e7a82",
+      "agent": "claude",
+      "output_file": "critique_v3.json",
+      "artifact_hash": "sha256:954af6b1745cbf77ada36b4beb8ee5a7a7416ce2f9fa22b52ede9226ae6adf26",
+      "flags_count": 12
+    },
+    {
+      "step": "gate",
+      "timestamp": "2026-05-13T16:59:19Z",
+      "duration_ms": 132877,
+      "cost_usd": 1.62503525,
+      "result": "success",
+      "prompt_tokens": 416767,
+      "completion_tokens": 11827,
+      "total_tokens": 428594,
+      "session_mode": "persistent",
+      "session_id": "e93b948e-d646-4e04-8318-e86de6b23137",
+      "agent": "claude",
+      "output_file": "gate.json",
+      "artifact_hash": "sha256:a6404dd725c6c2d62d2d39e4b8b918b6ae39e71690dbc527124e2eb793f7bf36",
+      "recommendation": "PROCEED"
+    },
+    {
+      "step": "finalize",
+      "timestamp": "2026-05-13T17:02:14Z",
+      "duration_ms": 168630,
+      "cost_usd": 1.2497197500000001,
+      "result": "success",
+      "prompt_tokens": 244906,
+      "completion_tokens": 17217,
+      "total_tokens": 262123,
+      "session_mode": "persistent",
+      "session_id": "52c502df-307a-476c-bb48-03adf5e65fe6",
+      "agent": "claude",
+      "output_file": "finalize.json",
+      "artifact_hash": "sha256:1a93691fb0205f16eebd1f8eb4fb41a42f8089aab5dfcb201bed1ae2af902083"
+    },
+    {
+      "step": "execute",
+      "timestamp": "2026-05-13T17:03:04Z",
+      "duration_ms": 48656,
+      "cost_usd": 0.6546592499999999,
+      "result": "blocked",
+      "session_mode": "persistent",
+      "session_id": "53fddd34-0949-4468-8611-3c646a7393b3",
+      "agent": "claude",
+      "output_file": "execution.json",
+      "artifact_hash": "sha256:bffb80d1f58d0ff67282733de801a9a1ec9b5c755947fb71e5d925d2bb59699a",
+      "finalize_hash": "sha256:52a57c0516072b8fb7d6dee0f3dad4c4e3b69be2d31fab1bba9ce8b2d26ba809",
+      "approval_mode": "auto_approve"
+    }
+  ],
+  "meta": {
+    "significant_counts": [
+      19,
+      18,
+      21
+    ],
+    "weighted_scores": [
+      27.5,
+      25.0,
+      31.0
+    ],
+    "plan_deltas": [
+      51.03,
+      45.77
+    ],
+    "recurring_critiques": [
+      [],
+      [],
+      []
+    ],
+    "total_cost_usd": 18.467806,
+    "overrides": [
+      {
+        "action": "abort",
+        "timestamp": "2026-05-13T20:16:28Z",
+        "reason": "superseded by unified sprint plan with no validation gates; checkpoint contract added"
+      }
+    ],
+    "notes": [],
+    "imported_decisions": [],
+    "current_invocation_id": "b807abd77ccd432f",
+    "user_approved_gate": true
+  },
+  "last_gate": {
+    "recommendation": "PROCEED",
+    "rationale": "Three rounds of revision have resolved 15 of the original 19 flags. The score regressed from 25.0 to 31.0 in iter 3 because the deeper review surfaced new sibling concerns from the fixes themselves (FK coupling raised by the FK fix; missing-message contract raised by the lean accessor; difflib leakage raised by the oracle fixture) \u2014 not because the plan got worse. None of the remaining 6 net-new open flags is architectural; all six are small contract-spec or test-guardrail items that the implementer can resolve in code. Crucially, this is a shadow-mode dev vertical slice with publishing OFF and only new-table writes \u2014 the blast radius of any imperfection in the remaining flags is \"trace embed shows slightly off data\" or \"corner case logs differently,\" not \"production breaks.\" Continuing to iterate is making the plan worse (score going up); fourth-round critique pressure will likely surface another tier of even-finer concerns from rev-4 fixes. Cleanest path: ship the plan, let the implementer make the small judgment calls (treat missing message_id as tool-error; abort run loudly on FK insert failure; cite pg_trgm fixture gen as explicit Phase 0 prereq; add test-side guardrail asserting threshold-test pairs are oracle-covered; document borderline defer-audit volume as \"defer to v2 unless POM intervenes\"; spec lean-accessor contract for missing/dup/null author behavior in the docstring), and surface anything genuinely surprising at the Week-1 decision gate where there's a human review checkpoint already built in. The 15 \"addressed-but-not-verified\" flags from prior rounds map to concrete rev-3 edits I can cite. Iteration Pressure shows 0 reopened flags \u2014 no churn pattern; the loop is converging on the long tail of nitpicks, not stalling on a real tension.",
+    "reprompted": false,
+    "signals_assessment": "Three iterations: 27.5 \u2192 25.0 \u2192 31.0. Score regression in iter 3 is a critique-depth artifact (new flags raised by deeper review of rev-2 fixes), not plan regression \u2014 14 cumulative resolutions, plan delta 51% \u2192 46%, 0 flags ever reopened. Open count grew from 18 to 21, but 15 of those carry status='addressed' tied to concrete rev-3 changes (FK declared, oracle pinned, fake-store rescoped + DatabaseHandler seam + caller-map docstring, two env knobs, env-scoping boundary scoped to new tables only, telemetry-only read assertion). The 6 genuinely-new open flags are all minor contract/guardrail items appropriate for implementer judgment. Preflight clean. Iteration Pressure: FG-002 has 2 flags across 4 iterations \u2014 meets the literal TIEBREAKER bar but addressed_then_reopened_count is 0, so it is a chain of new sibling critiques, not architectural deadlock. Continuing the loop is more likely to produce new sibling flags than convergence; shadow-mode + publishing-OFF scope makes the residual risk small enough to ship.",
+    "warnings": [
+      "Implementer must make six concrete judgment calls during execution and document them in the locked-decisions doc: (1) lean accessor contract on missing message_id \u2014 fail the dispatch as a tool-error; (2) FK coupling on run-insert failure \u2014 abort run_once loudly and surface in caller logs; (3) pg_trgm fixture generation \u2014 use dev Supabase or local Postgres-with-pg_trgm; explicit Phase 0 prereq, not assumption; (4) difflib fallback in fake store \u2014 add `tests/conftest.py` guardrail asserting every pair used in threshold tests is oracle-covered; (5) borderline defer-audit (3-5/week acted-upon) \u2014 defer to v2 unless POM explicitly intervenes; (6) lean accessor on duplicate message_ids \u2014 dedupe input; on author_id NULL (webhook/system) \u2014 count as distinct phantom author so multi-author guardrail does not silently fail open.",
+      "Week-1 decision gate is the explicit human review checkpoint where any unexpected behavior surfaces; treat the trace-embed override-rate / observation-rate / partial-publish-incidents trip-wires as the early-warning surface for anything missed by the remaining open flags.",
+      "LOC budget: 800-1000 target, 1500 alarm. With rev 3's additions (lean accessor, oracle test, FK, two env knobs, caller-map docstring, conditional pending_review branch), the budget is tighter than rev 1. Implementer should watch for creep especially in the fake store \u2014 if the stateful shim exceeds ~250 LOC it is a sign it has drifted toward a real Postgres-like implementation and a real test DB would be cheaper.",
+      "If rev-3 execution reveals that 3+ of the six implementer-judgment calls become contentious (i.e., POM wants the other answer), pause and run a focused mid-implementation review rather than carrying the divergence to the Week-1 gate."
+    ],
+    "settled_decisions": [
+      {
+        "id": "topic-editor-runs-new-table",
+        "decision": "New `topic_editor_runs` provenance table ships in the same migration as the 5 spec tables; the new editor never writes to `live_update_editor_runs`.",
+        "rationale": "Resolves FLAG-001 / issue_hints / callers-1; brief's hard write-isolation constraint. Locked in rev 2."
+      },
+      {
+        "id": "python-backfill-script",
+        "decision": "Backfill is a one-shot Python script (`scripts/backfill_topics_from_feed_items.py`) run after migration apply; migration DDL is backfill-free. Filters source rows to `status='posted' AND len(discord_message_ids) > 0`.",
+        "rationale": "Resolves FLAG-002 + correctness-3 (rev 2). Pure SQL cannot call canonicalize() or join the messages archive."
+      },
+      {
+        "id": "env-scoped-reads-on-new-tables-only",
+        "decision": "All NEW topic_* read accessors filter by (environment, guild_id) by default; `cross_env=False` is the only escape hatch. Existing `live_update_*` accessors are NOT touched.",
+        "rationale": "Resolves FLAG-004 and scope-1; the env-scoping invariant has a hard boundary at the new-table seam."
+      },
+      {
+        "id": "lean-author-accessor",
+        "decision": "Add a new lean `get_message_author_ids(message_ids) -> dict[int, int]` accessor; dispatcher hot path and backfill both use it instead of the heavy `get_live_update_context_for_message_ids`.",
+        "rationale": "Resolves correctness-1 / callers-1 (rev 2). Implementer: on missing message_id, return a tool-error; on duplicate message_ids, dedupe input; on author_id NULL, count as a distinct phantom author."
+      },
+      {
+        "id": "pinned-similarity-oracle",
+        "decision": "Threshold tuning uses `tests/fixtures/similarity_pairs.json`, a static oracle generated once from real `pg_trgm`. The fake-store difflib path is a retrieval placeholder only; threshold tests assert against oracle-covered pairs.",
+        "rationale": "Resolves correctness-2 (rev 2). Implementer adds a conftest guardrail asserting threshold-test pairs are oracle-covered (resolves all_locations)."
+      },
+      {
+        "id": "fake-store-databasehandler-seam",
+        "decision": "`tests/fakes/topic_store.py` is a stateful in-memory shim (Medium scope) intercepting at the DatabaseHandler seam; mandatory caller-map docstring listing each fake method \u2194 production accessor with signature + return shape.",
+        "rationale": "Resolves all_locations-1/3 + callers-3 (rev 2). StorageHandler-layer fakes are not needed since that layer is pure payload building."
+      },
+      {
+        "id": "topic-transitions-run-fk",
+        "decision": "Migration declares `topic_transitions.run_id REFERENCES topic_editor_runs(run_id) ON DELETE RESTRICT`. If `create_topic_editor_run` fails, `run_once` aborts loudly before dispatching any tools so no transitions are silently lost.",
+        "rationale": "Resolves all_locations-2 (rev 2) + correctness-2 (rev 3 follow-on). Audit-trail integrity > graceful degradation here."
+      },
+      {
+        "id": "trace-channel-new-env-var",
+        "decision": "New env var `DEV_SHADOW_TRACE_CHANNEL_ID` pointed at #main_test; not reusing `DEV_LIVE_UPDATE_CHANNEL_ID`.",
+        "rationale": "Avoids colliding with the existing reasoning-embed pipeline; carried from iter-1 gate Q1."
+      },
+      {
+        "id": "concurrent-run-lease-deferred",
+        "decision": "Concurrent-run lease (doc line 684 Phase-1 recommendation) is deferred to Phase 1.5; trace embed surfaces `lease: DEFERRED`.",
+        "rationale": "Shadow runner is single-instance for the Week-1 gate; deviation acknowledged in trace embeds."
+      },
+      {
+        "id": "pending-review-conditional",
+        "decision": "Default outcome: `pending_review` deferred to v2. Conditional branch: if Day-0 defer-audit shows >=5/week acted-upon defers, `state='pending_review'` + `request_review_topic` tool ship in Day-1 migration before SQL freeze. Borderline (3-5/week): defer to v2 unless POM intervenes.",
+        "rationale": "Resolves issue_hints-2 + issue_hints (rev 3). Threshold + borderline behavior both pinned."
+      },
+      {
+        "id": "shadow-runner-two-env-knobs",
+        "decision": "Shadow runner takes two named knobs `--archive-env prod` (read source messages + telemetry-only legacy reads) and `--topic-env dev` (write topic_* rows + topic_editor_runs); both surfaced in the trace-embed header.",
+        "rationale": "Resolves callers-2 (rev 2); prevents cross-wiring."
+      },
+      {
+        "id": "telemetry-only-legacy-reads",
+        "decision": "Shadow runner's reads of `live_update_candidates` / `live_update_feed_items` are telemetry-only for the divergence-vs-today field and never feed back into dispatcher state.",
+        "rationale": "Resolves scope-2 (rev 2); satisfies the brief's 'do not read for decisions' constraint."
+      },
+      {
+        "id": "scope-expansion-acknowledged",
+        "decision": "6 tables (5 spec + topic_editor_runs) is a deliberate scope expansion over the brief's literal '5-table' wording, required by the writes-ONLY-to-new-tables constraint. Surfaced in Overview and locked-decisions doc.",
+        "rationale": "Resolves issue_hints-1 (rev 2); not stealth drift."
+      },
+      {
+        "id": "phase-2-out-of-scope",
+        "decision": "Phase 2 prod cutover, full run-lease/checkpoint behavior, full partial-publish retry history, and `_legacy_*` renames remain OUT OF SCOPE. Stop at Week-1 shadow-mode decision gate.",
+        "rationale": "Brief constraint."
+      },
+      {
+        "id": "pg-trgm-fixture-prereq",
+        "decision": "Phase 0 explicit prerequisite checklist item: access to a Postgres-with-pg_trgm (local or dev Supabase) for one-time `similarity_pairs.json` generation. Phase 0 cannot complete without it.",
+        "rationale": "Resolves scope (rev 3); promotes the rev-2 assumption to an explicit prereq."
+      }
+    ],
+    "passed": true,
+    "preflight_results": {
+      "project_dir_exists": true,
+      "project_dir_writable": true,
+      "success_criteria_present": true,
+      "claude_available": true,
+      "codex_available": true
+    },
+    "orchestrator_guidance": "Plan passed gate and preflight. Proceed to finalize. Verify unresolved flags against the plan and project code before accepting."
+  }
+}

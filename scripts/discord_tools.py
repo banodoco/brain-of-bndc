@@ -514,7 +514,11 @@ def channels(days: int = 7, month: str = None,
 
 def summaries(days: int = 7, month: str = None,
               channel_id: int = None) -> List[Dict]:
-    """Get daily summaries from the bot."""
+    """Get legacy daily summary history from the bot.
+
+    Active overview state now lives in live_update_* tables; this helper is
+    retained for explicit legacy/backfill inspection.
+    """
     db = _supabase()
     q = db.table('daily_summaries').select('date, channel_id, short_summary') \
         .order('date', desc=True)
@@ -528,7 +532,11 @@ def summaries(days: int = 7, month: str = None,
         q = q.eq('channel_id', str(channel_id))
     if _get_active_guild_id():
         q = q.eq('guild_id', _get_active_guild_id())
-    return q.execute().data
+    rows = q.execute().data or []
+    for row in rows:
+        row['system'] = 'legacy_daily_summaries'
+        row['legacy_note'] = 'Use live_update_* tables for active overview state.'
+    return rows
 
 
 def get_member_id(username: str) -> Optional[str]:

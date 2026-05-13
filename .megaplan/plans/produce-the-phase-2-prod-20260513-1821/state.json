@@ -1,0 +1,102 @@
+{
+  "name": "produce-the-phase-2-prod-20260513-1821",
+  "idea": "Produce the Phase 2 prod cutover runbook at docs/live-update-editor-phase-2-runbook.md for the live-update editor redesign (per the linked v6 redesign doc). Phase 1 will deliver the new editor in dev with publishing OFF; Phase 2 enables publishing, runs new + old editors side-by-side in prod for 24-48h, monitors for partial-publish failures via topics.publication_status='partial', renames old tables to _legacy_*, and schedules deletion in 2-4 weeks. The runbook must specify: exact publishing-flag-flip procedure with pre-flip preconditions, partial-publish detection SQL (the queries oncall would run), rollback procedure (how to flip the runner back to the legacy editor without rewriting state), the comparison-with-shadow-mode rubric (what specific signals from the Phase-1 shadow-mode logs mean cutover is safe versus 'go back and tune'), the table-rename migration SQL with correct ordering and constraint handling, and a decision tree for the 24-48h watch period \u2014 what observable symptom triggers what action (abort, hot-fix, accept). Assume Phase 1 lands per spec; deviations get a 'consult the doc' escape hatch, not detailed branching. The runbook is the operator's source of truth during cutover.",
+  "current_state": "aborted",
+  "iteration": 0,
+  "created_at": "2026-05-13T16:21:14Z",
+  "config": {
+    "project_dir": "/Users/peteromalley/Documents/banodoco-workspace/brain-of-bndc",
+    "auto_approve": true,
+    "robustness": "standard",
+    "mode": "doc",
+    "strict_notes": true,
+    "agent": "",
+    "profile": "thoughtful",
+    "vendor": "codex",
+    "with_prep": true,
+    "output_path": "docs/live-update-editor-phase-2-runbook.md",
+    "from_doc": "docs/live-update-editor-redesign.md",
+    "phase_model": [
+      "plan=codex:low",
+      "prep=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "critique=codex:low",
+      "revise=codex:low",
+      "gate=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "finalize=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "execute=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "loop_plan=codex:low",
+      "loop_execute=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "review=codex:low",
+      "tiebreaker_researcher=codex:low",
+      "tiebreaker_challenger=codex:low",
+      "feedback=claude:low"
+    ]
+  },
+  "sessions": {},
+  "plan_versions": [],
+  "history": [
+    {
+      "step": "init",
+      "timestamp": "2026-05-13T16:21:14Z",
+      "duration_ms": 0,
+      "cost_usd": 0.0,
+      "result": "success",
+      "environment": {
+        "claude": true,
+        "codex": true
+      }
+    },
+    {
+      "step": "prep",
+      "timestamp": "2026-05-13T16:21:35Z",
+      "duration_ms": 0,
+      "cost_usd": 0.0,
+      "result": "error",
+      "raw_output_file": "prep_v0_raw.txt",
+      "message": "hermes backend requires: pip install 'megaplan-harness[agent]'"
+    }
+  ],
+  "meta": {
+    "significant_counts": [],
+    "weighted_scores": [],
+    "plan_deltas": [],
+    "recurring_critiques": [],
+    "total_cost_usd": 0.0,
+    "overrides": [
+      {
+        "action": "abort",
+        "timestamp": "2026-05-13T16:22:45Z",
+        "reason": "hermes backend not installed; switching to all-codex profile"
+      }
+    ],
+    "notes": [
+      {
+        "timestamp": "2026-05-13T16:21:14Z",
+        "note": "strict-notes auto-enabled for metaplan/doc mode",
+        "source": "driver"
+      }
+    ],
+    "imported_decisions": [],
+    "current_invocation_id": "92a0ed9305da4bee"
+  },
+  "last_gate": {},
+  "latest_failure": {
+    "kind": "phase_failed",
+    "message": "phase 'prep' internal_error",
+    "phase": "prep",
+    "state": "failed",
+    "recorded_at": "2026-05-13T16:21:35Z",
+    "last_artifact": null,
+    "suggested_action": "Inspect phase output and resume from the failed phase.",
+    "metadata": {
+      "exit_code": 1,
+      "stderr": "[megaplan] Starting prep... Expected duration: 30s-15m.",
+      "stdout": "{\n  \"success\": false,\n  \"error\": \"agent_deps_missing\",\n  \"message\": \"hermes backend requires: pip install 'megaplan-harness[agent]'\"\n}",
+      "iteration": 1
+    }
+  },
+  "resume_cursor": {
+    "phase": "prep",
+    "retry_strategy": "rerun_phase"
+  }
+}

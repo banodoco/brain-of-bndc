@@ -1,4 +1,4 @@
-"""Fetch today's summary, generate social picks, and DM them to admin via Discord API."""
+"""Fetch recent live updates, generate social picks, and DM them to admin via Discord API."""
 import os
 import sys
 import json
@@ -22,10 +22,10 @@ BOT_TOKEN = os.getenv('DISCORD_BOT_TOKEN')
 
 SOCIAL_PICKS_PROMPT = """\
 You are a social media editor for Banodoco, an open-source AI art community. \
-You're reviewing today's daily summary to find content worth tweeting from the @banodoco account.
+You're reviewing recent live-update feed items to find content worth tweeting from the @banodoco account.
 
-The summary data includes news items with titles. You MUST reference items by their \
-exact title so we can match your picks back to the original posts and their media.
+The live-update data includes feed items with titles. You MUST reference items by \
+their exact title so we can match your picks back to the original posts and their media.
 
 Look for:
 - Exciting new tools, models, or techniques people are discussing
@@ -42,7 +42,7 @@ For each pick, write a short draft tweet (under 280 chars) that:
 Respond with exactly 3 picks in this exact format (no extra text):
 
 PICK
-Title: <exact title of the news item from the summary>
+Title: <exact title of the live-update item>
 Draft: <tweet text>
 Why: <1 sentence on why this is share-worthy>
 
@@ -60,6 +60,7 @@ If nothing stands out today, respond with just: NOTHING"""
 
 
 def build_summary_lookup(enriched_summary_str, guild_id, db_handler=None):
+    """Legacy daily_summaries lookup retained for explicit backfill workflows."""
     lookup = {}
     try:
         items = json.loads(enriched_summary_str) if isinstance(enriched_summary_str, str) else enriched_summary_str
@@ -111,6 +112,32 @@ def build_summary_lookup(enriched_summary_str, guild_id, db_handler=None):
     return lookup
 
 
+def fetch_live_update_feed_items(db_handler, guild_id, live_channel_id, limit=50):
+    rows = db_handler.get_recent_live_update_feed_items(
+        guild_id=int(guild_id) if guild_id else None,
+        live_channel_id=int(live_channel_id) if live_channel_id else None,
+        limit=limit,
+    )
+    return [row for row in rows if row.get('status') == 'posted']
+
+
+def build_live_update_lookup(feed_items, guild_id, live_channel_id):
+    lookup = {}
+    for item in feed_items:
+        title = (item.get('title') or '').strip()
+        if not title:
+            continue
+        discord_message_ids = item.get('discord_message_ids') or []
+        discord_link = None
+        if guild_id and live_channel_id and discord_message_ids:
+            discord_link = message_jump_url(guild_id, live_channel_id, discord_message_ids[0])
+        lookup[title.lower()] = {
+            'discord_link': discord_link,
+            'all_media': item.get('media_refs') or [],
+        }
+    return lookup
+
+
 async def send_discord_dm(bot_token, user_id, content):
     """Send a DM to a Discord user via the REST API."""
     headers = {
@@ -143,21 +170,32 @@ async def send_discord_dm(bot_token, user_id, content):
 
 
 async def main():
-    print("Fetching today's summary from Supabase...")
+    print("Fetching recent live-update feed items from Supabase...")
     db = DatabaseHandler(dev_mode=False)
-    summary = db.get_summary_for_date(channel_id=SUMMARY_CHANNEL_ID)
+    feed_items = fetch_live_update_feed_items(db, GUILD_ID, SUMMARY_CHANNEL_ID)
 
-    if not summary:
-        print("No summary found for today!")
+    if not feed_items:
+        print("No recent posted live-update feed items found.")
         return
 
-    print(f"Got summary ({len(summary)} chars)")
+    print(f"Got {len(feed_items)} live-update feed items")
 
-    lookup = build_summary_lookup(summary, GUILD_ID, db_handler=db)
+    lookup = build_live_update_lookup(feed_items, GUILD_ID, SUMMARY_CHANNEL_ID)
     print(f"Built lookup with {len(lookup)} items")
 
     print("Calling Claude for social picks...")
-    context = f"Full summary:\n{summary[:8000]}"
+    context_items = [
+        {
+            "title": item.get("title"),
+            "body": item.get("body"),
+            "update_type": item.get("update_type"),
+            "media_refs": item.get("media_refs") or [],
+            "discord_message_ids": item.get("discord_message_ids") or [],
+            "posted_at": item.get("posted_at") or item.get("created_at"),
+        }
+        for item in feed_items[:25]
+    ]
+    context = "Recent live updates:\n" + json.dumps(context_items, ensure_ascii=False)[:8000]
     response = await get_llm_response(
         client_name="claude",
         model="claude-sonnet-4-5-20250929",

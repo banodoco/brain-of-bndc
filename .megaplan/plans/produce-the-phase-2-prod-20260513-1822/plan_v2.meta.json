@@ -1,0 +1,232 @@
+{
+  "version": 2,
+  "timestamp": "2026-05-13T16:40:38Z",
+  "hash": "sha256:8f4d7a4c75af29a4c54d697ef4bac7511e73cabbf47328b004c73bcf5d1a1a11",
+  "changes_summary": "Addressed all nine open critique flags by (1) replacing \u00a75's incorrect \"zero new rows in legacy live_update_feed_items\" verification with Discord-send-targeted verification that branches on the Phase-1 suppression mechanism (Branch A scheduler-tick vs. Branch B publish-call); (2) re-anchoring \u00a75 verification on the next observed live_update_editor_runs row instead of a fixed 15-minute window (hourly cadence per :633); (3) reframing the \u00a77 partial-publish trip-wire as \"2 cumulative across Phase 1 shadow + Phase 2 watch\" per :600, with a corresponding cross-window tally query in \u00a76; (4) splitting \u00a77's \"lease contention\" row into three distinct symptom rows (new-editor self-contention, legacy writing to new tables, lease-key overlap); (5) correcting \u00a79's cross-reference target from docs/live-update-editor-legacy-boundaries.md (which is about daily_summaries) to docs/live-update-editor-redesign.md:212-223 plus src/common/storage_handler.py:652-1968 as the authoritative live runtime surface; (6) naming the default migration-runner path as a new timestamped file in .migrations_staging/ (matching repo convention) with a TODO(phase-1) for alternates; (7) adding a \"provisional until Phase 1 lands\" banner in \u00a71 enumerating the four TODO(phase-1) items so an operator does not run the procedure prematurely; (8) adding a \"Recent runs\" Fast Triage one-liner in \u00a72 to support the new verification shape. Preserved all original SD-1..SD-4 settled decisions and the doc-only scope.",
+  "flags_addressed": [
+    {
+      "id": "FLAG-001",
+      "resolution": "addressed",
+      "reason": "\u00a75 verification now targets Discord-send suppression \u2014 Branch A checks for absence of a legacy live_update_editor_runs row (scheduler-tick gate); Branch B checks legacy run row carries the suppression marker and no live-channel posts attributed to the legacy bot identity. The 'zero new live_update_feed_items rows' check is removed; \u00a71 Important guardrails calls out per :651 that both editors keep writing to their own tables during the watch."
+    },
+    {
+      "id": "issue_hints",
+      "resolution": "addressed",
+      "reason": "\u00a79 step 6 (formerly Step 10.5) now cross-checks against docs/live-update-editor-redesign.md:212-223 and src/common/storage_handler.py:652-1968 as the authoritative legacy-table set, and explicitly notes that docs/live-update-editor-legacy-boundaries.md's 'Legacy Storage And Helpers' is about daily_summaries and is NOT the right target."
+    },
+    {
+      "id": "correctness-1",
+      "resolution": "addressed",
+      "reason": "Same as FLAG-001 \u2014 \u00a75 verification reframed to Discord-send activity with Branch A/B handling for the Phase-1 suppression mechanism."
+    },
+    {
+      "id": "correctness-2",
+      "resolution": "addressed",
+      "reason": "\u00a77 partial-publish trip-wire reworded to '2 cumulative across Phase 1 shadow + Phase 2 watch' with explicit :600 citation. \u00a76 adds a cross-window tally query that sums partials in both dev (Phase 1 shadow) and prod (Phase 2 watch) since the soak start date. Trip-wire language is also re-stated in \u00a71 Important guardrails and \u00a711 footer."
+    },
+    {
+      "id": "correctness-3",
+      "resolution": "addressed",
+      "reason": "\u00a75 step 4 explicitly anchors verification on the next observed live_update_editor_runs row (status='completed' after the flip timestamp), not a fixed 15-minute window. Cadence rationale per :633 noted inline."
+    },
+    {
+      "id": "scope-1",
+      "resolution": "addressed",
+      "reason": "\u00a75 now branches the verification shape on the suppression mechanism: Branch A (scheduler-tick gate, legacy editor never runs) checks for no new legacy run rows; Branch B (publish-call gate at _publish_accepted_candidates / _select_publishable_candidates) checks the suppression marker on existing legacy run rows plus absence of legacy-bot live-channel posts. Operator selects the branch based on what Phase 1 actually shipped."
+    },
+    {
+      "id": "scope-2",
+      "resolution": "addressed",
+      "reason": "\u00a77 'lease contention' row split into three distinct symptoms with distinct actions: new-editor self-contention (HOT-FIX release lease + verify next tick), legacy writing to new tables (ABORT \u2014 isolation broke), and new+legacy run rows overlapping in same lease key (ABORT \u2014 lease misconfigured). Each row references the relevant lease key per :684."
+    },
+    {
+      "id": "all_locations",
+      "resolution": "addressed",
+      "reason": "\u00a79 step 1 names a default migration-runner path: a new timestamped file in .migrations_staging/ (e.g. 2026MMDDHHMMSS_live_update_legacy_rename.sql), matching the existing repo convention confirmed by ls .migrations_staging/. A TODO(phase-1) covers alternates (Supabase dashboard SQL editor, psql-direct) if Phase 1 elects a different path; the SQL body is identical regardless."
+    },
+    {
+      "id": "callers",
+      "resolution": "addressed",
+      "reason": "\u00a71 step 2 now carries an explicit 'Provisional until Phase 1 lands' banner under the H1 that enumerates the four TODO(phase-1) markers (toggle name+location, suppression mechanism, prod trace channel, migration-runner path) and tells the operator not to execute the procedure until those are resolved. \u00a73 preconditions checklist adds 'Phase-1 TODOs resolved' as an explicit gate."
+    }
+  ],
+  "questions": [
+    "Phase 1 has not landed yet \u2014 what is the chosen name and location of the publishing toggle (env var, config row, feature flag)? The runbook uses a `<LIVE_EDITOR_PUBLISH_TOGGLE>` placeholder with a `TODO(phase-1)` note.",
+    "Does Phase 1 suppress the legacy editor at the scheduler-tick level (Branch A \u2014 legacy editor never runs) or at the publish-call level inside `_publish_accepted_candidates` / `_select_publishable_candidates` (Branch B \u2014 legacy runs but no-ops its Discord send)? The \u00a75 verification shape branches on this.",
+    "If Branch B, what column or metadata key on `live_update_editor_runs` does Phase 1 use to mark a run's publish as suppressed? Affects the \u00a72 'Recent runs' one-liner and \u00a75 verification.",
+    "Which Discord channel is the prod equivalent of `#main_test` for the trace embed during the 24-48h watch?",
+    "Does Phase 1 plug the rename migration into `.migrations_staging/` (the existing repo convention), into a separate ordered `supabase/migrations/` folder, or expect the operator to run the SQL inline via psql / the Supabase dashboard?"
+  ],
+  "success_criteria": [
+    {
+      "criterion": "File `docs/live-update-editor-phase-2-runbook.md` exists at exactly that path with non-empty content.",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Document contains a Fast Triage SQL section querying `topics` grouped by `publication_status` scoped to `environment='prod'`, matching the `docs/runbook-payments.md` Fast Triage pattern.",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Document includes a 'Provisional until Phase 1 lands' banner in \u00a71 that enumerates the four TODO(phase-1) items: toggle name + location, suppression mechanism, prod trace-embed channel, migration-runner path.",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Document includes a Pre-flip preconditions checklist with at least one verifiable command per gate (Phase 1 soak, schema migration applied, indexes present, backfill parity, lease in place, trace embed wired, legacy editor still running, paged-in window, Phase-1 TODOs resolved).",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Document includes a GO / TUNE / ABORT shadow-mode-to-cutover comparison rubric keyed on at least: replay-divergence explainability, collision-override rate, `record_observation` rate, partial-publish in dev, schema-rejection rate, cost/latency.",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Document includes a Publishing-flag-flip procedure with ordered steps, a `<LIVE_EDITOR_PUBLISH_TOGGLE>` placeholder, branch-A/branch-B verification shapes covering both scheduler-tick and publish-call suppression mechanisms, and explicit anchoring on the next observed `live_update_editor_runs` row (not a fixed 15-minute window).",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Document's flip-verification does NOT check for 'zero new rows in legacy live_update_feed_items'; instead it targets Discord-send suppression (legacy run absent for Branch A, or legacy run + suppression marker + no legacy-bot live-channel posts for Branch B).",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Document includes four partial-publish detection SQL queries: windowed counts, per-row deep-dive (selecting `publication_status`, `publication_error`, `publication_attempts`, `last_published_at`, `discord_message_ids`), still-pending-too-long, and rejection-rate against `topic_transitions WHERE action LIKE 'rejected_%'`, all scoped to `environment='prod'` with a `-- swap to 'dev'` annotation, plus a cross-window partial-publish tally for the trip-wire.",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Document includes a 24-48h watch decision-tree table (SYMPTOM | THRESHOLD | ACTION | POINTER) that maps the partial-publish trip-wire to '2 cumulative across Phase 1 shadow + Phase 2 watch \u2192 ABORT + restore topic_publications' citing `docs/live-update-editor-redesign.md:600-601`.",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Document's decision tree splits lease symptoms into three distinct rows with distinct actions: new-editor self-contention (HOT-FIX), legacy writing to new tables (ABORT), and new+legacy run-row overlap on same lease key (ABORT).",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Document includes a Rollback procedure (runner-pointer flip) that explicitly leaves `topics` rows untouched, distinguishes pre-rename rollback (trivial \u2014 toggle flip) from post-rename rollback (reverse rename SQL), citing `docs/live-update-editor-redesign.md:596`, and covers both Branch-A and Branch-B verification on legacy-publish resumption.",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Document includes an ordered table-rename migration SQL block that renames all six legacy tables (`live_update_feed_items`, `live_update_watchlist`, `live_update_duplicate_state`, `live_update_editorial_memory`, `live_update_candidates`, `live_update_decisions`) to `_legacy_<name>`, retains `live_update_editor_runs`, runs inside `BEGIN; ... COMMIT;` with a dry-run rollback note, includes row-count parity SELECT before AND after, and a constraint-preservation note for Postgres.",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Document names a default migration-runner path (a new timestamped file in `.migrations_staging/` matching repo convention) with a TODO(phase-1) for alternates (Supabase dashboard SQL editor, psql-direct).",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Document's \u00a79 cross-checks the six-table set against `docs/live-update-editor-redesign.md:212-223` and `src/common/storage_handler.py:652-1968` \u2014 NOT against `docs/live-update-editor-legacy-boundaries.md`'s 'Legacy Storage And Helpers' section.",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Document explicitly states that the table rename runs only AFTER the 24-48h watch passes, so rollback during the watch remains a single toggle flip.",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Document includes a deletion-schedule section that records the `_legacy_*` deletion 2-4 weeks post-rename as an operator-filled blank (no hardcoded date), plus a final `DROP TABLE _legacy_*` block, and named bring-forward / push-out circumstances.",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Document references `docs/live-update-editor-redesign.md` for schema shape rather than re-listing column definitions, and points back to it as the ABORT-to-rollback escape hatch in a footer.",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Document references `src/features/summarising/live_update_editor.py` (specifically `_publish_accepted_candidates` / `_select_publishable_candidates`) as the legacy fallback path the runner-pointer rollback re-enables.",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Document length is roughly comparable to `docs/runbook-payments.md` (~400 lines, give or take 100); not under 200 and not over 700.",
+      "priority": "should",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Tone matches `docs/runbook-payments.md` \u2014 terse, imperative, copy-paste SQL ready, minimal narrative prose.",
+      "priority": "should",
+      "requires": [
+        "subjective_judgment"
+      ]
+    },
+    {
+      "criterion": "Every `TODO(phase-1)` placeholder in the doc is clearly labeled so the operator can spot Phase-1-dependent gaps.",
+      "priority": "should",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "No code edits outside `docs/live-update-editor-phase-2-runbook.md`; existing tests still pass (unchanged).",
+      "priority": "must",
+      "requires": [
+        "run_shell",
+        "parse_diff"
+      ]
+    }
+  ],
+  "assumptions": [
+    "The publish toggle exists at a single named location chosen by Phase 1; the runbook references it as `<LIVE_EDITOR_PUBLISH_TOGGLE>` with a `TODO(phase-1)` marker rather than guessing the name.",
+    "Phase 1 ships ONE of two suppression mechanisms \u2014 Branch A (scheduler-tick gate so the legacy editor never runs) or Branch B (publish-call gate at `_publish_accepted_candidates` / `_select_publishable_candidates` so the legacy editor still runs but no-ops its Discord send and sets a suppression marker on its `live_update_editor_runs` row). \u00a75 verification covers both branches and the operator selects.",
+    "Per `docs/live-update-editor-redesign.md:651`, during the 24-48h watch both editors continue to write to their own tables; only the legacy editor's Discord send is suppressed. Verification of 'flip took' targets Discord-send activity, not legacy-table inserts.",
+    "Per `docs/live-update-editor-redesign.md:600`, the partial-publish trip-wire counts incidents cumulatively across Phase 1 shadow and Phase 2 watch (i.e. cross-window), not as a rolling 24h count.",
+    "Cadence is hourly per `docs/live-update-editor-redesign.md:633`; verification anchors on the next observed `live_update_editor_runs` row with `status='completed'` after the flip timestamp.",
+    "The `topics` table carries an `environment` column per `docs/live-update-editor-redesign.md:117-123`; SQL is `WHERE environment='prod'` with `-- swap to 'dev'` inline comments where pre-flip applies.",
+    "Postgres is the target DB and `ALTER TABLE ... RENAME TO` preserves indexes, sequences, FK constraints, and RLS. Default migration-runner path is a new timestamped file in `.migrations_staging/` matching the existing repo convention; alternates are covered by a `TODO(phase-1)`.",
+    "The six legacy tables to rename are the set in `docs/live-update-editor-redesign.md:212-223`, confirmed against the live runtime surface in `src/common/storage_handler.py:652-1968`. `docs/live-update-editor-legacy-boundaries.md`'s 'Legacy Storage And Helpers' section is about `daily_summaries` and is NOT the right cross-reference; `live_update_editor_runs` is retained.",
+    "Deletion date is operator-chosen between 2 and 4 weeks post-rename per `:653`; the runbook leaves a blank line rather than hardcoding a date.",
+    "ABORT during the 24-48h watch is the default response to any unlisted symptom; the runbook does not prescribe improvisation paths.",
+    "Doc is the only artifact this plan produces \u2014 no code, no tests."
+  ],
+  "delta_from_previous_percent": 56.07,
+  "structure_warnings": []
+}

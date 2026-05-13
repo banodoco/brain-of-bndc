@@ -1,0 +1,592 @@
+{
+  "tasks": [
+    {
+      "id": "T16",
+      "description": "Read user_actions.md. For each before_execute action, programmatically verify completion using bash tools \u2014 grep .env for required keys, query the migrations table, curl the dev server, etc. Reading the file does NOT count as verification; you must run a command. For actions that genuinely cannot be verified mechanically (manual UI checks), explicitly ask the user. If anything is incomplete or unverifiable, mark this task blocked with reason and STOP.",
+      "depends_on": [],
+      "status": "pending",
+      "executor_notes": "",
+      "files_changed": [],
+      "commands_run": [],
+      "evidence_files": [],
+      "reviewer_verdict": ""
+    },
+    {
+      "id": "T1",
+      "description": "Audit the current live-update code paths, migrations staging process, docs, admin/health surfaces, runtime wiring, and tests against the approved plan before editing. Confirm exact existing patterns in `src/features/summarising/summariser_cog.py`, `src/common/storage_handler.py`, `src/common/db_handler.py`, `src/features/admin_chat/`, `src/features/health/`, `.migrations_staging/`, and the live-update docs.",
+      "depends_on": [
+        "T16"
+      ],
+      "status": "pending",
+      "kind": "audit",
+      "executor_notes": "",
+      "files_changed": [],
+      "commands_run": [],
+      "auto_attributed_files": null,
+      "evidence_files": [],
+      "reviewer_verdict": "",
+      "stance": null,
+      "stop_signal": null
+    },
+    {
+      "id": "T2",
+      "description": "Complete Supabase migration readiness for the existing backlog migration `.migrations_staging/20260512185328_live_update_watchlist_lifecycle.sql`: verify local CLI/project linkage, apply to dev if credentials allow, document any changed handoff process in `.migrations_staging/README.md`, and confirm the live watchlist lifecycle columns are available before topic backfill work depends on them.",
+      "depends_on": [
+        "T16",
+        "T1"
+      ],
+      "status": "pending",
+      "kind": "docs",
+      "executor_notes": "",
+      "files_changed": [],
+      "commands_run": [],
+      "auto_attributed_files": null,
+      "evidence_files": [],
+      "reviewer_verdict": "",
+      "stance": null,
+      "stop_signal": null
+    },
+    {
+      "id": "T3",
+      "description": "Add the Phase-1 topic editor SQL migration under `.migrations_staging/20260513*_live_update_topic_editor_phase1.sql`. It must create `topics`, `topic_sources`, `topic_aliases`, `topic_transitions`, `editorial_observations`, `topic_editor_runs`, and `topic_editor_checkpoints`; enable `pg_trgm`; add required indexes and uniqueness; use an active-only partial unique index for running leases; keep new editor runs out of `live_update_editor_runs`; and constrain `topic_transitions.action` to base actions plus only `rejected_post_simple`, `rejected_post_sectioned`, and `rejected_watch`.",
+      "depends_on": [
+        "T16",
+        "T2"
+      ],
+      "status": "pending",
+      "kind": "code",
+      "executor_notes": "",
+      "files_changed": [],
+      "commands_run": [],
+      "auto_attributed_files": null,
+      "evidence_files": [],
+      "reviewer_verdict": "",
+      "stance": null,
+      "stop_signal": null
+    },
+    {
+      "id": "T4",
+      "description": "Implement `scripts/backfill_live_update_topics.py` to idempotently backfill legacy `live_update_feed_items` and `live_update_watchlist` into `topics` and `topic_sources`. Use the same canonicalizer as runtime, upsert on `(environment, guild_id, canonical_key)` and `(topic_id, message_id)`, preserve publication/watch metadata, and print parity counts for posted and watching rows.",
+      "depends_on": [
+        "T16",
+        "T3",
+        "T5"
+      ],
+      "status": "pending",
+      "kind": "code",
+      "executor_notes": "",
+      "files_changed": [],
+      "commands_run": [],
+      "auto_attributed_files": null,
+      "evidence_files": [],
+      "reviewer_verdict": "",
+      "stance": null,
+      "stop_signal": null
+    },
+    {
+      "id": "T5",
+      "description": "Create the deterministic topic-editor domain core in `src/features/summarising/topic_editor.py`: canonicalization, alias resolution, collision detection using canonical-key prefix or trigram headline similarity `>= 0.55` with author overlap, override-collision handling, transition payload shaping, and pure helpers that can be tested without Anthropic or Discord.",
+      "depends_on": [
+        "T16",
+        "T3"
+      ],
+      "status": "pending",
+      "kind": "code",
+      "executor_notes": "",
+      "files_changed": [],
+      "commands_run": [],
+      "auto_attributed_files": null,
+      "evidence_files": [],
+      "reviewer_verdict": "",
+      "stance": null,
+      "stop_signal": null
+    },
+    {
+      "id": "T6",
+      "description": "Add topic storage APIs in `src/common/storage_handler.py` and matching reachable wrappers in `src/common/db_handler.py` for all new editor operations: topics, sources, aliases, transitions, observations, run lease lifecycle, run completion/failure, checkpoint mirror from legacy to topic checkpoints, and rollback mirror from topic checkpoints back to legacy checkpoints. Keep all legacy helpers intact.",
+      "depends_on": [
+        "T16",
+        "T3"
+      ],
+      "status": "pending",
+      "kind": "code",
+      "executor_notes": "",
+      "files_changed": [],
+      "commands_run": [],
+      "auto_attributed_files": null,
+      "evidence_files": [],
+      "reviewer_verdict": "",
+      "stance": null,
+      "stop_signal": null
+    },
+    {
+      "id": "T7",
+      "description": "Build `TopicEditor.run_once(trigger)` in `src/features/summarising/topic_editor.py` using the injected `db_handler`, not direct storage access. It must acquire a `topic_editor_runs` lease, read from `topic_editor_checkpoints`, fetch archived messages and active topics, call native Anthropic tool use through the existing Claude client surface, define the 10 v6 tools, link transitions to `topic_editor_runs.run_id`, record cost/latency/tool-call metadata, and finish/fail the run lifecycle correctly.",
+      "depends_on": [
+        "T16",
+        "T5",
+        "T6"
+      ],
+      "status": "pending",
+      "kind": "code",
+      "executor_notes": "",
+      "files_changed": [],
+      "commands_run": [],
+      "auto_attributed_files": null,
+      "evidence_files": [],
+      "reviewer_verdict": "",
+      "stance": null,
+      "stop_signal": null
+    },
+    {
+      "id": "T8",
+      "description": "Implement topic-editor tool dispatch invariants and audit mapping. Enforce simple-post structural rejection, collision rejection/override for post/watch writes, `(run_id, tool_call_id)` idempotency, duplicate source attachment idempotency, base-action `tool_error` audit rows for invalid `update_topic_source_messages` and `discard_topic`, accepted transition rows for valid actions, and capped `record_observation` guidance/storage. Do not introduce `rejected_update_sources` or `rejected_discard`.",
+      "depends_on": [
+        "T16",
+        "T7"
+      ],
+      "status": "pending",
+      "kind": "code",
+      "executor_notes": "",
+      "files_changed": [],
+      "commands_run": [],
+      "auto_attributed_files": null,
+      "evidence_files": [],
+      "reviewer_verdict": "",
+      "stance": null,
+      "stop_signal": null
+    },
+    {
+      "id": "T9",
+      "description": "Implement the pure topic renderer and publisher wrapper. `render_topic(topic)` must have no DB or Discord side effects and render simple, sectioned, and story-update topics. The publisher wrapper must send only when `TOPIC_EDITOR_PUBLISHING_ENABLED=true`, default to suppressed publishing, and update publication status, message IDs, attempts, errors, and timestamps.",
+      "depends_on": [
+        "T16",
+        "T8"
+      ],
+      "status": "pending",
+      "kind": "code",
+      "executor_notes": "",
+      "files_changed": [],
+      "commands_run": [],
+      "auto_attributed_files": null,
+      "evidence_files": [],
+      "reviewer_verdict": "",
+      "stance": null,
+      "stop_signal": null
+    },
+    {
+      "id": "T10",
+      "description": "Add trace output and replay support: emit a daily-updates/operator trace with run ID, source count, tool calls, outcomes, rejections, overrides, observations, token/cost metadata, latency, and publishing state; update `scripts/run_live_update_dev.py` or a similarly appropriate entrypoint to support one publishing-off sanity replay over the latest prod source-message window and print would-publish Discord messages plus transitions.",
+      "depends_on": [
+        "T16",
+        "T9"
+      ],
+      "status": "pending",
+      "kind": "code",
+      "executor_notes": "",
+      "files_changed": [],
+      "commands_run": [],
+      "auto_attributed_files": null,
+      "evidence_files": [],
+      "reviewer_verdict": "",
+      "stance": null,
+      "stop_signal": null
+    },
+    {
+      "id": "T11",
+      "description": "Wire the new editor as the primary runtime path in `src/features/summarising/summariser_cog.py`. Scheduled runs, startup `--summary-now`, and owner `summarynow` should use `TopicEditor` by default. Preserve the constructor injection seam currently used by tests, add a rollback selector such as `LIVE_UPDATE_EDITOR_BACKEND=legacy`, and avoid material changes to `live_update_editor.py` or `live_update_prompts.py` except explicit invocation suppression or legacy labeling if required.",
+      "depends_on": [
+        "T16",
+        "T10"
+      ],
+      "status": "pending",
+      "kind": "code",
+      "executor_notes": "",
+      "files_changed": [],
+      "commands_run": [],
+      "auto_attributed_files": null,
+      "evidence_files": [],
+      "reviewer_verdict": "",
+      "stance": null,
+      "stop_signal": null
+    },
+    {
+      "id": "T12",
+      "description": "Update admin chat and health visibility in `src/features/admin_chat/tools.py`, `src/features/admin_chat/agent.py`, `src/features/health/health_check_cog.py`, and related code. Primary status must come from `topic_editor_runs`, `topics`, and `topic_transitions`, including topic counts, recent rejections/transitions, failed or partial publications, and override rate; legacy live-update tables must remain visible only as clearly labeled rollback state.",
+      "depends_on": [
+        "T16",
+        "T6",
+        "T11"
+      ],
+      "status": "pending",
+      "kind": "code",
+      "executor_notes": "",
+      "files_changed": [],
+      "commands_run": [],
+      "auto_attributed_files": null,
+      "evidence_files": [],
+      "reviewer_verdict": "",
+      "stance": null,
+      "stop_signal": null
+    },
+    {
+      "id": "T13",
+      "description": "Reconcile `docs/live-update-editor-phase-2-runbook.md` with the sprint plan. Remove stale Phase-1 soak/gate and 20-window replay requirements for this sprint, switch new-editor verification queries to `topic_editor_runs`, document the sprint gates, document rollback by selecting legacy backend and mirroring `topic_editor_checkpoints` back to `live_update_checkpoints`, and list remaining operator-provided values such as publishing toggle, trace channel, bot identity, and rollback selector.",
+      "depends_on": [
+        "T16",
+        "T11",
+        "T12"
+      ],
+      "status": "pending",
+      "kind": "docs",
+      "executor_notes": "",
+      "files_changed": [],
+      "commands_run": [],
+      "auto_attributed_files": null,
+      "evidence_files": [],
+      "reviewer_verdict": "",
+      "stance": null,
+      "stop_signal": null
+    },
+    {
+      "id": "T14",
+      "description": "Add or update focused tests for deterministic topic-editor behavior, storage/db wrapper reachability, dispatcher invariants, audit action vocabulary, idempotent replay, duplicate source handling, renderer behavior, publisher partial failure handling, lease behavior, runtime wiring, rollback selector, admin/health topic-editor status, and legacy compatibility. Keep rollback coverage from existing legacy live-update tests; mark tests as legacy compatibility only where necessary.",
+      "depends_on": [
+        "T16",
+        "T8",
+        "T9",
+        "T11",
+        "T12"
+      ],
+      "status": "pending",
+      "kind": "test",
+      "executor_notes": "",
+      "files_changed": [],
+      "commands_run": [],
+      "auto_attributed_files": null,
+      "evidence_files": [],
+      "reviewer_verdict": "",
+      "stance": null,
+      "stop_signal": null
+    },
+    {
+      "id": "T15",
+      "description": "Run SQL validation, targeted pytest, existing legacy live-update tests, relevant admin/health tests, and a short throwaway script that reproduces the critical dispatcher/idempotency/action-vocabulary behavior; delete the throwaway script after it passes. If any test fails, inspect the failure, fix the implementation, and rerun until the relevant suite passes. Include the publishing-off sanity replay command and results if credentials/environment allow, but keep publishing disabled.",
+      "depends_on": [
+        "T16",
+        "T2",
+        "T3",
+        "T4",
+        "T10",
+        "T13",
+        "T14"
+      ],
+      "status": "pending",
+      "kind": "test",
+      "executor_notes": "",
+      "files_changed": [],
+      "commands_run": [],
+      "auto_attributed_files": null,
+      "evidence_files": [],
+      "reviewer_verdict": "",
+      "stance": null,
+      "stop_signal": null
+    }
+  ],
+  "watch_items": [
+    "Do not invoke nested megaplan or read/activate the megaplan skill; this is already inside the harness.",
+    "Use `topic_editor_runs` as the only new-editor run lifecycle table; `live_update_editor_runs` remains legacy rollback history only.",
+    "The lease must be active-only: completed or failed historical rows must not block later runs for the same environment/guild/channel tuple.",
+    "`topic_transitions.action` must not include `rejected_update_sources` or `rejected_discard`; invalid update/discard calls audit under base actions with `payload.outcome='tool_error'`.",
+    "Every storage helper used by `TopicEditor` needs both an async `storage_handler.py` implementation and a `db_handler.py` wrapper reachable through the injected dependency.",
+    "Keep publishing disabled by default until the explicit production flip; replay must not accidentally post to Discord.",
+    "Avoid material changes to `src/features/summarising/live_update_editor.py` and `src/features/summarising/live_update_prompts.py` beyond invocation suppression or legacy marking.",
+    "Admin chat and health checks must not keep reporting legacy-only state as primary after cutover.",
+    "The sprint plan supersedes stale runbook soak/gate and 20-window replay instructions; the runbook must be reconciled before publishing ON.",
+    "Backfill and runtime canonicalization must use the same deterministic logic to avoid divergent topic keys.",
+    "Trace output should expose cost/latency/tool-call metadata so post-flip regressions are visible without log scraping.",
+    "Operator-only values remain external: production migration authority, Discord trace channel, bot identity, environment variables, and deploy/flip approvals."
+  ],
+  "sense_checks": [
+    {
+      "id": "SC1",
+      "task_id": "T1",
+      "question": "Did the audit identify the concrete existing code paths and tests that must change without turning the audit into unrelated refactoring?",
+      "executor_note": "",
+      "verdict": ""
+    },
+    {
+      "id": "SC2",
+      "task_id": "T2",
+      "question": "Is the backlog watchlist lifecycle migration either applied or clearly documented as blocked by missing external Supabase access, and does the README reflect the actual handoff path?",
+      "executor_note": "",
+      "verdict": ""
+    },
+    {
+      "id": "SC3",
+      "task_id": "T3",
+      "question": "Does the migration create all required topic-editor tables and indexes, use a partial unique index for running leases, and constrain transition actions to the approved vocabulary only?",
+      "executor_note": "",
+      "verdict": ""
+    },
+    {
+      "id": "SC4",
+      "task_id": "T4",
+      "question": "Is the backfill idempotent, does it use the runtime canonicalizer, and does it report posted/watching parity counts against legacy tables?",
+      "executor_note": "",
+      "verdict": ""
+    },
+    {
+      "id": "SC5",
+      "task_id": "T5",
+      "question": "Are canonicalization, alias resolution, similarity collision detection, and override logging deterministic helpers that can be tested without the LLM loop?",
+      "executor_note": "",
+      "verdict": ""
+    },
+    {
+      "id": "SC6",
+      "task_id": "T6",
+      "question": "Can every new `TopicEditor` storage operation be called through `db_handler`, and are legacy live-update helpers preserved unchanged for rollback tests?",
+      "executor_note": "",
+      "verdict": ""
+    },
+    {
+      "id": "SC7",
+      "task_id": "T7",
+      "question": "Does `TopicEditor.run_once()` use the injected db handler, native Anthropic tool use, `topic_editor_checkpoints`, and `topic_editor_runs` lifecycle rows correctly with publishing still disabled by default?",
+      "executor_note": "",
+      "verdict": ""
+    },
+    {
+      "id": "SC8",
+      "task_id": "T8",
+      "question": "Do dispatcher errors and idempotent replays avoid duplicate side effects, and are invalid update/discard calls logged with base actions rather than invented rejected actions?",
+      "executor_note": "",
+      "verdict": ""
+    },
+    {
+      "id": "SC9",
+      "task_id": "T9",
+      "question": "Is `render_topic()` pure, and does the publisher update topic publication fields only after gated Discord send attempts?",
+      "executor_note": "",
+      "verdict": ""
+    },
+    {
+      "id": "SC10",
+      "task_id": "T10",
+      "question": "Does the trace/replay path provide source count, tool calls, outcomes, rejections/overrides, observations, cost/latency, publishing state, and would-publish messages without requiring the old 20-window soak?",
+      "executor_note": "",
+      "verdict": ""
+    },
+    {
+      "id": "SC11",
+      "task_id": "T11",
+      "question": "Do scheduled runs, startup `--summary-now`, and owner `summarynow` select `TopicEditor` by default while tests can still inject an active editor and operators can select legacy mode?",
+      "executor_note": "",
+      "verdict": ""
+    },
+    {
+      "id": "SC12",
+      "task_id": "T12",
+      "question": "Do admin chat and health checks report topic-editor primary state while labeling legacy table data as rollback state?",
+      "executor_note": "",
+      "verdict": ""
+    },
+    {
+      "id": "SC13",
+      "task_id": "T13",
+      "question": "Does the runbook no longer instruct operators to satisfy stale Phase-1 soak/gate or 20-window replay requirements, and does it document rollback checkpoint mirroring?",
+      "executor_note": "",
+      "verdict": ""
+    },
+    {
+      "id": "SC14",
+      "task_id": "T14",
+      "question": "Do the tests cover the accepted success criteria without deleting rollback coverage from legacy live-update tests?",
+      "executor_note": "",
+      "verdict": ""
+    },
+    {
+      "id": "SC15",
+      "task_id": "T15",
+      "question": "Did SQL validation, targeted pytest, legacy compatibility tests, admin/health tests, and the throwaway reproduction script pass, with any failures fixed and rerun?",
+      "executor_note": "",
+      "verdict": ""
+    },
+    {
+      "id": "SC16",
+      "task_id": "T16",
+      "question": "Were all before_execute user_actions programmatically verified before execution proceeded?",
+      "executor_note": "",
+      "verdict": ""
+    }
+  ],
+  "user_actions": [
+    {
+      "id": "U1",
+      "description": "Provide or confirm Supabase CLI authentication, project link details, and authorization to apply migrations to dev and production if the executor's environment is not already linked.",
+      "phase": "before_execute",
+      "blocks_task_ids": [
+        "T2",
+        "T3",
+        "T4",
+        "T15"
+      ],
+      "rationale": "The executor can write migration SQL, but applying it to real Supabase projects may require human-owned credentials or explicit environment access.",
+      "requires_human_only_reason": null
+    },
+    {
+      "id": "U2",
+      "description": "Provide the production Discord trace target channel, bot identity expectations, and final environment variable names/values for publishing control and rollback backend selection.",
+      "phase": "before_execute",
+      "blocks_task_ids": [
+        "T10",
+        "T11",
+        "T13",
+        "T15"
+      ],
+      "rationale": "The code can support defaults, but production channel and deploy-time toggle values are operator-owned decisions.",
+      "requires_human_only_reason": null
+    },
+    {
+      "id": "U3",
+      "description": "Approve and perform the production deploy plus final publishing flip after repo validation, schema application, backfill parity, checkpoint mirror, admin/health visibility, and publishing-off replay are complete.",
+      "phase": "after_execute",
+      "blocks_task_ids": null,
+      "rationale": "Production deployment and enabling live Discord publishing are operational actions outside normal repo editing.",
+      "requires_human_only_reason": null
+    },
+    {
+      "id": "U4",
+      "description": "Manually inspect the first production trace and Discord-side post attribution after publishing is enabled, then decide whether to continue or roll back using the documented legacy backend and checkpoint mirror procedure.",
+      "phase": "after_execute",
+      "blocks_task_ids": null,
+      "rationale": "This is an out-of-band production smoke check that requires access to Discord and operational judgment.",
+      "requires_human_only_reason": null
+    }
+  ],
+  "meta_commentary": "Execute in dependency order and keep the new editor isolated from the legacy implementation. The highest-risk points are schema vocabulary drift, active lease semantics, accidentally bypassing `db_handler`, publishing before the toggle is intentionally enabled, and stale operator surfaces that still read only legacy tables. Prefer deterministic helpers and focused tests before wiring the LLM loop. If production credentials are unavailable, still finish repo code, migrations, tests, and docs, then record the exact blocked operational command and required credential rather than treating it as a code blocker.",
+  "validation": {
+    "plan_steps_covered": [
+      {
+        "plan_step_summary": "Complete Supabase migration readiness and backlog migration handoff",
+        "finalize_item_ids": [
+          "T2",
+          "U1"
+        ]
+      },
+      {
+        "plan_step_summary": "Add Phase-1 topic schema migration with topic tables, run table, checkpoints, lease index, and action vocabulary",
+        "finalize_item_ids": [
+          "T3"
+        ]
+      },
+      {
+        "plan_step_summary": "Backfill legacy feed/watchlist state into topic tables",
+        "finalize_item_ids": [
+          "T4",
+          "U1"
+        ]
+      },
+      {
+        "plan_step_summary": "Add topic storage helpers and matching db handler wrappers",
+        "finalize_item_ids": [
+          "T6"
+        ]
+      },
+      {
+        "plan_step_summary": "Implement canonicalization, alias resolution, collision detection, and override logic",
+        "finalize_item_ids": [
+          "T5"
+        ]
+      },
+      {
+        "plan_step_summary": "Build the new TopicEditor module and LLM tool loop",
+        "finalize_item_ids": [
+          "T7"
+        ]
+      },
+      {
+        "plan_step_summary": "Implement dispatcher invariants, idempotency, source uniqueness, and rejected/base-action audit mapping",
+        "finalize_item_ids": [
+          "T8"
+        ]
+      },
+      {
+        "plan_step_summary": "Add pure rendering and gated publisher behavior",
+        "finalize_item_ids": [
+          "T9"
+        ]
+      },
+      {
+        "plan_step_summary": "Add trace output and one-shot publishing-off replay",
+        "finalize_item_ids": [
+          "T10",
+          "U2"
+        ]
+      },
+      {
+        "plan_step_summary": "Wire TopicEditor as the default runtime path with rollback selector and preserved injection seam",
+        "finalize_item_ids": [
+          "T11",
+          "U2"
+        ]
+      },
+      {
+        "plan_step_summary": "Update admin chat and health visibility for topic-editor primary state",
+        "finalize_item_ids": [
+          "T12"
+        ]
+      },
+      {
+        "plan_step_summary": "Reconcile cutover runbook with sprint gates and rollback procedure",
+        "finalize_item_ids": [
+          "T13",
+          "U2"
+        ]
+      },
+      {
+        "plan_step_summary": "Add focused topic-editor, runtime wiring, admin/health, and legacy compatibility tests",
+        "finalize_item_ids": [
+          "T14"
+        ]
+      },
+      {
+        "plan_step_summary": "Update runtime wiring tests for default TopicEditor and rollback mode",
+        "finalize_item_ids": [
+          "T14"
+        ]
+      },
+      {
+        "plan_step_summary": "Preserve or mark legacy live-update tests as compatibility coverage",
+        "finalize_item_ids": [
+          "T14",
+          "T15"
+        ]
+      },
+      {
+        "plan_step_summary": "Run validation in increasing cost order, including SQL checks, targeted tests, legacy tests, replay, and prod flip prerequisites",
+        "finalize_item_ids": [
+          "T15",
+          "U1",
+          "U3",
+          "U4"
+        ]
+      },
+      {
+        "plan_step_summary": "Verify before_execute user_actions",
+        "finalize_item_ids": [
+          "T16"
+        ]
+      }
+    ],
+    "orphan_tasks": [
+      "T1"
+    ],
+    "completeness_notes": "All approved plan steps are mapped. T1 is an intentional execution-readiness audit task that supports safe implementation across the multi-file cutover but does not correspond to a single approved plan step. Production migration, deployment, publishing flip, and Discord smoke inspection are represented as user actions because they may require human-owned credentials or operational approval.",
+    "coverage_complete": true
+  },
+  "baseline_test_failures": [],
+  "baseline_test_command": "pytest --tb=no -q --no-header",
+  "baseline_test_note": "No baseline tests were run during finalization; T15 requires the executor to run SQL validation, targeted pytest, legacy compatibility tests, admin/health tests, and a throwaway reproduction script before completion."
+}

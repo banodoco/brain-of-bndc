@@ -1,0 +1,76 @@
+{
+  "output": "Batch 5 complete. T4 (LiveUpdateEditor) and T5 (LiveTopCreations) both fully converted.\n\nT4: Deleted dry_run constructor param, added environment='prod'. Removed _run_dry_once short-circuit from run_once; dev synthesizes initial checkpoint inline when environment=='dev'. All 37 self.db.* calls pass environment=self.environment. Deleted _run_dry_once, _publish_dry_run_debug_report, _dry_candidate_decision (+4 format helpers). Zero self.dry_run references remain. File: 1610\u21921297 lines.\n\nT5: Deleted dry_run, top_gens_channel_id, live_channel_id constructor params. Added environment='prod'. MAX_POSTS_SAFETY_BELT=50 replaces DEFAULT_MAX_POSTS=5; max_posts param deleted. _resolve_top_channel_id collapsed to summary-channel-only. Pre-publish dedupe via DB lookup BEFORE Discord send with db_skip_count threaded into run counters. _run_dry_once deleted. File: 618\u2192582 lines.\n\nAll 4 sense checks (SC5-SC8) PASS. Storage wrapper tests (3) and runtime wiring tests (7) pass. 17 editor/top-creations tests fail as expected (API change \u2014 T7 updates tests next batch).",
+  "files_changed": [
+    "src/features/summarising/live_update_editor.py",
+    "src/features/summarising/live_top_creations.py"
+  ],
+  "commands_run": [
+    "python3 -c 'import ast; ast.parse' \u2014 Syntax OK on both files",
+    "grep -n 'self\\.dry_run[^_]' \u2014 zero references in both files",
+    "grep -n '_dry_candidate_decision|_run_dry_once|_publish_dry_run_debug_report' live_update_editor.py \u2014 zero (SC5 PASS)",
+    "python3 paren-depth audit \u2014 all 37 self.db.* calls have environment= (SC6 PASS)",
+    "grep -rn 'DEV_TOP_GENS_CHANNEL_ID|top_gens_channel_id|TOP_GENS_ID|TOP_GENS_CHANNEL_ID' live_top_creations.py \u2014 zero (SC7 PASS)",
+    "Verified _publish_candidate: dedupe BEFORE Discord send, db_skip_count threaded (SC8 PASS)",
+    "pytest tests/test_live_storage_wrappers.py \u2014 3 passed",
+    "pytest tests/test_live_runtime_wiring.py \u2014 7 passed",
+    "pytest all live tests \u2014 17 expected failures (API change, T7 updates next)"
+  ],
+  "deviations": [
+    "Advisory quality: code changes lacked test updates: src/features/summarising/live_top_creations.py, src/features/summarising/live_update_editor.py.",
+    "Advisory audit finding: Executor claimed changed files not present in git status: .migrations_staging/20260511110349_live_update_environment_split.sql",
+    "Advisory audit finding: Git status shows changed files not claimed by any task: .megaplan/briefs/, .megaplan/plans/live-update-environment-split/, .megaplan/schemas/directors_notes.json, .megaplan/schemas/execution_doc.json, .megaplan/schemas/finalize.json, .megaplan/schemas/review.json, .megaplan/schemas/revise.json, docs/debug-utility-validation.md, docs/live-update-editor-legacy-boundaries.md, main.py, scripts/backfill_guild_ids.py, scripts/debug.py, scripts/discord_tools.py, scripts/run_live_update_dev.py, scripts/send_social_picks.py, src/features/admin_chat/agent.py, src/features/admin_chat/tools.py, src/features/archive/archive_cog.py, src/features/gating/intro_embed.py, src/features/health/health_check_cog.py, src/features/summarising/live_update_prompts.py, src/features/summarising/summariser.py, src/features/summarising/summariser_cog.py, structure.md, tests/test_live_admin_health.py, tests/test_live_runtime_wiring.py, tests/test_live_storage_wrappers.py, tests/test_live_top_creations.py, tests/test_live_update_editor_lifecycle.py, tests/test_live_update_editor_publishing.py, tests/test_live_update_prompts.py, tests/test_social_route_tools.py",
+    "Advisory audit finding: Sense check SC9 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC10 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC11 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC12 is missing an executor acknowledgment.",
+    "Advisory audit finding: Tasks left pending after execute (executor never started them): T6, T7, T8, T9"
+  ],
+  "task_updates": [
+    {
+      "id": "T4",
+      "status": "done",
+      "executor_notes": "LiveUpdateEditor fully converted. Constructor: environment='prod' added, dry_run deleted, dry_run_lookback_hours kept. run_once: dry_run short-circuit deleted; dev checkpoint synthesized inline. All 37 self.db.* calls pass environment=. Zero self.dry_run references. Deleted 7 dry-run methods. Channel resolution gates on environment=='dev'.",
+      "files_changed": [
+        "src/features/summarising/live_update_editor.py"
+      ],
+      "task_id": "T4",
+      "commands_run": []
+    },
+    {
+      "id": "T5",
+      "status": "done",
+      "executor_notes": "LiveTopCreations fully converted. Constructor: environment='prod' added; dry_run, top_gens_channel_id, live_channel_id deleted. MAX_POSTS_SAFETY_BELT=50; max_posts param deleted. _resolve_top_channel_id collapsed to summary-channel-only. Pre-publish DB dedupe with db_skip_count threaded to run counters. _run_dry_once deleted. Zero self.dry_run references.",
+      "files_changed": [
+        "src/features/summarising/live_top_creations.py"
+      ],
+      "task_id": "T5",
+      "commands_run": []
+    }
+  ],
+  "sense_check_acknowledgments": [
+    {
+      "id": "SC5",
+      "verdict": "PASS",
+      "sense_check_id": "SC5",
+      "executor_note": "(not provided)"
+    },
+    {
+      "id": "SC6",
+      "verdict": "PASS",
+      "sense_check_id": "SC6",
+      "executor_note": "(not provided)"
+    },
+    {
+      "id": "SC7",
+      "verdict": "PASS",
+      "sense_check_id": "SC7",
+      "executor_note": "(not provided)"
+    },
+    {
+      "id": "SC8",
+      "verdict": "PASS",
+      "sense_check_id": "SC8",
+      "executor_note": "(not provided)"
+    }
+  ]
+}

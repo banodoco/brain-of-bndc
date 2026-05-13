@@ -73,8 +73,11 @@ except Exception as e:
 ################################################################################
 async def schedule_daily_summary(bot):
     """
-    Example stub for daily scheduled runs. 
-    Adjust logic and scheduling library as appropriate to your environment.
+    Legacy unused helper for daily scheduled runs.
+
+    The production bot uses SummarizerCog today. The live-update editor
+    replacement must not call this helper or bot.generate_summary(); keep this
+    only as explicit legacy/backfill behavior until it is removed.
     """
     first_run = True
     while not bot._shutdown_flag:
@@ -2218,6 +2221,12 @@ If nothing stands out today, respond with just: NOTHING"""
     @handle_errors("generate_summary")
     async def generate_summary(self):
         """
+        Legacy/backfill daily summary batch.
+
+        This monolithic flow is kept available for explicit historical
+        regeneration/backfill only. The live-update editor must not use this as
+        active runtime storage or publishing.
+
         Generate and post summaries following these steps:
         1) Generate individual channel summaries and post to their channels (except for forum channels)
         2) Combine channel summaries for overall summary

@@ -39,9 +39,9 @@ class HealthCheckCog(commands.Cog):
             logger.error(f"[HealthCheck] Error checking reactions: {e}", exc_info=True)
 
         try:
-            alerts.extend(self._check_daily_summary())
+            alerts.extend(self._check_live_update_editor())
         except Exception as e:
-            logger.error(f"[HealthCheck] Error checking daily summary: {e}", exc_info=True)
+            logger.error(f"[HealthCheck] Error checking live-update editor: {e}", exc_info=True)
 
         if alerts:
             await self._notify_admin(alerts)
@@ -114,27 +114,64 @@ class HealthCheckCog(commands.Cog):
             return ["No messages with reaction_count > 0 in the last 24 hours (reaction updates may be broken)"]
         return []
 
-    def _check_daily_summary(self) -> list[str]:
-        """After 8:00 UTC, alert if today's daily summary is missing."""
-        now = datetime.now(timezone.utc)
-        if now.hour < 8:
-            return []  # Too early – summary hasn't been scheduled yet
-
+    def _check_live_update_editor(self) -> list[str]:
+        """Alert if the active topic editor has stopped or is failing."""
         sb = self._get_supabase()
         if not sb:
             return []
 
-        today = now.strftime('%Y-%m-%d')
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
         result = (
-            sb.table('daily_summaries')
-            .select('*', count='exact')
-            .eq('date', today)
+            sb.table('topic_editor_runs')
+            .select('run_id,status,started_at,completed_at,error_message,source_message_count,tool_call_count,accepted_count,rejected_count,override_count,published_count,failed_publish_count', count='exact')
+            .gte('started_at', cutoff)
+            .order('started_at', desc=True)
             .limit(1)
             .execute()
         )
         count = result.count if result.count is not None else len(result.data)
         if count == 0:
-            return [f"No daily summary found for {today} (checked after 08:00 UTC)"]
+            return ["No topic-editor runs recorded in the last 2 hours"]
+
+        latest = result.data[0] if result.data else {}
+        status = latest.get('status')
+        if status == 'failed':
+            return [f"Latest topic-editor run failed: {latest.get('error_message') or latest.get('run_id')}"]
+        if status == 'running':
+            started_at = latest.get('started_at')
+            if started_at:
+                try:
+                    started_dt = datetime.fromisoformat(str(started_at).replace('Z', '+00:00'))
+                    age_minutes = (datetime.now(timezone.utc) - started_dt).total_seconds() / 60
+                    if age_minutes > 45:
+                        return [f"Topic-editor run has been running for {age_minutes:.0f} minutes"]
+                except ValueError:
+                    pass
+        if int(latest.get('failed_publish_count') or 0) > 0:
+            return [
+                "Latest topic-editor run had failed or partial publications: "
+                f"{latest.get('failed_publish_count')}"
+            ]
+
+        publication_result = (
+            sb.table('topics')
+            .select('topic_id,headline,publication_status,publication_error,updated_at', count='exact')
+            .gte('updated_at', cutoff)
+            .order('updated_at', desc=True)
+            .limit(10)
+            .execute()
+        )
+        publication_problems = [
+            row for row in (publication_result.data or [])
+            if row.get('publication_status') in {'failed', 'partial'}
+        ]
+        if publication_problems:
+            first = publication_problems[0]
+            return [
+                "Topic-editor has failed or partial publications: "
+                f"{first.get('headline') or first.get('topic_id')} "
+                f"({first.get('publication_status')})"
+            ]
         return []
 
     # ------------------------------------------------------------------
@@ -178,7 +215,7 @@ class HealthCheckCog(commands.Cog):
         alerts: list[str] = []
         alerts.extend(self._check_recent_messages())
         alerts.extend(self._check_reactions_recorded())
-        alerts.extend(self._check_daily_summary())
+        alerts.extend(self._check_live_update_editor())
 
         if alerts:
             body = "\n".join(f"- {a}" for a in alerts)

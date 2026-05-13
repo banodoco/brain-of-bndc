@@ -8,8 +8,8 @@ Responsibilities:
 - Provides manual !archive command for admins
 - Automatically shuts down bot after standalone archive completion
 
-Note: When --archive-days is used WITH --summary-now, the SummarizerCog 
-handles the archive operation before running the summary.
+Note: When --archive-days is used WITH --summary-now, SummarizerCog owns the
+archive-first startup pass before running the live-update editor.
 """
 
 import logging
@@ -32,7 +32,7 @@ class ArchiveCog(commands.Cog):
             summary_now = getattr(self.bot, 'summary_now', False)
             
             # Only run archive if archive_days is specified and summary_now is NOT set
-            # (when summary_now is set, the SummarizerCog handles the archive)
+            # (when summary_now is set, SummarizerCog handles archive before the live editor)
             if archive_days and not summary_now:
                 logger.info(f"Detected standalone --archive-days {archive_days} flag on startup.")
                 try:

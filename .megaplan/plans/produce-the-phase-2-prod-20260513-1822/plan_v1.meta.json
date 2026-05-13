@@ -1,0 +1,145 @@
+{
+  "version": 1,
+  "timestamp": "2026-05-13T16:32:11Z",
+  "hash": "sha256:ed7211cab87a95c33b98d4232847a14cf7ef7f79f9ab18840e97482c4d7100d9",
+  "questions": [
+    "Phase 1 has not landed yet \u2014 what is the chosen name and location of the publishing toggle (env var, config row, feature flag)? The runbook uses a `<LIVE_EDITOR_PUBLISH_TOGGLE>` placeholder with a `TODO(phase-1)` note; if known now, replace it.",
+    "Where exactly does the legacy editor's Discord-send call get suppressed when the toggle flips \u2014 at `_publish_accepted_candidates` entry (`src/features/summarising/live_update_editor.py:84`), at the scheduler tick, or via a config-driven branch? Affects the exact verification step in \u00a75 and \u00a78.",
+    "Which Discord channel is the prod equivalent of `#main_test` for the trace embed during the 24-48h watch? Currently treated as `TODO(phase-1)`.",
+    "Is there an existing prod migration tool / runbook convention (e.g. supabase migrations folder, manual psql) the \u00a79 rename should plug into, or is the operator running raw SQL via psql against prod?",
+    "Does the `topics` table actually carry an `environment` column in the Phase-1 migration, or is environment scoping done via separate prod/dev databases? Affects every SQL block's `WHERE environment='prod'` clause."
+  ],
+  "success_criteria": [
+    {
+      "criterion": "File `docs/live-update-editor-phase-2-runbook.md` exists at exactly that path with non-empty content.",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Document contains a Fast Triage SQL section (matching `docs/runbook-payments.md` Fast Triage pattern) querying `topics` grouped by `publication_status` scoped to `environment='prod'`.",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Document includes a Pre-flip preconditions checklist with at least one verifiable command per gate (Phase 1 soak, schema migration applied, indexes present, backfill parity, lease in place, trace embed wired, legacy editor still running, paged-in window).",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Document includes a GO / TUNE / ABORT shadow-mode-to-cutover comparison rubric keyed on at least: replay-divergence explainability, collision-override rate, `record_observation` rate, partial-publish in dev, schema-rejection rate, cost/latency.",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Document includes a Publishing-flag-flip procedure with ordered steps and a `<LIVE_EDITOR_PUBLISH_TOGGLE>` placeholder (or the Phase-1-chosen toggle name) plus the post-flip verification SQL one-liner.",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Document includes four partial-publish detection SQL queries: windowed counts, per-row deep-dive (selecting `publication_status`, `publication_error`, `publication_attempts`, `last_published_at`, `discord_message_ids`), still-pending-too-long, and rejection-rate against `topic_transitions WHERE action LIKE 'rejected_%'`, all scoped to `environment='prod'` with a `-- swap to 'dev'` annotation.",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Document includes a 24-48h watch decision-tree table (SYMPTOM | THRESHOLD | ACTION | POINTER) that explicitly maps `publication_status='partial'` count \u22652 to ABORT + restore `topic_publications`, citing `docs/live-update-editor-redesign.md:600-601`.",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Document includes a Rollback procedure (runner-pointer flip) that explicitly leaves `topics` rows untouched and distinguishes pre-rename rollback (trivial \u2014 toggle flip) from post-rename rollback (reverse rename SQL), citing `docs/live-update-editor-redesign.md:596`.",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Document includes an ordered table-rename migration SQL block that renames all six legacy tables (`live_update_feed_items`, `live_update_watchlist`, `live_update_duplicate_state`, `live_update_editorial_memory`, `live_update_candidates`, `live_update_decisions`) to `_legacy_<name>`, retains `live_update_editor_runs`, runs inside `BEGIN; ... COMMIT;` with a dry-run rollback note, includes row-count parity SELECT before AND after, and a constraint-preservation note for Postgres.",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Document explicitly states that the table rename runs only AFTER the 24-48h watch passes, so rollback during the watch remains a single toggle flip.",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Document includes a deletion-schedule section that records the `_legacy_*` deletion 2-4 weeks post-rename as an operator-filled blank (does not hardcode a date), plus a final `DROP TABLE _legacy_*` block, and named bring-forward / push-out circumstances.",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Document references `docs/live-update-editor-redesign.md` for schema shape rather than re-listing column definitions, and points back to it as the ABORT-to-rollback escape hatch in a footer.",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Document references `src/features/summarising/live_update_editor.py` (specifically `_publish_accepted_candidates` / `_select_publishable_candidates`) as the legacy fallback path the runner-pointer rollback re-enables.",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Document length is roughly comparable to `docs/runbook-payments.md` (~400 lines, give or take 100); not under 200 and not over 700.",
+      "priority": "should",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Tone matches `docs/runbook-payments.md` \u2014 terse, imperative, copy-paste SQL ready, minimal narrative prose.",
+      "priority": "should",
+      "requires": [
+        "subjective_judgment"
+      ]
+    },
+    {
+      "criterion": "Every `TODO(phase-1)` placeholder in the doc is clearly labeled so the operator can spot Phase-1-dependent gaps.",
+      "priority": "should",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "No code edits outside `docs/live-update-editor-phase-2-runbook.md`; existing tests still pass (unchanged).",
+      "priority": "must",
+      "requires": [
+        "run_shell",
+        "parse_diff"
+      ]
+    }
+  ],
+  "assumptions": [
+    "The publish toggle exists at a single named location chosen by Phase 1; the runbook references it as `<LIVE_EDITOR_PUBLISH_TOGGLE>` with a `TODO(phase-1)` marker rather than guessing the name.",
+    "Suppression of the legacy editor's publish path is gated at `_publish_accepted_candidates` (`src/features/summarising/live_update_editor.py:84-107`) or its `_select_publishable_candidates` callsite (`:261-346`); the runbook references both lines and leaves the exact mechanism as `TODO(phase-1)`.",
+    "The `topics` table carries an `environment` column per `docs/live-update-editor-redesign.md:117-123` so SQL can be `WHERE environment='prod'` with a `-- swap to 'dev'` inline comment usable pre-flip.",
+    "Postgres is the target DB and `ALTER TABLE ... RENAME TO` preserves indexes, sequences, FK constraints, and RLS \u2014 operator runs the rename SQL via psql or the project's existing migration tool.",
+    "The legacy table set to rename matches the six listed in `docs/live-update-editor-redesign.md:212-223` and in `docs/live-update-editor-legacy-boundaries.md`; `live_update_editor_runs` is retained.",
+    "Deletion date is operator-chosen between 2 and 4 weeks post-rename per `docs/live-update-editor-redesign.md:653`; the runbook leaves a blank line rather than hardcoding a date.",
+    "ABORT during the 24-48h watch is the default response to any unlisted symptom; the runbook does not prescribe improvisation paths.",
+    "Doc is the only artifact this plan produces \u2014 no code, no tests."
+  ],
+  "structure_warnings": []
+}

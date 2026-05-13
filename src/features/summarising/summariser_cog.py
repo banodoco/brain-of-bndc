@@ -1,11 +1,14 @@
 # src/features/summarising/summariser_cog.py
 
-from datetime import time, timezone
 from discord.ext import commands
 import logging
+import os
 from discord.ext import tasks
 
 from .summariser import ChannelSummarizer
+from .live_update_editor import LiveUpdateEditor as LegacyLiveUpdateEditor
+from .topic_editor import TopicEditor
+from .live_top_creations import LiveTopCreations
 # Import SharerCog to check for its instance
 
 MAX_RETRIES = 3
@@ -15,92 +18,260 @@ MAX_RETRY_WAIT = 300  # 5 minutes
 
 logger = logging.getLogger('DiscordBot')
 
+LIVE_UPDATE_EDITOR_BACKEND_TOPIC = "topic"
+LIVE_UPDATE_EDITOR_BACKEND_LEGACY = "legacy"
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
 class SummarizerCog(commands.Cog):
-    def __init__(self, bot: commands.Bot, channel_summarizer: ChannelSummarizer):
+    """Runtime owner for the active live-update editor.
+
+    ChannelSummarizer remains attached for explicit legacy/backfill use only;
+    scheduled and owner-triggered overview behavior now runs the live editor.
+    """
+
+    def __init__(
+        self,
+        bot: commands.Bot,
+        channel_summarizer: ChannelSummarizer,
+        *,
+        live_update_editor: object | None = None,
+        live_top_creations: LiveTopCreations | None = None,
+        start_loops: bool = True,
+    ):
         self.bot = bot
         self.channel_summarizer = channel_summarizer
-        self.run_daily_summary.start()
+        db_handler = getattr(bot, "db_handler", None)
+        if db_handler is None:
+            raise RuntimeError("SummarizerCog requires bot.db_handler for live-update runtime")
+        self.dev_mode = bool(getattr(bot, "dev_mode", False))
+        # Single combined loop covers both editor and top_creations so they run
+        # together every hour. The old design had two independent loops on
+        # different intervals (editor 15min, top_creations 6hr) which made the
+        # debug-channel timeline unreadable and prevented the editor's
+        # reasoning embed from being interleaved with top_creations correctly.
+        self.live_updates_enabled = self.dev_mode or _env_flag("LIVE_UPDATES_ENABLED", False)
+        self.live_top_creations_enabled = self.dev_mode or _env_flag("LIVE_TOP_CREATIONS_ENABLED", False)
+        self.live_pass_interval_minutes = _env_int("LIVE_PASS_INTERVAL_MINUTES", 60)
+        dry_run_lookback_hours = _env_int("LIVE_UPDATE_DEV_LOOKBACK_HOURS", 6)
+        self.live_update_editor = live_update_editor or self._build_live_update_editor(
+            db_handler,
+            dry_run_lookback_hours=dry_run_lookback_hours,
+        )
+        self.live_top_creations = live_top_creations or LiveTopCreations(
+            db_handler,
+            bot=bot,
+            logger_instance=getattr(bot, "logger", logger),
+            dry_run_lookback_hours=dry_run_lookback_hours,
+            environment="dev" if self.dev_mode else "prod",
+        )
+        if start_loops:
+            self.run_live_pass.change_interval(minutes=self.live_pass_interval_minutes)
+            if self.live_updates_enabled or self.live_top_creations_enabled:
+                self.run_live_pass.start()
+            else:
+                logger.warning(
+                    "Live-update pass disabled; set LIVE_UPDATES_ENABLED=true "
+                    "and/or LIVE_TOP_CREATIONS_ENABLED=true to enable in production."
+                )
 
     def cog_unload(self):
-        self.run_daily_summary.cancel()
+        if self.run_live_pass.is_running():
+            self.run_live_pass.cancel()
 
-    @tasks.loop(time=time(hour=7, minute=0, tzinfo=timezone.utc))
-    async def run_daily_summary(self):
-        """Daily task to run the summary generation at 7:00 UTC."""
-        logger.info("Scheduled daily summary time reached (7:00 UTC). Starting...")
+    @tasks.loop(minutes=60)
+    async def run_live_pass(self):
+        """Combined hourly pass: editor → top_creations → flush reasoning.
+
+        Both subsystems run on the same cadence so their debug telemetry lands
+        contiguously in the dev channel and the editor's reasoning embed can be
+        sent after top_creations posts. Production (real) posts still go to
+        their respective production channels; only the debug embeds are routed
+        to the dev channel.
+        """
+        if self.live_updates_enabled:
+            logger.info("Scheduled live-update editor pass starting...")
+            try:
+                result = await self.live_update_editor.run_once(trigger="scheduled")
+                logger.info("Scheduled live-update editor pass finished: %s", result)
+            except Exception as e:
+                logger.error(f"Error during scheduled live-update editor pass: {e}", exc_info=True)
+        if self.live_top_creations_enabled:
+            logger.info("Scheduled live top-creations pass starting...")
+            try:
+                result = await self.live_top_creations.run_once(trigger="scheduled")
+                logger.info("Scheduled live top-creations pass finished: %s", result)
+            except Exception as e:
+                logger.error(f"Error during scheduled live top-creations pass: {e}", exc_info=True)
+        # Flush the editor's deferred reasoning embed + trace file so they land
+        # after top_creations' debug embed in the dev channel.
         try:
-            await self.channel_summarizer.generate_summary()
-            logger.info("Scheduled daily summary finished.")
+            flush_pending_reasoning = getattr(self.live_update_editor, "flush_pending_reasoning", None)
+            if callable(flush_pending_reasoning):
+                await flush_pending_reasoning()
         except Exception as e:
-            logger.error(f"Error during scheduled summary run: {e}", exc_info=True)
+            logger.warning("flush_pending_reasoning failed: %s", e, exc_info=True)
+
+    def _build_live_update_editor(self, db_handler, *, dry_run_lookback_hours: int):
+        backend = os.getenv("LIVE_UPDATE_EDITOR_BACKEND", LIVE_UPDATE_EDITOR_BACKEND_TOPIC).strip().lower()
+        environment = "dev" if self.dev_mode else "prod"
+        if backend == LIVE_UPDATE_EDITOR_BACKEND_LEGACY:
+            logger.warning("Using legacy live-update editor backend via LIVE_UPDATE_EDITOR_BACKEND=legacy")
+            return LegacyLiveUpdateEditor(
+                db_handler,
+                bot=self.bot,
+                logger_instance=getattr(self.bot, "logger", logger),
+                dry_run_lookback_hours=dry_run_lookback_hours,
+                environment=environment,
+            )
+        if backend not in {"", LIVE_UPDATE_EDITOR_BACKEND_TOPIC, "topic_editor"}:
+            logger.warning(
+                "Unknown LIVE_UPDATE_EDITOR_BACKEND=%r; defaulting to topic editor",
+                backend,
+            )
+        return TopicEditor(
+            bot=self.bot,
+            db_handler=db_handler,
+            environment=environment,
+        )
+
+    @run_live_pass.before_loop
+    async def before_run_live_pass(self):
+        await self.bot.wait_until_ready()
+        await self._wait_for_startup_live_pass()
 
     @commands.Cog.listener()
     async def on_ready(self):
         """
-        Handles the --summary-now flag on bot startup.
+        Handles the --summary-now live-editor flag on bot startup.
         
-        If --archive-days is also specified, runs archive first, then summary.
-        This ensures the summary uses the most up-to-date archived data.
+        If --archive-days is also specified, runs archive first, then the
+        live editor so candidates use the most recent archived messages.
         """
         if not hasattr(self, '_ran_summary_now_check'):
             self._ran_summary_now_check = True
             run_now_flag = getattr(self.bot, 'summary_now', False)
+            legacy_run_flag = getattr(self.bot, 'legacy_summary_now', False)
             archive_days = getattr(self.bot, 'archive_days', None)
             
-            logger.info(f"SummarizerCog on_ready: summary_now={run_now_flag}, archive_days={archive_days}")
+            logger.info(
+                "SummarizerCog on_ready: summary_now=%s, legacy_summary_now=%s, archive_days=%s",
+                run_now_flag,
+                legacy_run_flag,
+                archive_days,
+            )
             
             if run_now_flag:
                 logger.info("Detected --summary-now flag on startup.")
                 
                 # If archive_days is specified, run archive first
                 if archive_days:
-                    logger.info(f"Archive days specified ({archive_days}). Running archive process first.")
-                    try:
-                        from src.common.archive_runner import ArchiveRunner
-                        
-                        dev_mode = getattr(self.bot, 'dev_mode', False)
-                        archive_runner = ArchiveRunner()
-                        sc = getattr(self.bot, 'server_config', None)
-                        _guild_id = sc.bndc_guild_id if sc else None
-                        success = await archive_runner.run_archive(archive_days, dev_mode, in_depth=True, guild_id=_guild_id)
-                        
-                        if success:
-                            logger.info("Archive process completed successfully. Now starting summary.")
-                        else:
-                            logger.warning("Archive process failed. Continuing with summary anyway.")
-                            
-                    except Exception as e:
-                        logger.error(f"Error during archive process: {e}", exc_info=True)
-                        logger.info("Continuing with summary despite archive error.")
+                    await self._run_startup_archive(archive_days)
                 
-                # Run the summary
+                # Run the live editor after any requested archive work.
                 try:
-                    if hasattr(self, 'channel_summarizer'):
-                         await self.channel_summarizer.generate_summary()
-                         logger.info("Initial --summary-now run finished.")
-                    else:
-                         logger.error("ChannelSummarizer not found during on_ready for --summary-now run.")
+                    result = await self.live_update_editor.run_once(trigger="startup_summary_now")
+                    logger.info("Initial --summary-now live-update pass finished: %s", result)
                 except Exception as e:
-                    logger.error(f"Error during initial --summary-now run: {e}", exc_info=True)
+                    logger.error(f"Error during initial --summary-now live-update pass: {e}", exc_info=True)
                 finally:
-                    # Signal completion so hourly fetch can start (even on error)
-                    self.bot.summary_completed.set()
+                    self._release_startup_live_gate()
+            elif legacy_run_flag:
+                logger.info("Detected explicit legacy daily-summary startup flag.")
+                if archive_days:
+                    await self._run_startup_archive(archive_days)
+                try:
+                    await self.channel_summarizer.generate_summary()
+                    logger.info("Initial legacy daily-summary startup run finished.")
+                except Exception as e:
+                    logger.error(f"Error during initial legacy daily-summary startup run: {e}", exc_info=True)
+                finally:
+                    self._release_startup_live_gate()
             else:
                 logger.debug("No --summary-now flag detected on startup.")
+                self._release_startup_live_gate()
 
     @commands.command(name="summarynow")
     @commands.is_owner() # Or check for specific admin role/ID
     async def summary_now_command(self, ctx):
-        """Manually triggers the summary generation process."""
-        logger.info(f"Manual summary triggered by {ctx.author.name}")
-        await ctx.send("Starting manual summary generation...")
+        """Manually triggers one live-update editor pass."""
+        logger.info(f"Manual live-update pass triggered by {ctx.author.name}")
+        await ctx.send("Starting live-update editor pass...")
         try:
-            # Access the generate_summary method from the stored instance
-            await self.channel_summarizer.generate_summary()
-            await ctx.send("Manual summary generation complete.")
+            result = await self.live_update_editor.run_once(trigger="owner_summarynow")
+            status = result.get("status", "unknown") if isinstance(result, dict) else "unknown"
+            await ctx.send(f"Live-update editor pass complete: {status}.")
         except Exception as e:
-            logger.error(f"Error during manual summary run: {e}", exc_info=True)
-            await ctx.send(f"An error occurred during summary generation: {e}")
+            logger.error(f"Error during manual live-update pass: {e}", exc_info=True)
+            await ctx.send(f"An error occurred during live-update editor pass: {e}")
+
+    @commands.command(name="legacysummarynow")
+    @commands.is_owner()
+    async def legacy_summary_now_command(self, ctx):
+        """Explicit legacy daily-summary/backfill entrypoint."""
+        logger.info(f"Manual legacy summary triggered by {ctx.author.name}")
+        await ctx.send("Starting legacy daily-summary generation...")
+        try:
+            await self.channel_summarizer.generate_summary()
+            await ctx.send("Legacy daily-summary generation complete.")
+        except Exception as e:
+            logger.error(f"Error during manual legacy summary run: {e}", exc_info=True)
+            await ctx.send(f"An error occurred during legacy daily-summary generation: {e}")
+
+    async def _run_startup_archive(self, archive_days: int) -> None:
+        logger.info(f"Archive days specified ({archive_days}). Running archive process before live editor.")
+        try:
+            from src.common.archive_runner import ArchiveRunner
+
+            dev_mode = getattr(self.bot, 'dev_mode', False)
+            archive_runner = ArchiveRunner()
+            sc = getattr(self.bot, 'server_config', None)
+            guilds_to_archive = sc.get_guilds_to_archive() if sc and hasattr(sc, "get_guilds_to_archive") else []
+            if not guilds_to_archive and sc and getattr(sc, "bndc_guild_id", None):
+                guilds_to_archive = [{"guild_id": sc.bndc_guild_id}]
+
+            success = True
+            for guild_cfg in guilds_to_archive:
+                guild_id = guild_cfg.get("guild_id") if isinstance(guild_cfg, dict) else guild_cfg
+                guild_success = await archive_runner.run_archive(
+                    archive_days,
+                    dev_mode,
+                    in_depth=True,
+                    guild_id=guild_id,
+                )
+                success = success and guild_success
+
+            if not guilds_to_archive:
+                logger.warning("No writable guilds available for startup archive before live editor.")
+            elif success:
+                logger.info("Startup archive completed successfully. Starting live editor.")
+            else:
+                logger.warning("Startup archive failed for one or more guilds. Continuing with live editor.")
+        except Exception as e:
+            logger.error(f"Error during startup archive process: {e}", exc_info=True)
+            logger.info("Continuing with live editor despite archive error.")
+
+    async def _wait_for_startup_live_pass(self) -> None:
+        startup_gate = getattr(self.bot, "summary_completed", None)
+        if startup_gate is not None:
+            await startup_gate.wait()
+
+    def _release_startup_live_gate(self) -> None:
+        startup_gate = getattr(self.bot, "summary_completed", None)
+        if startup_gate is not None and not startup_gate.is_set():
+            startup_gate.set()
 
 async def setup(bot: commands.Bot):
     logger.info("Setting up SummarizerCog...")

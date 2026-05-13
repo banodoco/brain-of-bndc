@@ -1,0 +1,34 @@
+{
+  "output": "Authored \u00a71 (header, audience, scope, provisional banner with six TODO(phase-1) items + out-of-scope clause + primary tools + guardrails) and \u00a72 (Fast Triage SQL grouped by publication_status, scoped environment='prod', with dev-swap comments and 'no partials in dev' annotations).",
+  "commands_run": [],
+  "deviations": [
+    "Advisory audit finding: Sense check SC3 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC4 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC5 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC6 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC7 is missing an executor acknowledgment."
+  ],
+  "task_updates": [
+    {
+      "task_id": "T2",
+      "status": "done",
+      "executor_notes": "Wrote H1 + 5-line preamble naming oncall, after-Phase-1-gate timing, covers/doesn't list pointing at redesign for Phase 1 design. \u00a71 banner enumerates SIX TODO(phase-1) items: (a) toggle name + location with <LIVE_EDITOR_PUBLISH_TOGGLE>, (b) Branch A vs Branch B suppression mechanism, (c) Branch-B run-row suppression marker column/metadata key, (d) new-editor + legacy bot identities in live channel, (e) prod trace-embed channel, (f) run-source discriminator on live_update_editor_runs with explicit note that storage_handler.py:652-682 confirms no run_source/editor_source/run_type column today. Out-of-scope clause: any third mechanism (hybrid, per-guild, per-channel, partial-guild) OR omission of TODO(f) \u2192 ABORT to consult-the-doc (\u00a711). Primary tools bullet list covers <LIVE_EDITOR_PUBLISH_TOGGLE>, trace channel, SQL one-liners, legacy editor entrypoint at live_update_editor.py:60, legacy publish wiring _publish_accepted_candidates :84-107 + _select_publishable_candidates :261, migration hand-off chain. Guardrails: rename only after watch, cross-window trip-wire citing :600-601, both editors keep writing own tables citing :651, default ABORT. \u00a72 Fast Triage SQL groups by publication_status scoped environment='prod' last-hour, includes -- swap to 'dev' for pre-flip verification comment with 'no partials in dev during Phase 1 per :611/:627/:633 \u2014 0 dev partials does NOT mean prod is clean' annotation. 'Then classify' bullet list per status with jump-to pointers to \u00a76/\u00a77. State-summary one-liner against topics. Recent-runs one-liner against live_update_editor_runs noting Branch-B marker (TODO c) AND run-source discriminator (TODO f) appear on those rows.",
+      "sections_written": [
+        "\u00a71-scope-and-provisional-values",
+        "\u00a72-fast-triage"
+      ],
+      "stance": null,
+      "stop_signal": null
+    }
+  ],
+  "sense_check_acknowledgments": [
+    {
+      "sense_check_id": "SC2",
+      "executor_note": "Confirmed: \u00a71 provisional banner enumerates SIX TODO(phase-1) items labeled (a) through (f), with (f) being the run-source discriminator on live_update_editor_runs (citing src/common/storage_handler.py:652-682 to confirm no such column today). Explicit out-of-scope clause covers any third mechanism (hybrid, per-guild config, per-channel rollout, partial-guild canary) OR omission of TODO(f) \u2192 ABORT to \u00a711. \u00a72 Fast Triage SQL groups by publication_status scoped environment='prod' over last hour, with `-- swap to 'dev' for pre-flip verification` comment AND the 'no partials in dev during Phase 1 per :611/:627/:633' annotation that also warns operators not to misread '0 dev partials' as 'prod clean'."
+    }
+  ],
+  "sections_written": [
+    "\u00a71-scope-and-provisional-values",
+    "\u00a72-fast-triage"
+  ]
+}

@@ -220,6 +220,431 @@
       "resolved": false,
       "resolved_by": null,
       "resolved_at": null
+    },
+    {
+      "id": "DEBT-014",
+      "subsystem": "editor-init-cap",
+      "concern": "editor-init-cap: changing default_max_publish_per_run to none breaks the existing `max(1, int(... or os.getenv(..., default)))` initializer (int(none) raises). plan must rewrite the init expression, not just flip the constant.",
+      "flag_ids": [
+        "FLAG-001"
+      ],
+      "plan_ids": [
+        "implement-the-watchlist-20260512-1809"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-12T16:16:54Z",
+      "updated_at": "2026-05-12T16:16:54Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
+    },
+    {
+      "id": "DEBT-015",
+      "subsystem": "are-the-proposed-changes-technically-correct",
+      "concern": "are the proposed changes technically correct?: current init at live_update_editor.py:101-104 is `self.max_publish_per_run = max(1, int(max_publish_per_run or os.getenv('live_update_max_posts_per_run', self.default_max_publish_per_run)))`. if default becomes none and env is unset, `int(none)` raises typeerror. plan step 5.1 says 'leave self.max_publish_per_run = none unless env var set' but does not explicitly rewrite the `max(1, int(...))` expression.",
+      "flag_ids": [
+        "correctness-1"
+      ],
+      "plan_ids": [
+        "implement-the-watchlist-20260512-1809"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-12T16:16:54Z",
+      "updated_at": "2026-05-12T16:16:54Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
+    },
+    {
+      "id": "DEBT-016",
+      "subsystem": "editorial-bar-threading",
+      "concern": "editorial-bar-threading: `scanned_message_count` and `is_last_call` are new inputs to a classmethod with multiple call sites; no caller threads them today. plan asserts threading is trivial but does not enumerate `_message_meets_editorial_bar` or other callers.",
+      "flag_ids": [
+        "FLAG-002"
+      ],
+      "plan_ids": [
+        "implement-the-watchlist-20260512-1809"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-12T16:16:54Z",
+      "updated_at": "2026-05-12T16:16:54Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
+    },
+    {
+      "id": "DEBT-017",
+      "subsystem": "are-the-proposed-changes-technically-correct",
+      "concern": "are the proposed changes technically correct?: `_meets_editorial_bar` (live_update_prompts.py:903) is a classmethod with a fixed signature; `scanned_message_count` does not exist anywhere in the repo (grep confirms zero hits). plan assumption #4 calls threading 'trivial', but the bar is invoked from `_message_meets_editorial_bar` (line 941) and other paths \u2014 every call site needs the new args, including indirect ones.",
+      "flag_ids": [
+        "correctness-2"
+      ],
+      "plan_ids": [
+        "implement-the-watchlist-20260512-1809"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-12T16:16:54Z",
+      "updated_at": "2026-05-12T16:16:54Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
+    },
+    {
+      "id": "DEBT-018",
+      "subsystem": "find-the-callers-of-the-changed-function-what-arguments-do-they-actually-pass-does-the-fix-handle-all-of-them",
+      "concern": "find the callers of the changed function. what arguments do they actually pass? does the fix handle all of them?: `_meets_editorial_bar` callers: `_message_meets_editorial_bar` at line 941 forwards a single message and computes confidence locally; with new `scanned_message_count`/`is_last_call` params, that wrapper plus every direct caller must thread the new context. plan should enumerate caller-by-caller.",
+      "flag_ids": [
+        "callers-2"
+      ],
+      "plan_ids": [
+        "implement-the-watchlist-20260512-1809"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-12T16:16:54Z",
+      "updated_at": "2026-05-12T16:16:54Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
+    },
+    {
+      "id": "DEBT-019",
+      "subsystem": "watchlist-tool-dispatch",
+      "concern": "watchlist-tool-dispatch: new `watchlist_add`/`watchlist_update` must be registered in the editor's tool dispatcher (live_update_editor.py ~line 440 unknown_tool branch), not in the generic `_run_requested_tool` invoker. plan step 3.2 points at the wrong location.",
+      "flag_ids": [
+        "FLAG-003"
+      ],
+      "plan_ids": [
+        "implement-the-watchlist-20260512-1809"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-12T16:16:54Z",
+      "updated_at": "2026-05-12T16:16:54Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
+    },
+    {
+      "id": "DEBT-020",
+      "subsystem": "does-the-change-touch-all-locations-and-supporting-infrastructure",
+      "concern": "does the change touch all locations and supporting infrastructure?: tool dispatch: `_run_requested_tool` (live_update_prompts.py:562) is a generic invoker that calls `tool_runner(name, args)`. the real per-tool routing lives in `live_update_editor.py`'s tool runner at ~line 440 (`return {'error': f'unknown_tool:{tool_name}'}`). plan step 3.2 points dispatch wiring at `_run_requested_tool`, but new tool names must be added to the editor's dispatcher.",
+      "flag_ids": [
+        "all_locations-2"
+      ],
+      "plan_ids": [
+        "implement-the-watchlist-20260512-1809"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-12T16:16:54Z",
+      "updated_at": "2026-05-12T16:16:54Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
+    },
+    {
+      "id": "DEBT-021",
+      "subsystem": "did-the-work-fully-address-the-issue-hints-user-notes-and-approved-plan-requirements",
+      "concern": "did the work fully address the issue hints, user notes, and approved plan requirements?: brief phase 4 item #5 (hard-requirement assertion in output shape saying an omitted reasoning prefix makes the response invalid and will be re-requested) is folded into plan step 9.1 with the prefix instruction; plan should explicitly preserve that behaviour-shaping wording, not just the prefix mechanics.",
+      "flag_ids": [
+        "issue_hints-1"
+      ],
+      "plan_ids": [
+        "implement-the-watchlist-20260512-1809"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-12T16:16:54Z",
+      "updated_at": "2026-05-12T16:16:54Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
+    },
+    {
+      "id": "DEBT-022",
+      "subsystem": "did-the-work-fully-address-the-issue-hints-user-notes-and-approved-plan-requirements",
+      "concern": "did the work fully address the issue hints, user notes, and approved plan requirements?: brief caps active rows at 50 globally; plan step 2.4 only auto-archives oldest `fresh` rows beyond cap, so accumulated `revisit_due`/`last_call` items can push the active count beyond 50 indefinitely.",
+      "flag_ids": [
+        "issue_hints-2"
+      ],
+      "plan_ids": [
+        "implement-the-watchlist-20260512-1809"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-12T16:16:54Z",
+      "updated_at": "2026-05-12T16:16:54Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
+    },
+    {
+      "id": "DEBT-023",
+      "subsystem": "are-the-proposed-changes-technically-correct",
+      "concern": "are the proposed changes technically correct?: step 2.2 says `extend` sets `next_revisit_at = least(now()+6-12h, expires_at)` \u2014 '6-12h' is a range, not a concrete value. implementation needs a single number or documented derivation.",
+      "flag_ids": [
+        "correctness-4"
+      ],
+      "plan_ids": [
+        "implement-the-watchlist-20260512-1809"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-12T16:16:54Z",
+      "updated_at": "2026-05-12T16:16:54Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
+    },
+    {
+      "id": "DEBT-024",
+      "subsystem": "are-the-proposed-changes-technically-correct",
+      "concern": "are the proposed changes technically correct?: plan auto-archives ttl-expired rows inside `get_live_update_watchlist` (a read path), turning every read into a write and exposing a race across concurrent dev/prod runs sharing a db. safer as an idempotent update before the select.",
+      "flag_ids": [
+        "correctness-5"
+      ],
+      "plan_ids": [
+        "implement-the-watchlist-20260512-1809"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-12T16:16:54Z",
+      "updated_at": "2026-05-12T16:16:54Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
+    },
+    {
+      "id": "DEBT-025",
+      "subsystem": "search-for-related-code-that-handles-the-same-concept-is-the-reported-issue-a-symptom-of-something-broader",
+      "concern": "search for related code that handles the same concept. is the reported issue a symptom of something broader?: existing `upsert_live_update_watchlist` (db_handler.py:595, storage_handler.py:1733) already writes the table; plan introduces a parallel `insert_live_update_watchlist`. two write entry points for the same table risk divergent column handling. plan should replace the upsert or document the relationship.",
+      "flag_ids": [
+        "scope-1"
+      ],
+      "plan_ids": [
+        "implement-the-watchlist-20260512-1809"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-12T16:16:54Z",
+      "updated_at": "2026-05-12T16:16:54Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
+    },
+    {
+      "id": "DEBT-026",
+      "subsystem": "search-for-related-code-that-handles-the-same-concept-is-the-reported-issue-a-symptom-of-something-broader",
+      "concern": "search for related code that handles the same concept. is the reported issue a symptom of something broader?: `get_live_update_watchlist` currently accepts a `status='active'` filter; plan broadens values and changes return shape to a grouped dict. only caller is editor.py:140 which doesn't pass status, so direct risk is low \u2014 but the contract change is a real break for any future caller assuming a list.",
+      "flag_ids": [
+        "scope-2"
+      ],
+      "plan_ids": [
+        "implement-the-watchlist-20260512-1809"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-12T16:16:54Z",
+      "updated_at": "2026-05-12T16:16:54Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
+    },
+    {
+      "id": "DEBT-027",
+      "subsystem": "find-the-callers-of-the-changed-function-what-arguments-do-they-actually-pass-does-the-fix-handle-all-of-them",
+      "concern": "find the callers of the changed function. what arguments do they actually pass? does the fix handle all of them?: `get_live_update_watchlist` is called at live_update_editor.py:140 with only `guild_id`+`environment`. changing the return shape from list-of-rows to a state-grouped dict requires the prompt builder (live_update_prompts.py:450) to consume the new shape; plan step 4 handles rendering but doesn't note the type change is a breaking contract for any editor-level telemetry that counts/loops watchlist items.",
+      "flag_ids": [
+        "callers-1"
+      ],
+      "plan_ids": [
+        "implement-the-watchlist-20260512-1809"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-12T16:16:54Z",
+      "updated_at": "2026-05-12T16:16:54Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
+    },
+    {
+      "id": "DEBT-028",
+      "subsystem": "does-the-change-touch-all-locations-and-supporting-infrastructure",
+      "concern": "does the change touch all locations and supporting infrastructure?: storage layer (`storage_handler.py:1733-1780`) wraps supabase calls; plan's db_handler step does not explicitly call out the storage_handler counterpart for the new insert/update methods or for new column writes (storage_handler.py:1738 builds the payload with hardcoded keys). the file inventory lists storage_handler edits, but step 2 lacks specifics for the lower layer.",
+      "flag_ids": [
+        "all_locations-1"
+      ],
+      "plan_ids": [
+        "implement-the-watchlist-20260512-1809"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-12T16:16:54Z",
+      "updated_at": "2026-05-12T16:16:54Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
+    },
+    {
+      "id": "DEBT-029",
+      "subsystem": "find-the-callers-of-the-changed-function-what-arguments-do-they-actually-pass-does-the-fix-handle-all-of-them",
+      "concern": "find the callers of the changed function. what arguments do they actually pass? does the fix handle all of them?: `_parse_raw_candidates` (line 595) currently stashes `self.last_editor_reasoning` for the editor to consume. plan adds `reasoning_recovery_path` telemetry but doesn't specify the handoff channel (new attribute? return value?). editor needs an unambiguous handle to write into `metadata.agent_trace`.",
+      "flag_ids": [
+        "callers-3"
+      ],
+      "plan_ids": [
+        "implement-the-watchlist-20260512-1809"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-12T16:16:54Z",
+      "updated_at": "2026-05-12T16:16:54Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
+    },
+    {
+      "id": "DEBT-030",
+      "subsystem": "live-update-editor-phase2-runbook",
+      "concern": "operator may not catch a missing run-source discriminator on live_update_editor_runs because it is not explicitly enumerated in the v3 plan's todo(phase-1) list (which lists five items, not six).",
+      "flag_ids": [
+        "scope"
+      ],
+      "plan_ids": [
+        "produce-the-phase-2-prod-20260513-1822"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-13T16:50:41Z",
+      "updated_at": "2026-05-13T16:50:41Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
+    },
+    {
+      "id": "DEBT-031",
+      "subsystem": "find-the-callers-of-the-changed-function-what-arguments-do-they-actually-pass-does-the-fix-handle-all-of-them",
+      "concern": "find the callers of the changed function. what arguments do they actually pass? does the fix handle all of them?: the provisional banner in \u00a71 (now five todos) plus the precondition gate plus the decision-tree row form a tight containment of phase-1-not-yet-landed risk. the only residual concern is the unenumerated sixth phase-1 dependency (run-source discriminator) flagged under correctness; if the operator follows the runbook strictly and phase 1 omits the discriminator, the gating logic does not catch it.",
+      "flag_ids": [
+        "callers"
+      ],
+      "plan_ids": [
+        "produce-the-phase-2-prod-20260513-1822"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-13T16:50:41Z",
+      "updated_at": "2026-05-13T16:50:41Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
+    },
+    {
+      "id": "DEBT-032",
+      "subsystem": "are-the-proposed-changes-technically-correct",
+      "concern": "are the proposed changes technically correct?: the plan repeatedly references the 'legacy run-source' as a way to distinguish legacy-editor rows from new-editor rows on the shared `live_update_editor_runs` table. \u00a73 precondition says 'latest live_update_editor_runs row under legacy run-source within last hour', and \u00a75 branch a primary signal says 'no new live_update_editor_runs rows under the legacy run-source after the flip timestamp'. i read src/common/storage_handler.py:652-682 and `live_update_editor_runs` today has columns guild_id, environment, trigger, status, live_channel_id, checkpoint_*, memory_snapshot, duplicate_snapshot, *_count, skipped_reason, error_message, metadata, completed_at \u2014 no `run_source` / `editor_source` / `run_type` column. per redesign :223/:562 the table is retained for both editors; without a phase-1-added discriminator (could be a new column, a metadata json key, or a trigger-prefix convention), branch a's sql verification cannot tell legacy runs apart from new runs and the precondition check cannot confirm 'legacy editor still running'. this gap is not captured in the five todo(phase-1) markers \u2014 it is a sixth phase-1 dependency.",
+      "flag_ids": [
+        "correctness"
+      ],
+      "plan_ids": [
+        "produce-the-phase-2-prod-20260513-1822"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-13T16:50:41Z",
+      "updated_at": "2026-05-13T16:50:41Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
+    },
+    {
+      "id": "DEBT-033",
+      "subsystem": "live-update-editor-phase1-decisions",
+      "concern": "borderline (3-5/week) defer-audit volume handling not enumerated",
+      "flag_ids": [
+        "issue_hints"
+      ],
+      "plan_ids": [
+        "build-phase-1-of-the-live-20260513-1822"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-13T16:59:19Z",
+      "updated_at": "2026-05-13T16:59:19Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
+    },
+    {
+      "id": "DEBT-034",
+      "subsystem": "topic-dispatcher",
+      "concern": "lean accessor missing-message contract",
+      "flag_ids": [
+        "correctness-1"
+      ],
+      "plan_ids": [
+        "build-phase-1-of-the-live-20260513-1822"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-13T16:59:19Z",
+      "updated_at": "2026-05-13T16:59:19Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
+    },
+    {
+      "id": "DEBT-035",
+      "subsystem": "topic-editor-run-lifecycle",
+      "concern": "run-lifecycle fk coupling: run-insert failure blocks all transition logging",
+      "flag_ids": [
+        "correctness-2"
+      ],
+      "plan_ids": [
+        "build-phase-1-of-the-live-20260513-1822"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-13T16:59:19Z",
+      "updated_at": "2026-05-13T16:59:19Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
+    },
+    {
+      "id": "DEBT-036",
+      "subsystem": "phase-0-prereq",
+      "concern": "phase 0 needs postgres-with-pg_trgm for one-time similarity_pairs.json generation",
+      "flag_ids": [
+        "scope"
+      ],
+      "plan_ids": [
+        "build-phase-1-of-the-live-20260513-1822"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-13T16:59:19Z",
+      "updated_at": "2026-05-13T16:59:19Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
+    },
+    {
+      "id": "DEBT-037",
+      "subsystem": "test-fake-store",
+      "concern": "difflib leakage in fake store could degrade flag-010 fix over time",
+      "flag_ids": [
+        "all_locations"
+      ],
+      "plan_ids": [
+        "build-phase-1-of-the-live-20260513-1822"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-13T16:59:19Z",
+      "updated_at": "2026-05-13T16:59:19Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
+    },
+    {
+      "id": "DEBT-038",
+      "subsystem": "topic-dispatcher",
+      "concern": "lean accessor edge cases (missing/duplicate/null author) not enumerated",
+      "flag_ids": [
+        "callers"
+      ],
+      "plan_ids": [
+        "build-phase-1-of-the-live-20260513-1822"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-13T16:59:19Z",
+      "updated_at": "2026-05-13T16:59:19Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
     }
   ]
 }

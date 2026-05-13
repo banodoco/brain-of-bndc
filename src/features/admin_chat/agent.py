@@ -67,8 +67,8 @@ END EVERY TURN with either reply or end_turn.
 **Finding things:**
 - find_messages — search/browse messages. Filters: query, username, channel_id, min_reactions, has_media, days, limit, sort (reactions|unique_reactors|date), refresh_media, live. Use live=true with a channel_id to see current channel state via Discord API.
 - inspect_message — full detail on one message: content, per-emoji reactions, context, replies, fresh media URLs.
-- query_table — query any DB table with filters. Tables: competitions, competition_entries, discord_reactions, discord_messages, members, discord_channels, events, invite_codes, grant_applications, daily_summaries, shared_posts, social_publications, social_channel_routes, pending_intros, intro_votes, timed_mutes. Filter operators: gt., gte., lt., lte., neq., like., ilike., in., is.null, not.null. Cheatsheet: discord_messages => author_id, created_at, reaction_count; shared_posts => discord_user_id, shared_at, platform; social_publications => publication_id, status, platform, action, provider_ref, provider_url, last_error, scheduled_at.
-- get_active_channels, get_daily_summaries, get_member_info, get_bot_status, search_logs
+- query_table — query any DB table with filters. Tables: competitions, competition_entries, discord_reactions, discord_messages, members, discord_channels, events, invite_codes, grant_applications, daily_summaries (legacy history only), shared_posts, social_publications, social_channel_routes, pending_intros, intro_votes, timed_mutes, topic_editor_runs, topics, topic_sources, topic_aliases, topic_transitions, editorial_observations, topic_editor_checkpoints, live_update_editor_runs (legacy rollback only), live_update_candidates (legacy rollback only), live_update_decisions (legacy rollback only), live_update_feed_items (legacy rollback only), live_update_editorial_memory (legacy rollback only), live_update_watchlist (legacy rollback only), live_update_duplicate_state (legacy rollback only), live_update_checkpoints (legacy rollback only), live_top_creation_runs, live_top_creation_posts, live_top_creation_checkpoints. Filter operators: gt., gte., lt., lte., neq., like., ilike., in., is.null, not.null. Cheatsheet: discord_messages => author_id, created_at, reaction_count; topics => state, publication_status, headline; topic_transitions => action, run_id, topic_id; topic_editor_runs => status, started_at, failed_publish_count; social_publications => publication_id, status, platform, action, provider_ref, provider_url, last_error, scheduled_at.
+- get_active_channels, get_live_update_status, get_daily_summaries (legacy daily_summaries history), get_member_info, get_bot_status, search_logs
 
 **Doing things:**
 - send_message(channel_id, content, reply_to?) — CDN URLs are auto-refreshed before sending.
@@ -110,6 +110,8 @@ END EVERY TURN with either reply or end_turn.
 ## How to work
 
 **State questions -> query first.** For questions about the state of payments or wallets, call `query_payment_state`, `query_wallet_state`, or `list_recent_payments` first. Do not claim payment or wallet state from memory or recent channel context alone.
+
+**Overview questions -> topic editor first.** For current community overview, bot live-update health, posted topics, watched topics, rejections, overrides, or publishing failures, call `get_live_update_status` or query `topic_editor_runs`, `topics`, and `topic_transitions`. `daily_summaries` and `live_update_*` tables are legacy history/rollback state only and are not the active overview system.
 
 **Search first, act second.** When messaged from a channel, you see [Sent in #channel-name (channel_id: ...)]. Browse with find_messages(channel_id=..., live=true) before answering if you need context. If a search returns nothing useful, try different filters. If the user corrects you, re-examine your assumptions.
 

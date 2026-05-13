@@ -1,0 +1,59 @@
+{
+  "output": "Batch 10 complete. T11 is done and SC11 is acknowledged. The new runtime selector in `summariser_cog.py` defaults to `TopicEditor`, supports `LIVE_UPDATE_EDITOR_BACKEND=legacy` rollback, and preserves injected editor behavior for tests. Checkpoint written to `.megaplan/plans/execute-the-live-update-20260513-2217/execution_batch_10.json`. Full suite was rerun; only the four previously observed legacy live-update failures remain.",
+  "files_changed": [
+    "src/features/summarising/summariser_cog.py",
+    "tests/test_live_runtime_wiring.py",
+    ".megaplan/plans/execute-the-live-update-20260513-2217/execution_batch_10.json"
+  ],
+  "commands_run": [
+    "rg -n '^(LIVE_UPDATE_TRACE_CHANNEL_ID|TOPIC_EDITOR_PUBLISHING_ENABLED|LIVE_UPDATE_EDITOR_BACKEND)=' .env .env.example",
+    "python -m py_compile src/features/summarising/summariser_cog.py tests/test_live_runtime_wiring.py",
+    "pytest --tb=short -q --no-header tests/test_live_runtime_wiring.py",
+    "git diff --check -- src/features/summarising/summariser_cog.py tests/test_live_runtime_wiring.py",
+    "pytest --tb=no -q --no-header",
+    "python -m json.tool .megaplan/plans/execute-the-live-update-20260513-2217/execution_batch_10.json >/dev/null",
+    "git diff --check -- src/features/summarising/summariser_cog.py tests/test_live_runtime_wiring.py .megaplan/plans/execute-the-live-update-20260513-2217/execution_batch_10.json"
+  ],
+  "deviations": [
+    "Full test suite still fails with the same four previously observed legacy live-update failures: tests/test_live_top_creations.py::test_live_top_creations_dev_env_posts_and_persists_state, tests/test_live_update_editor_publishing.py::test_live_update_dev_env_posts_and_persists_with_environment_dev, tests/test_live_update_editor_publishing.py::test_live_update_dev_env_resolves_dev_live_update_channel_id, and tests/test_live_update_prompts.py::test_llm_prompt_exposes_agent_budget_and_media_reaction_guidance.",
+    "Advisory quality: tests/test_live_runtime_wiring.py has similar functions test_summarynow_runs_live_editor_not_legacy_daily_summary and run (86% similarity).",
+    "Advisory quality: tests/test_live_runtime_wiring.py has similar functions test_startup_summary_now_runs_archive_before_live_editor and run (91% similarity).",
+    "Advisory quality: tests/test_live_runtime_wiring.py has similar functions test_legacy_summary_command_is_explicit_backfill_only and run (86% similarity).",
+    "Advisory quality: tests/test_live_runtime_wiring.py has similar functions test_legacy_startup_flag_runs_legacy_backfill_not_live_editor and run (80% similarity).",
+    "Advisory quality: tests/test_live_runtime_wiring.py has similar functions run_once and run_once (100% similarity).",
+    "Advisory observation mismatch: executor claimed files not observed in git status/content hash delta: .megaplan/plans/execute-the-live-update-20260513-2217/execution_batch_10.json",
+    "Advisory audit finding: Executor claimed changed files not present in git status: ../supabase/migrations/20260512185328_live_update_watchlist_lifecycle.sql, .migrations_staging/20260513230500_live_update_topic_editor_phase1.sql, .migrations_staging/README.md",
+    "Advisory audit finding: Git status shows changed files not claimed by any task: .claude/scheduled_tasks.lock, .megaplan/briefs/, .megaplan/debt.json, .megaplan/plans/build-phase-1-of-the-live-20260513-1821/, .megaplan/plans/build-phase-1-of-the-live-20260513-1822/, .megaplan/plans/execute-the-live-update-20260513-2216/, .megaplan/plans/implement-the-watchlist-20260512-1809/, .megaplan/plans/live-update-environment-split/, .megaplan/plans/produce-the-phase-2-prod-20260513-1821/, .megaplan/plans/produce-the-phase-2-prod-20260513-1822/, .megaplan/schemas/directors_notes.json, .megaplan/schemas/execution_doc.json, .megaplan/schemas/feedback.json, .megaplan/schemas/finalize.json, .megaplan/schemas/review.json, .megaplan/schemas/revise.json, docs/debug-utility-validation.md, docs/live-editor-watchlist-plan.md, docs/live-update-editor-legacy-boundaries.md, docs/live-update-editor-phase-2-runbook.md, docs/live-update-editor-redesign.md, docs/live-update-editor-sprint-plan.md, main.py, scripts/backfill_guild_ids.py, scripts/debug.py, scripts/debug_live_editor_audit.py, scripts/discord_tools.py, scripts/inspect_editor_reasoning.py, scripts/send_social_picks.py, src/features/admin/admin_cog.py, src/features/admin_chat/agent.py, src/features/admin_chat/tools.py, src/features/archive/archive_cog.py, src/features/gating/intro_embed.py, src/features/health/health_check_cog.py, src/features/summarising/live_top_creations.py, src/features/summarising/live_update_editor.py, src/features/summarising/live_update_prompts.py, src/features/summarising/summariser.py, structure.md, tests/test_live_admin_health.py, tests/test_live_top_creations.py, tests/test_live_update_editor_lifecycle.py, tests/test_live_update_editor_publishing.py, tests/test_live_update_prompts.py, tests/test_social_route_tools.py",
+    "Advisory audit finding: Sense check SC12 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC13 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC14 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC15 is missing an executor acknowledgment.",
+    "Advisory audit finding: Tasks left pending after execute (executor never started them): T12, T13, T14, T15"
+  ],
+  "task_updates": [
+    {
+      "task_id": "T11",
+      "status": "done",
+      "executor_notes": "Verified U2 prerequisite before editing: `.env` and `.env.example` both contain `LIVE_UPDATE_TRACE_CHANNEL_ID=1316024582041243668`, `TOPIC_EDITOR_PUBLISHING_ENABLED=false`, and `LIVE_UPDATE_EDITOR_BACKEND=legacy`. Wired `src/features/summarising/summariser_cog.py` so the active live-update runtime defaults to `TopicEditor` when `LIVE_UPDATE_EDITOR_BACKEND` is unset or set to `topic`/`topic_editor`, while `LIVE_UPDATE_EDITOR_BACKEND=legacy` constructs the legacy `LiveUpdateEditor` rollback path. Scheduled runs, startup `--summary-now`, and owner `summarynow` continue to call `self.live_update_editor.run_once(...)`, so they select the new editor by default and the rollback editor when explicitly configured. Preserved the constructor injection seam: a provided `live_update_editor` bypasses backend construction. Made legacy-only `flush_pending_reasoning` conditional so the new editor runtime is not required to implement it. Did not modify `live_update_editor.py` or `live_update_prompts.py`. Added runtime wiring tests for default TopicEditor construction, legacy backend selection, and injected-editor precedence. `tests/test_live_runtime_wiring.py` passed. Full suite was rerun and still fails only with the four previously observed legacy live-update failures.",
+      "files_changed": [
+        "src/features/summarising/summariser_cog.py",
+        "tests/test_live_runtime_wiring.py",
+        ".megaplan/plans/execute-the-live-update-20260513-2217/execution_batch_10.json"
+      ],
+      "commands_run": [
+        "rg -n '^(LIVE_UPDATE_TRACE_CHANNEL_ID|TOPIC_EDITOR_PUBLISHING_ENABLED|LIVE_UPDATE_EDITOR_BACKEND)=' .env .env.example",
+        "python -m py_compile src/features/summarising/summariser_cog.py tests/test_live_runtime_wiring.py",
+        "pytest --tb=short -q --no-header tests/test_live_runtime_wiring.py",
+        "git diff --check -- src/features/summarising/summariser_cog.py tests/test_live_runtime_wiring.py",
+        "pytest --tb=no -q --no-header"
+      ],
+      "auto_attributed_files": null
+    }
+  ],
+  "sense_check_acknowledgments": [
+    {
+      "sense_check_id": "SC11",
+      "executor_note": "Yes. Scheduled runs, startup `--summary-now`, and owner `summarynow` all dispatch through the active `self.live_update_editor`; backend construction now defaults to `TopicEditor`, supports `LIVE_UPDATE_EDITOR_BACKEND=legacy` rollback, and still honors constructor-injected editors for tests."
+    }
+  ]
+}

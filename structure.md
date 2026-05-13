@@ -59,7 +59,8 @@
 | **Feature Structure** | Features live in `src/features/[name]/` with: core logic (`reactor.py`) + Discord integration (`reactor_cog.py`) + optional `subfeatures/` for complex actions. |
 | **Reaction Watchlist** | JSON env var (`REACTION_WATCHLIST`) that configures which emoji reactions trigger which actions. Central routing for all reaction-based workflows. |
 | **Archiving** | Messages are archived from Discord → Supabase via `archive_runner.py`. Can run on-demand or scheduled. |
-| **Summaries** | LLM-generated daily digests per channel, stored in `daily_summaries` table, posted to dedicated threads. |
+| **Live Updates** | Agentic editorial loop over archived messages. Accepted updates append as feed items in the configured summary/live-updates channel and are audited in `live_update_*` tables. |
+| **Legacy Summaries** | Historical/backfill-only daily digests in `daily_summaries` and old summary thread mappings. These are not the active overview system. |
 | **Member Permissions** | Two boolean flags with TRUE defaults: `include_in_updates` (can be mentioned in summaries/digests) and `allow_content_sharing` (content can be shared externally). When `allow_content_sharing=FALSE`, a Discord role is assigned to make opt-out visible. |
 
 ---
@@ -77,7 +78,7 @@
 | **Reacting** | `src/features/reacting/` | Reaction-triggered workflows (tweets, uploads, disputes, etc.) |
 | **Relaying** | `src/features/relaying/` | Webhook relay to external services |
 | **Sharing** | `src/features/sharing/` | Social media cross-posting (Twitter, etc.) |
-| **Summarising** | `src/features/summarising/` | Daily LLM-generated channel summaries |
+| **Summarising** | `src/features/summarising/` | Live-update editor, independent top-creations loop, and legacy summary backfill helpers |
 
 ---
 
@@ -92,7 +93,7 @@
 │
 ├── scripts/                     # One-off maintenance utilities
 │   ├── archive_discord.py          # Bulk archive messages to Supabase
-│   ├── logs.py                      # Unified log monitoring tool (health, summary, errors, tail)
+│   ├── logs.py                      # Unified log monitoring tool (health, live-update, summary legacy, errors, tail)
 │   └── ...                          # Other utilities (see tree below)
 │
 ├── ../supabase/migrations/       # Workspace-level Supabase repo (separate git root) holds the canonical timestamped SQL migrations
@@ -166,7 +167,7 @@
 | `archive_discord.py` | Bulk archive messages & attachments to Supabase |
 | `analyze_channels.py` | Analyse channels with LLM, export stats |
 | `backfill_reactions.py` | Populate missing reaction records |
-| `logs.py` | Unified log monitoring: `health`, `summary`, `errors`, `recent`, `search`, `tail`, `stats` |
+| `logs.py` | Unified log monitoring: `health`, `live-update`, `summary` legacy, `errors`, `recent`, `search`, `tail`, `stats` |
 
 ---
 
@@ -179,8 +180,19 @@
 | `discord_messages` | Archived messages | `message_id` (PK), `channel_id`, `author_id`, `content`, `created_at`, `attachments` (JSONB), `reaction_count`, `is_deleted` |
 | `discord_members` | Member profiles & permissions | `member_id` (PK), `username`, `global_name`, `twitter_handle`, `reddit_handle`, `include_in_updates` (default TRUE), `allow_content_sharing` (default TRUE) |
 | `discord_channels` | Channel metadata | `channel_id` (PK), `channel_name`, `description`, `suitable_posts`, `unsuitable_posts`, `enriched` |
-| `daily_summaries` | Generated summaries | `daily_summary_id` (PK), `date`, `channel_id`, `full_summary`, `short_summary`, `included_in_main_summary`, `dev_mode` |
-| `channel_summary` | Summary thread mapping | `channel_id` (PK), `summary_thread_id` |
+| `live_update_editor_runs` | Active live-update editor run audit | `run_id` (PK), `guild_id`, `trigger`, `status`, `live_channel_id`, `candidate_count`, `accepted_count`, `checkpoint_before`, `checkpoint_after`, `metadata` |
+| `live_update_candidates` | Generated live-update candidates | `candidate_id` (PK), `run_id`, `guild_id`, `update_type`, `title`, `body`, `source_message_ids`, `author_context_snapshot`, `duplicate_key`, `status` |
+| `live_update_decisions` | Accept/reject/defer/duplicate/failed-post decisions | `decision_id` (PK), `run_id`, `candidate_id`, `decision`, `reason`, `duplicate_key`, `decision_payload` |
+| `live_update_feed_items` | Posted logical feed items | `feed_item_id` (PK), `candidate_id`, `live_channel_id`, `discord_message_ids` (ordered JSON array), `duplicate_key`, `status` |
+| `live_update_editorial_memory` | Editorial memory for active live updates | `memory_id` (PK), `guild_id`, `memory_key`, `subject_type`, `summary`, `state`, `last_seen_at` |
+| `live_update_watchlist` | Editorial watchlist for active live updates | `watch_id` (PK), `guild_id`, `watch_key`, `subject_type`, `criteria`, `status`, `priority` |
+| `live_update_duplicate_state` | Duplicate suppression state | `duplicate_key` (PK), `guild_id`, `last_seen_candidate_id`, `feed_item_id`, `status`, `seen_count` |
+| `live_update_checkpoints` | Archived-message checkpoints for live updates | `checkpoint_key` (PK), `guild_id`, `channel_id`, `last_message_id`, `last_run_id`, `state` |
+| `live_top_creation_runs` | Independent top-creations run audit | `top_creation_run_id` (PK), `guild_id`, `trigger`, `status`, `candidate_count`, `posted_count`, `checkpoint_after` |
+| `live_top_creation_posts` | Independent top-creations posts | `top_creation_post_id` (PK), `guild_id`, `source_kind`, `source_message_id`, `discord_message_ids` (ordered JSON array), `duplicate_key`, `status` |
+| `live_top_creation_checkpoints` | Independent top-creations checkpoints | `checkpoint_key` (PK), `guild_id`, `last_source_message_id`, `state` |
+| `daily_summaries` | Legacy daily summary history/backfill input | `daily_summary_id` (PK), `date`, `channel_id`, `full_summary`, `short_summary`, `included_in_main_summary`, `dev_mode` |
+| `channel_summary` | Legacy summary thread mapping | `channel_id` (PK), `summary_thread_id` |
 | `system_logs` | Application logs | `id` (PK), `timestamp`, `level`, `logger_name`, `message`, `exception` |
 | `sync_status` | Sync state tracking | `table_name`, `last_sync_timestamp`, `sync_status` |
 

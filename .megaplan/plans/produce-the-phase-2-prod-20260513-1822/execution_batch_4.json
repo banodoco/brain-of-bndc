@@ -1,0 +1,32 @@
+{
+  "output": "Authored \u00a75 (Branch A/B verification + 8-step procedure) and \u00a76 (4 partial-publish detection queries + two-sourced trip-wire tally).",
+  "commands_run": [],
+  "deviations": [
+    "Advisory audit finding: Sense check SC5 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC6 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC7 is missing an executor acknowledgment."
+  ],
+  "task_updates": [
+    {
+      "task_id": "T4",
+      "status": "done",
+      "executor_notes": "\u00a75: Branch A verification names primary signal as zero new live_update_editor_runs rows under the legacy run-source after the flip timestamp + new run-source row on next tick, with the required one-line note 'requires Phase-1-provided run-source discriminator (TODO(phase-1) f); if absent at flip time, treat as third-mechanism case and ABORT per \u00a71.' Branch B verification names Discord-side count as PRIMARY (operator scrolls live channel for window flip-to-now, confirms zero legacy-bot-identity posts per TODO(phase-1) d); SQL marker on legacy live_update_editor_runs row demoted to SECONDARY nice-to-have (TODO(phase-1) c), with explicit fallback 'If no marker shipped, the Discord-side count is the only signal \u2014 that is acceptable.' Cites src/features/summarising/live_update_editor.py:84-107 _publish_accepted_candidates and :261 _select_publishable_candidates as the legacy fallback path. Explicit DO-NOT statement: 'Do not use \"zero new rows in legacy live_update_feed_items\" as a verification signal. Per :651, legacy table writes continue during the watch; only Discord-send is suppressed.' Procedure body has 8 numbered steps: (1) re-run \u00a73; (2) set <LIVE_EDITOR_PUBLISH_TOGGLE> to TODO(phase-1) a value; (3) record flip timestamp as watch start and lower bound for subsequent SQL; (4) ANCHOR VERIFICATION ON NEXT OBSERVED RUN with polling SELECT against live_update_editor_runs where created_at > <flip timestamp>, waiting until status='completed' appears (~90 min max per hourly :633 cadence, jump to \u00a78 otherwise); (5) verification SQL one-liner against topics scoped environment='prod' with last_published_at > flip timestamp grouped by publication_status; (6) confirm \u22651 'sent', zero 'partial', zero unexpected 'failed', jump to \u00a76+\u00a77 partial row on any partial; (7) confirm branch-appropriate signal \u2014 Branch A repeats step-4 query projecting the run-source discriminator (zero rows under legacy after flip), Branch B Discord-side scroll with SQL marker secondary; (8) any failure \u2192 \u00a78, otherwise enter \u00a77 watch. \u00a76: four query blocks scoped environment='prod' with `-- swap to 'dev' for pre-flip verification (note: dev has no partials during Phase 1 per :611/:627/:633 \u2014 0 dev partials does NOT mean prod is clean)` annotations \u2014 (a) UNION-ALL windowed counts for last_hour/last_24h/since_cutover on publication_status='partial'; (b) per-row deep-dive selecting topic_id, canonical_key, headline, state, publication_status, publication_error, publication_attempts, last_published_at, discord_message_ids ordered by last_published_at desc limit 50; (c) still-pending too long with NULL or older-than-90-minutes last_published_at; (d) rejection-rate against topic_transitions WHERE action LIKE 'rejected_%' last 1h grouped by action. Two-source trip-wire tally: prod-only SQL count `select count(*) as prod_partials_since_cutover from topics where environment='prod' and publication_status='partial' and last_published_at >= '<cutover-flip-timestamp>';` then explicit instruction 'Add the Phase-1 shadow-attempted-publish partial count from shadow-mode telemetry (trace embed in the Phase-1 monitoring channel + shadow logs per :611-644) \u2014 NOT from topics.' with the reasoning 'topics WHERE environment=dev AND publication_status=partial is vacuous; the shadow-attempted-publish counter is the only Phase-1 source.' Three operator-filled blanks (Phase-1 shadow partials, Phase-2 prod partials, sum). Trip-wire phrasing: 'fires when sum \u2265 2 per :600-601 \u2192 ABORT (\u00a78) + restore topic_publications per :601.' References \u00a77 partial-publish row for the same threshold. Schema-shape pointer: 'Column shapes per docs/live-update-editor-redesign.md:117-123 and :223.'",
+      "sections_written": [
+        "\u00a75-publishing-flag-flip-procedure",
+        "\u00a76-partial-publish-detection"
+      ],
+      "stance": null,
+      "stop_signal": null
+    }
+  ],
+  "sense_check_acknowledgments": [
+    {
+      "sense_check_id": "SC4",
+      "executor_note": "Confirmed. \u00a75 Branch B labels 'Primary signal (Discord-side count)' explicitly and demotes the SQL suppression marker to 'Secondary, nice-to-have' with fallback wording 'If no marker shipped, the Discord-side count is the only signal \u2014 that is acceptable.' Step 4 anchors on the next observed live_update_editor_runs row (poll until status='completed' appears, ~90 min hourly cadence per :633) \u2014 not a fixed 15-min window. Explicit 'Do not' statement bans the 'zero new rows in legacy live_update_feed_items' check, citing :651. \u00a76 uses the prod-only SQL count `select count(*) as prod_partials_since_cutover from topics where environment='prod' and publication_status='partial' and last_published_at >= '<cutover-flip-timestamp>';` then explicit instruction to add the Phase-1 shadow-attempted-publish partial count from telemetry (NOT from topics WHERE environment='dev'). Trip-wire phrasing 'fires when sum \u2265 2 per :600-601 \u2192 ABORT (\u00a78) + restore topic_publications.'"
+    }
+  ],
+  "sections_written": [
+    "\u00a75-publishing-flag-flip-procedure",
+    "\u00a76-partial-publish-detection"
+  ]
+}

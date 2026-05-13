@@ -241,6 +241,760 @@ class DatabaseHandler:
                 self.storage_handler.update_summary_thread_to_supabase(channel_id, thread_id)
             )
 
+    # ------------------------------------------------------------------
+    # Live-update editor persistence
+    # ------------------------------------------------------------------
+
+    def _live_write_allowed(self, guild_id: Optional[int]) -> bool:
+        if self._gate_check(guild_id):
+            return True
+        logger.warning("Live-update editor write blocked: guild_id is missing or not writable")
+        return False
+
+    def create_live_update_run(self, run: Dict[str, Any], environment: str = 'prod') -> Optional[Dict[str, Any]]:
+        """Create an auditable live-editor run."""
+        guild_id = run.get('guild_id')
+        if not self._live_write_allowed(guild_id) or not self.storage_handler:
+            return None
+        return self._run_async_in_thread(self.storage_handler.create_live_update_run(run, environment=environment))
+
+    def update_live_update_run(
+        self,
+        run_id: str,
+        updates: Dict[str, Any],
+        guild_id: Optional[int] = None,
+        environment: str = 'prod',
+    ) -> Optional[Dict[str, Any]]:
+        """Update an auditable live-editor run."""
+        if not self._live_write_allowed(guild_id or updates.get('guild_id')) or not self.storage_handler:
+            return None
+        return self._run_async_in_thread(self.storage_handler.update_live_update_run(run_id, updates, environment=environment))
+
+    def store_live_update_candidate(self, candidate: Dict[str, Any], environment: str = 'prod') -> Optional[Dict[str, Any]]:
+        """Persist one generated live-update candidate."""
+        guild_id = candidate.get('guild_id')
+        if not self._live_write_allowed(guild_id) or not self.storage_handler:
+            return None
+        return self._run_async_in_thread(self.storage_handler.store_live_update_candidate(candidate, environment=environment))
+
+    def store_live_update_candidates(self, candidates: List[Dict[str, Any]], environment: str = 'prod') -> List[Dict[str, Any]]:
+        """Persist generated live-update candidates."""
+        if not candidates:
+            return []
+        guild_ids = {candidate.get('guild_id') for candidate in candidates}
+        if len(guild_ids) != 1 or not self._live_write_allowed(next(iter(guild_ids))) or not self.storage_handler:
+            return []
+        return self._run_async_in_thread(self.storage_handler.store_live_update_candidates(candidates, environment=environment))
+
+    def update_live_update_candidate_status(
+        self,
+        candidate_id: str,
+        status: str,
+        updates: Optional[Dict[str, Any]] = None,
+        guild_id: Optional[int] = None,
+        environment: str = 'prod',
+    ) -> Optional[Dict[str, Any]]:
+        """Update live-update candidate decision status."""
+        if not self._live_write_allowed(guild_id) or not self.storage_handler:
+            return None
+        return self._run_async_in_thread(
+            self.storage_handler.update_live_update_candidate_status(candidate_id, status, updates, environment=environment)
+        )
+
+    def store_live_update_decision(self, decision: Dict[str, Any], guild_id: Optional[int] = None, environment: str = 'prod') -> Optional[Dict[str, Any]]:
+        """Persist one live-update candidate decision."""
+        effective_guild_id = guild_id or decision.get('guild_id')
+        if not self._live_write_allowed(effective_guild_id) or not self.storage_handler:
+            return None
+        return self._run_async_in_thread(self.storage_handler.store_live_update_decision(decision, environment=environment))
+
+    def store_live_update_feed_item(self, feed_item: Dict[str, Any], environment: str = 'prod') -> Optional[Dict[str, Any]]:
+        """Persist one logical feed item with ordered Discord message IDs."""
+        guild_id = feed_item.get('guild_id')
+        if not self._live_write_allowed(guild_id) or not self.storage_handler:
+            return None
+        return self._run_async_in_thread(self.storage_handler.store_live_update_feed_item(feed_item, environment=environment))
+
+    def update_live_update_feed_item_messages(
+        self,
+        feed_item_id: str,
+        discord_message_ids: List[Any],
+        status: str = 'posted',
+        post_error: Optional[str] = None,
+        guild_id: Optional[int] = None,
+        environment: str = 'prod',
+    ) -> Optional[Dict[str, Any]]:
+        """Replace the ordered posted Discord message IDs for a feed item."""
+        if not self._live_write_allowed(guild_id) or not self.storage_handler:
+            return None
+        return self._run_async_in_thread(
+            self.storage_handler.update_live_update_feed_item_messages(
+                feed_item_id,
+                discord_message_ids,
+                status=status,
+                post_error=post_error,
+                environment=environment,
+            )
+        )
+
+    def get_recent_live_update_feed_items(
+        self,
+        guild_id: Optional[int] = None,
+        live_channel_id: Optional[int] = None,
+        limit: int = 50,
+        since_hours: Optional[int] = None,
+        environment: str = 'prod',
+    ) -> List[Dict[str, Any]]:
+        """Fetch recent logical feed items for duplicate/admin inspection."""
+        if not self.storage_handler:
+            return []
+        return self._run_async_in_thread(
+            self.storage_handler.get_recent_live_update_feed_items(guild_id, live_channel_id, limit, since_hours, environment=environment)
+        )
+
+    def find_live_update_duplicate(
+        self,
+        duplicate_key: str,
+        guild_id: Optional[int] = None,
+        environment: str = 'prod',
+    ) -> Optional[Dict[str, Any]]:
+        """Find duplicate suppression state and recent matching records."""
+        if not self.storage_handler:
+            return None
+        return self._run_async_in_thread(
+            self.storage_handler.find_live_update_duplicate(duplicate_key, guild_id=guild_id, environment=environment)
+        )
+
+    def upsert_live_update_duplicate_state(self, state: Dict[str, Any], environment: str = 'prod') -> Optional[Dict[str, Any]]:
+        """Upsert duplicate suppression state for a stable key."""
+        guild_id = state.get('guild_id')
+        if not self._live_write_allowed(guild_id) or not self.storage_handler:
+            return None
+        return self._run_async_in_thread(self.storage_handler.upsert_live_update_duplicate_state(state, environment=environment))
+
+    def get_live_update_checkpoint(self, checkpoint_key: str, environment: str = 'prod') -> Optional[Dict[str, Any]]:
+        """Read a live-editor checkpoint over persisted archived messages."""
+        if not self.storage_handler:
+            return None
+        return self._run_async_in_thread(self.storage_handler.get_live_update_checkpoint(checkpoint_key, environment=environment))
+
+    def upsert_live_update_checkpoint(self, checkpoint: Dict[str, Any], environment: str = 'prod') -> Optional[Dict[str, Any]]:
+        """Upsert a live-editor checkpoint over persisted archived messages."""
+        guild_id = checkpoint.get('guild_id')
+        if not self._live_write_allowed(guild_id) or not self.storage_handler:
+            return None
+        return self._run_async_in_thread(self.storage_handler.upsert_live_update_checkpoint(checkpoint, environment=environment))
+
+    def acquire_topic_editor_run(self, run: Dict[str, Any], environment: str = 'prod') -> Optional[Dict[str, Any]]:
+        """Create a topic-editor run lease."""
+        guild_id = run.get('guild_id')
+        if not self._live_write_allowed(guild_id) or not self.storage_handler:
+            return None
+        return self._run_async_in_thread(self.storage_handler.acquire_topic_editor_run(run, environment=environment))
+
+    def complete_topic_editor_run(
+        self,
+        run_id: str,
+        updates: Optional[Dict[str, Any]] = None,
+        guild_id: Optional[int] = None,
+        environment: str = 'prod',
+    ) -> Optional[Dict[str, Any]]:
+        if not self._live_write_allowed(guild_id or (updates or {}).get('guild_id')) or not self.storage_handler:
+            return None
+        return self._run_async_in_thread(self.storage_handler.complete_topic_editor_run(run_id, updates, environment=environment))
+
+    def fail_topic_editor_run(
+        self,
+        run_id: str,
+        error_message: str,
+        updates: Optional[Dict[str, Any]] = None,
+        guild_id: Optional[int] = None,
+        environment: str = 'prod',
+    ) -> Optional[Dict[str, Any]]:
+        if not self._live_write_allowed(guild_id or (updates or {}).get('guild_id')) or not self.storage_handler:
+            return None
+        return self._run_async_in_thread(
+            self.storage_handler.fail_topic_editor_run(run_id, error_message, updates, environment=environment)
+        )
+
+    def upsert_topic(self, topic: Dict[str, Any], environment: str = 'prod') -> Optional[Dict[str, Any]]:
+        guild_id = topic.get('guild_id')
+        if not self._live_write_allowed(guild_id) or not self.storage_handler:
+            return None
+        return self._run_async_in_thread(self.storage_handler.upsert_topic(topic, environment=environment))
+
+    def update_topic(
+        self,
+        topic_id: str,
+        updates: Dict[str, Any],
+        guild_id: Optional[int] = None,
+        environment: str = 'prod',
+    ) -> Optional[Dict[str, Any]]:
+        if not self._live_write_allowed(guild_id or updates.get('guild_id')) or not self.storage_handler:
+            return None
+        return self._run_async_in_thread(self.storage_handler.update_topic(topic_id, updates, environment=environment))
+
+    def get_topics(
+        self,
+        guild_id: Optional[int] = None,
+        states: Optional[List[str]] = None,
+        limit: int = 100,
+        environment: str = 'prod',
+    ) -> List[Dict[str, Any]]:
+        if not self.storage_handler:
+            return []
+        return self._run_async_in_thread(
+            self.storage_handler.get_topics(guild_id=guild_id, states=states, limit=limit, environment=environment)
+        )
+
+    def add_topic_source(self, source: Dict[str, Any], environment: str = 'prod') -> Optional[Dict[str, Any]]:
+        guild_id = source.get('guild_id')
+        if not self._live_write_allowed(guild_id) or not self.storage_handler:
+            return None
+        return self._run_async_in_thread(self.storage_handler.add_topic_source(source, environment=environment))
+
+    def add_topic_sources(self, sources: List[Dict[str, Any]], environment: str = 'prod') -> List[Dict[str, Any]]:
+        if not sources:
+            return []
+        guild_ids = {source.get('guild_id') for source in sources}
+        if len(guild_ids) != 1 or not self._live_write_allowed(next(iter(guild_ids))) or not self.storage_handler:
+            return []
+        return self._run_async_in_thread(self.storage_handler.add_topic_sources(sources, environment=environment))
+
+    def upsert_topic_alias(self, alias: Dict[str, Any], environment: str = 'prod') -> Optional[Dict[str, Any]]:
+        guild_id = alias.get('guild_id')
+        if not self._live_write_allowed(guild_id) or not self.storage_handler:
+            return None
+        return self._run_async_in_thread(self.storage_handler.upsert_topic_alias(alias, environment=environment))
+
+    def get_topic_aliases(self, guild_id: Optional[int] = None, environment: str = 'prod') -> List[Dict[str, Any]]:
+        if not self.storage_handler:
+            return []
+        return self._run_async_in_thread(self.storage_handler.get_topic_aliases(guild_id=guild_id, environment=environment))
+
+    def store_topic_transition(self, transition: Dict[str, Any], environment: str = 'prod') -> Optional[Dict[str, Any]]:
+        guild_id = transition.get('guild_id')
+        if not self._live_write_allowed(guild_id) or not self.storage_handler:
+            return None
+        return self._run_async_in_thread(self.storage_handler.store_topic_transition(transition, environment=environment))
+
+    def store_editorial_observation(self, observation: Dict[str, Any], environment: str = 'prod') -> Optional[Dict[str, Any]]:
+        guild_id = observation.get('guild_id')
+        if not self._live_write_allowed(guild_id) or not self.storage_handler:
+            return None
+        return self._run_async_in_thread(self.storage_handler.store_editorial_observation(observation, environment=environment))
+
+    def get_topic_editor_checkpoint(self, checkpoint_key: str, environment: str = 'prod') -> Optional[Dict[str, Any]]:
+        if not self.storage_handler:
+            return None
+        return self._run_async_in_thread(self.storage_handler.get_topic_editor_checkpoint(checkpoint_key, environment=environment))
+
+    def upsert_topic_editor_checkpoint(self, checkpoint: Dict[str, Any], environment: str = 'prod') -> Optional[Dict[str, Any]]:
+        guild_id = checkpoint.get('guild_id')
+        if not self._live_write_allowed(guild_id) or not self.storage_handler:
+            return None
+        return self._run_async_in_thread(self.storage_handler.upsert_topic_editor_checkpoint(checkpoint, environment=environment))
+
+    def mirror_live_checkpoint_to_topic_editor(self, checkpoint_key: str, environment: str = 'prod') -> Optional[Dict[str, Any]]:
+        if not self.storage_handler:
+            return None
+        legacy = self.get_live_update_checkpoint(checkpoint_key, environment=environment)
+        if not legacy or not self._live_write_allowed(legacy.get('guild_id')):
+            return None
+        return self._run_async_in_thread(
+            self.storage_handler.mirror_live_checkpoint_to_topic_editor(checkpoint_key, environment=environment)
+        )
+
+    def mirror_topic_editor_checkpoint_to_live(self, checkpoint_key: str, environment: str = 'prod') -> Optional[Dict[str, Any]]:
+        if not self.storage_handler:
+            return None
+        topic_checkpoint = self.get_topic_editor_checkpoint(checkpoint_key, environment=environment)
+        if not topic_checkpoint or not self._live_write_allowed(topic_checkpoint.get('guild_id')):
+            return None
+        return self._run_async_in_thread(
+            self.storage_handler.mirror_topic_editor_checkpoint_to_live(checkpoint_key, environment=environment)
+        )
+
+    def get_archived_messages_after_checkpoint(
+        self,
+        checkpoint: Optional[Dict[str, Any]] = None,
+        guild_id: Optional[int] = None,
+        channel_ids: Optional[List[int]] = None,
+        limit: int = 200,
+        exclude_author_ids: Optional[List[int]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Fetch persisted archived messages after a checkpoint."""
+        if not self.storage_handler:
+            return []
+        return self._run_async_in_thread(
+            self.storage_handler.get_archived_messages_after_checkpoint(
+                checkpoint=checkpoint,
+                guild_id=guild_id,
+                channel_ids=channel_ids,
+                limit=limit,
+                exclude_author_ids=exclude_author_ids,
+            )
+        )
+
+    def get_author_context_snapshots(
+        self,
+        author_ids: List[int],
+        guild_id: Optional[int] = None,
+    ) -> Dict[int, Dict[str, Any]]:
+        """Build immutable author-context snapshots from persisted profile rows."""
+        if not self.storage_handler:
+            return {}
+        return self._run_async_in_thread(
+            self.storage_handler.get_author_context_snapshots(author_ids, guild_id=guild_id)
+        )
+
+    def get_live_update_context_for_messages(
+        self,
+        messages: List[Dict[str, Any]],
+        guild_id: Optional[int] = None,
+        limit: int = 24,
+        environment: str = 'prod',
+        exclude_author_ids: Optional[List[int]] = None,
+    ) -> Dict[str, Any]:
+        """Fetch extra same-channel and author context for live-editor review."""
+        if not self.storage_handler:
+            return {}
+        return self._run_async_in_thread(
+            self.storage_handler.get_live_update_context_for_messages(
+                messages=messages,
+                guild_id=guild_id,
+                limit=limit,
+                environment=environment,
+                exclude_author_ids=exclude_author_ids,
+            )
+        )
+
+    def search_live_update_messages(
+        self,
+        query: str,
+        guild_id: Optional[int] = None,
+        author_id: Optional[int] = None,
+        channel_id: Optional[int] = None,
+        hours_back: int = 168,
+        limit: int = 20,
+        environment: str = 'prod',
+        exclude_author_ids: Optional[List[int]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Search archived Discord messages for live-editor agent tools."""
+        if not self.storage_handler:
+            return []
+        return self._run_async_in_thread(
+            self.storage_handler.search_live_update_messages(
+                query=query,
+                guild_id=guild_id,
+                author_id=author_id,
+                channel_id=channel_id,
+                hours_back=hours_back,
+                limit=limit,
+                environment=environment,
+                exclude_author_ids=exclude_author_ids,
+            )
+        )
+
+    def get_live_update_context_for_message_ids(
+        self,
+        message_ids: List[str],
+        guild_id: Optional[int] = None,
+        limit: int = 20,
+        environment: str = 'prod',
+        exclude_author_ids: Optional[List[int]] = None,
+    ) -> Dict[str, Any]:
+        """Fetch exact message context packets for selected message IDs."""
+        if not self.storage_handler:
+            return {"source_context": {}}
+        return self._run_async_in_thread(
+            self.storage_handler.get_live_update_context_for_message_ids(
+                message_ids=message_ids,
+                guild_id=guild_id,
+                limit=limit,
+                environment=environment,
+                exclude_author_ids=exclude_author_ids,
+            )
+        )
+
+    def get_live_update_author_profile(
+        self,
+        author_id: Optional[int],
+        guild_id: Optional[int] = None,
+        environment: str = 'prod',
+        exclude_author_ids: Optional[List[int]] = None,
+    ) -> Dict[str, Any]:
+        """Fetch author stats and recent messages for live-editor agent tools."""
+        if not self.storage_handler:
+            return {}
+        return self._run_async_in_thread(
+            self.storage_handler.get_live_update_author_profile(
+                author_id,
+                guild_id=guild_id,
+                environment=environment,
+                exclude_author_ids=exclude_author_ids,
+            )
+        )
+
+    def get_live_update_message_engagement_context(
+        self,
+        message_ids: List[str],
+        guild_id: Optional[int] = None,
+        participant_limit: int = 12,
+        environment: str = 'prod',
+    ) -> Dict[str, Any]:
+        """Fetch reactor/responder profile context for live-editor agent tools."""
+        if not self.storage_handler:
+            return {"messages": []}
+        return self._run_async_in_thread(
+            self.storage_handler.get_live_update_message_engagement_context(
+                message_ids=message_ids,
+                guild_id=guild_id,
+                participant_limit=participant_limit,
+                environment=environment,
+            )
+        )
+
+    def get_live_update_recent_reaction_events(
+        self,
+        guild_id: Optional[int] = None,
+        hours_back: int = 1,
+        limit: int = 30,
+        environment: str = 'prod',
+    ) -> Dict[str, Any]:
+        """Fetch recent reaction events for live-editor agent tools."""
+        if not self.storage_handler:
+            return {"reaction_events": []}
+        return self._run_async_in_thread(
+            self.storage_handler.get_live_update_recent_reaction_events(
+                guild_id=guild_id,
+                hours_back=hours_back,
+                limit=limit,
+                environment=environment,
+            )
+        )
+
+    def search_live_update_feed_items(
+        self,
+        query: str,
+        guild_id: Optional[int] = None,
+        live_channel_id: Optional[int] = None,
+        hours_back: int = 168,
+        limit: int = 20,
+        environment: str = 'prod',
+    ) -> List[Dict[str, Any]]:
+        """Search previous live updates for live-editor agent tools."""
+        if not self.storage_handler:
+            return []
+        return self._run_async_in_thread(
+            self.storage_handler.search_live_update_feed_items(
+                query=query,
+                guild_id=guild_id,
+                live_channel_id=live_channel_id,
+                hours_back=hours_back,
+                limit=limit,
+                environment=environment,
+            )
+        )
+
+    def search_live_update_editorial_memory(
+        self,
+        query: str,
+        guild_id: Optional[int] = None,
+        limit: int = 20,
+        environment: str = 'prod',
+    ) -> List[Dict[str, Any]]:
+        """Search live-update editorial memory for agent tools."""
+        if not self.storage_handler:
+            return []
+        return self._run_async_in_thread(
+            self.storage_handler.search_live_update_editorial_memory(
+                query=query,
+                guild_id=guild_id,
+                limit=limit,
+                environment=environment,
+            )
+        )
+
+    def upsert_live_update_editorial_memory(self, memory: Dict[str, Any], environment: str = 'prod') -> Optional[Dict[str, Any]]:
+        """Upsert live-update editorial memory."""
+        guild_id = memory.get('guild_id')
+        if not self._live_write_allowed(guild_id) or not self.storage_handler:
+            return None
+        return self._run_async_in_thread(self.storage_handler.upsert_live_update_editorial_memory(memory, environment=environment))
+
+    def get_live_update_editorial_memory(
+        self,
+        guild_id: Optional[int] = None,
+        limit: int = 100,
+        environment: str = 'prod',
+    ) -> List[Dict[str, Any]]:
+        """Fetch current live-update editorial memory."""
+        if not self.storage_handler:
+            return []
+        return self._run_async_in_thread(
+            self.storage_handler.get_live_update_editorial_memory(guild_id=guild_id, limit=limit, environment=environment)
+        )
+
+    def upsert_live_update_watchlist(self, watch: Dict[str, Any], environment: str = 'prod') -> Optional[Dict[str, Any]]:
+        """Upsert a live-update watchlist entry."""
+        guild_id = watch.get('guild_id')
+        if not self._live_write_allowed(guild_id) or not self.storage_handler:
+            return None
+        return self._run_async_in_thread(self.storage_handler.upsert_live_update_watchlist(watch, environment=environment))
+
+    def get_live_update_watchlist(
+        self,
+        guild_id: Optional[int] = None,
+        environment: str = 'prod',
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """Fetch live-update watchlist rows, grouped by revisit state.
+
+        (a) Runs an idempotent UPDATE sweep BEFORE the SELECT to auto-archive
+            rows where ``expires_at < now()`` (sets ``status='archived'``,
+            appends ``ttl_expired`` to ``notes``).
+        (b) SELECTs all rows via storage_handler (no status filter) then filters
+            to ``status IN ('active','published')`` in Python.
+        (c) Computes ``revisit_state`` in Python:
+            * ``fresh`` if ``now() < next_revisit_at``
+            * ``revisit_due`` if past ``next_revisit_at`` but before ``created_at + 24h``
+            * ``last_call`` if past ``created_at + 24h``
+        (d) Groups results into ``{fresh: [...], revisit_due: [...], last_call: [...]}``
+            capped at 20 per state, most-recent-first.
+        (e) Enforces a 50-row active cap across ALL states combined —
+            auto-archives oldest rows beyond the cap (regardless of state).
+        """
+        if not self.storage_handler:
+            return {"fresh": [], "revisit_due": [], "last_call": []}
+
+        now = datetime.now(timezone.utc)
+
+        # ── (a) idempotent UPDATE sweep: auto-archive expired rows ──
+        # execute_raw_sql can't route UPDATE statements, so use the REST client.
+        try:
+            sb_client = self.storage_handler.supabase_client
+            sweep = (
+                sb_client.table('live_update_watchlist')
+                .update({'status': 'archived', 'notes': 'ttl_expired'})
+                .lt('expires_at', now.isoformat())
+                .not_.in_('status', ['archived', 'discarded'])
+                .eq('environment', environment)
+            )
+            if guild_id is not None:
+                sweep = sweep.eq('guild_id', int(guild_id))
+            sweep.execute()
+        except Exception as e:
+            logger.warning(f"Watchlist TTL sweep failed (non-fatal): {e}")
+
+        # ── (b) SELECT all rows (storage_handler no longer filters by status) ──
+        all_rows = self._run_async_in_thread(
+            self.storage_handler.get_live_update_watchlist(
+                guild_id=guild_id, limit=200, environment=environment,
+            )
+        )
+
+        # Filter to active rows only
+        active_rows = [r for r in all_rows if r.get('status') in ('active', 'published')]
+
+        # ── (c) compute revisit_state ──
+        for row in active_rows:
+            created_at = row.get('created_at')
+            next_revisit_at = row.get('next_revisit_at')
+
+            created_dt: Optional[datetime] = None
+            revisit_dt: Optional[datetime] = None
+
+            if created_at:
+                try:
+                    created_dt = datetime.fromisoformat(str(created_at).replace('Z', '+00:00'))
+                    if created_dt.tzinfo is None:
+                        created_dt = created_dt.replace(tzinfo=timezone.utc)
+                except (ValueError, TypeError):
+                    created_dt = None
+
+            if next_revisit_at:
+                try:
+                    revisit_dt = datetime.fromisoformat(str(next_revisit_at).replace('Z', '+00:00'))
+                    if revisit_dt.tzinfo is None:
+                        revisit_dt = revisit_dt.replace(tzinfo=timezone.utc)
+                except (ValueError, TypeError):
+                    revisit_dt = None
+
+            if created_dt and revisit_dt:
+                if now < revisit_dt:
+                    row['_revisit_state'] = 'fresh'
+                elif now < (created_dt + timedelta(hours=24)):
+                    row['_revisit_state'] = 'revisit_due'
+                else:
+                    row['_revisit_state'] = 'last_call'
+            elif created_dt:
+                # No revisit timestamp set — estimate from created_at
+                if now < (created_dt + timedelta(hours=6)):
+                    row['_revisit_state'] = 'fresh'
+                elif now < (created_dt + timedelta(hours=24)):
+                    row['_revisit_state'] = 'revisit_due'
+                else:
+                    row['_revisit_state'] = 'last_call'
+            else:
+                row['_revisit_state'] = 'revisit_due'
+
+        # Most-recent-first (by updated_at, falling back to created_at)
+        active_rows.sort(
+            key=lambda r: str(r.get('updated_at') or r.get('created_at') or ''),
+            reverse=True,
+        )
+
+        # ── (e) enforce 50-row active cap across ALL states ──
+        if len(active_rows) > 50:
+            rows_to_archive = active_rows[50:]
+            active_rows = active_rows[:50]
+            try:
+                watch_ids = [r['watch_id'] for r in rows_to_archive if r.get('watch_id')]
+                if watch_ids:
+                    ids_quoted = ', '.join(f"'{wid}'" for wid in watch_ids)
+                    cap_sql = (
+                        "UPDATE live_update_watchlist "
+                        "SET status = 'archived', "
+                        "    notes = CASE "
+                        "        WHEN notes IS NULL OR notes = '' THEN 'active_cap_exceeded' "
+                        "        ELSE notes || '; active_cap_exceeded' "
+                        "    END "
+                        f"WHERE watch_id IN ({ids_quoted})"
+                    )
+                    self.execute_query(cap_sql)
+            except Exception as e:
+                logger.warning(f"Watchlist active-cap enforcement failed (non-fatal): {e}")
+
+        # ── (d) group by revisit_state, capped at 20 per state ──
+        fresh: List[Dict[str, Any]] = []
+        revisit_due: List[Dict[str, Any]] = []
+        last_call: List[Dict[str, Any]] = []
+
+        for row in active_rows:
+            state = row.pop('_revisit_state', 'revisit_due')
+            if state == 'fresh' and len(fresh) < 20:
+                fresh.append(row)
+            elif state == 'revisit_due' and len(revisit_due) < 20:
+                revisit_due.append(row)
+            elif state == 'last_call' and len(last_call) < 20:
+                last_call.append(row)
+
+        return {
+            "fresh": fresh,
+            "revisit_due": revisit_due,
+            "last_call": last_call,
+        }
+
+    def insert_live_update_watchlist(
+        self,
+        watch_key: str,
+        title: str,
+        origin_reason: str,
+        source_message_ids: List[str],
+        channel_id: Optional[int] = None,
+        subject_type: str = 'general',
+        environment: str = 'prod',
+        guild_id: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Insert a watchlist row idempotently by (environment, watch_key).
+
+        Sets expires_at = now()+72h, next_revisit_at = now()+6h, evidence jsonb
+        snapshot of source_message_ids/channel/title, status='active', revisit_count=0.
+        Delegates to storage_handler.insert_live_update_watchlist.
+
+        Relationship with upsert_live_update_watchlist: the upsert path handles
+        last_matched_* updates when an accepted candidate matches an existing row;
+        this insert path handles model-driven tool-based creation.
+        """
+        if not self._live_write_allowed(guild_id) or not self.storage_handler:
+            return None
+        return self._run_async_in_thread(
+            self.storage_handler.insert_live_update_watchlist(
+                watch_key=watch_key,
+                title=title,
+                origin_reason=origin_reason,
+                source_message_ids=source_message_ids,
+                channel_id=channel_id,
+                subject_type=subject_type,
+                environment=environment,
+                guild_id=guild_id,
+            )
+        )
+
+    def update_live_update_watchlist(
+        self,
+        watch_key: str,
+        action: str,
+        notes: Optional[str] = None,
+        environment: str = 'prod',
+    ) -> Optional[Dict[str, Any]]:
+        """Update a watchlist row with publish_now/extend/discard action.
+
+        publish_now sets status='published'.
+        extend bumps next_revisit_at = least(now()+6h, expires_at) and increments revisit_count.
+        discard sets status='discarded' and stores notes.
+        Delegates to storage_handler.update_live_update_watchlist.
+
+        Relationship with upsert_live_update_watchlist: the upsert path handles
+        last_matched_* updates when an accepted candidate matches an existing row;
+        this update path handles model-driven lifecycle transitions via tool calls.
+        """
+        if not self.storage_handler:
+            return None
+        return self._run_async_in_thread(
+            self.storage_handler.update_live_update_watchlist(
+                watch_key=watch_key,
+                action=action,
+                notes=notes,
+                environment=environment,
+            )
+        )
+
+    def create_live_top_creation_run(self, run: Dict[str, Any], environment: str = 'prod') -> Optional[Dict[str, Any]]:
+        """Create an independent top-creations audit run."""
+        guild_id = run.get('guild_id')
+        if not self._live_write_allowed(guild_id) or not self.storage_handler:
+            return None
+        return self._run_async_in_thread(self.storage_handler.create_live_top_creation_run(run, environment=environment))
+
+    def update_live_top_creation_run(
+        self,
+        run_id: str,
+        updates: Dict[str, Any],
+        guild_id: Optional[int] = None,
+        environment: str = 'prod',
+    ) -> Optional[Dict[str, Any]]:
+        """Update an independent top-creations audit run."""
+        if not self._live_write_allowed(guild_id or updates.get('guild_id')) or not self.storage_handler:
+            return None
+        return self._run_async_in_thread(self.storage_handler.update_live_top_creation_run(run_id, updates, environment=environment))
+
+    def store_live_top_creation_post(self, post: Dict[str, Any], environment: str = 'prod') -> Optional[Dict[str, Any]]:
+        """Persist a top-creations post with ordered Discord message IDs."""
+        guild_id = post.get('guild_id')
+        if not self._live_write_allowed(guild_id) or not self.storage_handler:
+            return None
+        return self._run_async_in_thread(self.storage_handler.store_live_top_creation_post(post, environment=environment))
+
+    def get_live_top_creation_post_by_duplicate_key(self, duplicate_key: str, guild_id: Optional[int] = None, environment: str = 'prod') -> Optional[Dict[str, Any]]:
+        """Look up a previously posted top-creations post by duplicate key for dedupe."""
+        if not self.storage_handler:
+            return None
+        return self._run_async_in_thread(self.storage_handler.get_live_top_creation_post_by_duplicate_key(environment, duplicate_key))
+
+    def get_live_top_creation_checkpoint(self, checkpoint_key: str, environment: str = 'prod') -> Optional[Dict[str, Any]]:
+        """Read an independent top-creations checkpoint."""
+        if not self.storage_handler:
+            return None
+        return self._run_async_in_thread(self.storage_handler.get_live_top_creation_checkpoint(checkpoint_key, environment=environment))
+
+    def upsert_live_top_creation_checkpoint(self, checkpoint: Dict[str, Any], environment: str = 'prod') -> Optional[Dict[str, Any]]:
+        """Upsert an independent top-creations checkpoint."""
+        guild_id = checkpoint.get('guild_id')
+        if not self._live_write_allowed(guild_id) or not self.storage_handler:
+            return None
+        return self._run_async_in_thread(self.storage_handler.upsert_live_top_creation_checkpoint(checkpoint, environment=environment))
+
     def get_all_message_ids(self, channel_id: int) -> List[int]:
         """Get all message IDs for a channel."""
         try:

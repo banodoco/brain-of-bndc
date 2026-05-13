@@ -1,0 +1,98 @@
+{
+  "receipt_id": "7e73e888-e5c0-46fc-8337-ac562db8d9c9",
+  "plan_id": "build-phase-1-of-the-live-20260513-1822",
+  "phase": "execute",
+  "iteration": 3,
+  "attempt": 1,
+  "timestamp_utc": "2026-05-13T17:03:04.917251+00:00",
+  "profile_name": "all-codex",
+  "agent": "claude",
+  "agent_mode": "persistent",
+  "model_configured": "claude",
+  "model_actual": null,
+  "session_id": "53fddd34-0949-4468-8611-3c646a7393b3",
+  "megaplan_version": "0.8.1",
+  "schema_version": 1,
+  "prompt_hash_raw": null,
+  "prompt_hash_canonical": null,
+  "canonicalization_version": 1,
+  "upstream_artifact_hashes": [
+    "sha256:52a57c0516072b8fb7d6dee0f3dad4c4e3b69be2d31fab1bba9ce8b2d26ba809"
+  ],
+  "cost_usd": 0.6546592499999999,
+  "duration_ms": 48656,
+  "prompt_tokens": 352829,
+  "completion_tokens": 4114,
+  "verdict": "blocked",
+  "metrics": {
+    "files_claimed": 1,
+    "files_in_diff": 36,
+    "scope_drift_files_added": 36,
+    "scope_drift_files_missing": 1,
+    "loc_added": 13051,
+    "loc_removed": 0,
+    "loc_added_outside_claimed": 12270,
+    "commands_run_count": 5,
+    "advisory_issues_count": 0,
+    "blocking_issues_count": 0,
+    "per_task_files_claimed_count": 0,
+    "batches": [
+      {
+        "output": "T16 blocked: both before_execute user_actions are incomplete.\n\n- **U1 (defer-audit SQL on live `live_update_candidates`, 30d):** No artifact in the plan directory, and `docs/live-update-editor-phase1-locked-decisions.md` does not exist. The number gates T1's locked-decisions doc, T2's migration (whether to document `state='pending_review'`), and T7's tool surface (whether `request_review_topic` ships as an 11th tool). Requires live Supabase access \u2014 human-only.\n- **U2 (`tests/fixtures/similarity_pairs.json` from real pg_trgm output):** The `tests/fixtures/` directory does not exist; neither `similarity_pairs.json` nor `historical_headlines.json` is anywhere in the repo. Required by T3's pinned-oracle similarity test (FLAG-010 oracle-leakage guard). Requires Postgres-with-pg_trgm \u2014 human-only.\n\nPer T16, execution stopped before T1. POM must (a) deliver the U1 defer-audit number + qualitative read, and (b) generate and commit `tests/fixtures/similarity_pairs.json` (seeded from `tests/fixtures/historical_headlines.json`), then re-dispatch the next batch. Checkpoint written to `.megaplan/plans/build-phase-1-of-the-live-20260513-1822/execution_batch_1.json`.",
+        "files_changed": [
+          ".megaplan/plans/build-phase-1-of-the-live-20260513-1822/execution_batch_1.json"
+        ],
+        "commands_run": [
+          "ls -la tests/fixtures/",
+          "ls -la docs/live-update-editor-phase1-locked-decisions.md",
+          "ls .megaplan/plans/build-phase-1-of-the-live-20260513-1822/",
+          "find . -name 'similarity_pairs.json' -o -name 'historical_headlines.json'",
+          "ls .megaplan/plans/build-phase-1-of-the-live-20260513-1822/*defer* *audit*"
+        ],
+        "deviations": [
+          "Advisory observation mismatch: executor claimed files not observed in git status/content hash delta: .megaplan/plans/build-phase-1-of-the-live-20260513-1822/execution_batch_1.json",
+          "Advisory audit finding: Git status shows changed files not claimed by any task: .claude/scheduled_tasks.lock, .megaplan/briefs/, .megaplan/debt.json, .megaplan/plans/build-phase-1-of-the-live-20260513-1821/, .megaplan/plans/build-phase-1-of-the-live-20260513-1822/, .megaplan/plans/implement-the-watchlist-20260512-1809/, .megaplan/plans/live-update-environment-split/, .megaplan/plans/produce-the-phase-2-prod-20260513-1821/, .megaplan/plans/produce-the-phase-2-prod-20260513-1822/, .megaplan/schemas/directors_notes.json, .megaplan/schemas/execution_doc.json, .megaplan/schemas/feedback.json, .megaplan/schemas/finalize.json, .megaplan/schemas/review.json, .megaplan/schemas/revise.json, docs/debug-utility-validation.md, docs/live-editor-watchlist-plan.md, docs/live-update-editor-legacy-boundaries.md, docs/live-update-editor-phase-2-runbook.md, docs/live-update-editor-redesign.md, main.py, scripts/backfill_guild_ids.py, scripts/debug.py, scripts/debug_live_editor_audit.py, scripts/discord_tools.py, scripts/inspect_editor_reasoning.py, scripts/run_live_update_dev.py, scripts/send_social_picks.py, src/common/db_handler.py, src/common/storage_handler.py, src/features/admin/admin_cog.py, src/features/admin_chat/agent.py, src/features/admin_chat/tools.py, src/features/archive/archive_cog.py, src/features/gating/intro_embed.py, src/features/health/health_check_cog.py, src/features/summarising/live_top_creations.py, src/features/summarising/live_update_editor.py, src/features/summarising/live_update_prompts.py, src/features/summarising/summariser.py, src/features/summarising/summariser_cog.py, structure.md, tests/test_live_admin_health.py, tests/test_live_runtime_wiring.py, tests/test_live_storage_wrappers.py, tests/test_live_top_creations.py, tests/test_live_update_editor_lifecycle.py, tests/test_live_update_editor_publishing.py, tests/test_live_update_prompts.py, tests/test_social_route_tools.py",
+          "Advisory audit finding: Sense check SC1 is missing an executor acknowledgment.",
+          "Advisory audit finding: Sense check SC2 is missing an executor acknowledgment.",
+          "Advisory audit finding: Sense check SC3 is missing an executor acknowledgment.",
+          "Advisory audit finding: Sense check SC4 is missing an executor acknowledgment.",
+          "Advisory audit finding: Sense check SC5 is missing an executor acknowledgment.",
+          "Advisory audit finding: Sense check SC6 is missing an executor acknowledgment.",
+          "Advisory audit finding: Sense check SC7 is missing an executor acknowledgment.",
+          "Advisory audit finding: Sense check SC8 is missing an executor acknowledgment.",
+          "Advisory audit finding: Sense check SC9 is missing an executor acknowledgment.",
+          "Advisory audit finding: Sense check SC10 is missing an executor acknowledgment.",
+          "Advisory audit finding: Sense check SC11 is missing an executor acknowledgment.",
+          "Advisory audit finding: Sense check SC12 is missing an executor acknowledgment.",
+          "Advisory audit finding: Sense check SC13 is missing an executor acknowledgment.",
+          "Advisory audit finding: Sense check SC14 is missing an executor acknowledgment.",
+          "Advisory audit finding: Sense check SC15 is missing an executor acknowledgment.",
+          "Advisory audit finding: Tasks left pending after execute (executor never started them): T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15"
+        ],
+        "task_updates": [
+          {
+            "task_id": "T16",
+            "status": "blocked",
+            "executor_notes": "Both before_execute user_actions verified incomplete via shell commands (not just reading user_actions.md). U1: defer-audit number not delivered \u2014 no artifact in plan dir, docs/live-update-editor-phase1-locked-decisions.md does not exist. Blocks T1, T2, T7 per user_actions.md. U2: tests/fixtures/ directory does not exist; similarity_pairs.json and historical_headlines.json absent everywhere in repo. Blocks T3 per user_actions.md. Both require human-only inputs (live Supabase + Postgres-with-pg_trgm). Execution stopped per T16 instructions; no work done on T1\u2013T15.",
+            "files_changed": [],
+            "commands_run": [
+              "ls -la tests/fixtures/",
+              "ls -la docs/live-update-editor-phase1-locked-decisions.md",
+              "ls .megaplan/plans/build-phase-1-of-the-live-20260513-1822/",
+              "find . -name 'similarity_pairs.json' -o -name 'historical_headlines.json'",
+              "ls .megaplan/plans/build-phase-1-of-the-live-20260513-1822/*defer* *audit*"
+            ],
+            "auto_attributed_files": false
+          }
+        ],
+        "sense_check_acknowledgments": [
+          {
+            "sense_check_id": "SC16",
+            "executor_note": "Verified programmatically (file/directory existence checks), not by reading user_actions.md alone. U1: no defer-audit artifact, no locked-decisions doc \u2014 number not delivered. U2: tests/fixtures/ directory absent; required fixture files do not exist anywhere in repo. Both are before_execute prerequisites; T16 marked blocked and execution stopped without touching T1\u2013T15."
+          }
+        ]
+      }
+    ]
+  },
+  "scope_drift_severity": "high"
+}

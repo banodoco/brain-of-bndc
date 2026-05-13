@@ -1,0 +1,249 @@
+{
+  "name": "live-update-environment-split",
+  "idea": "# Live-update / top-creations: dev-vs-prod environment split + dedupe + same-channel routing\n\n## Goal\n\nMake dev runs of the live-update editor and top-creations service **fully exercise the production codepath** \u2014 including DB persistence \u2014 without their rows polluting prod reads, and vice versa. At the same time, simplify top-creations to publish into the same channel as live updates with strict once-only dedupe.\n\n## Why\n\nToday's `dry_run=True` path in `LiveUpdateEditor` and `LiveTopCreations` publishes to `DEV_*` Discord channels but **skips all DB writes** (no runs, candidates, decisions, feed items, checkpoints, or top-creation posts persisted). Result: dev gives us no signal about how the system will look in production, because half the production codepath (persistence + checkpoint dedupe + memory/watchlist updates) never runs.\n\nWe want dev to be a true rehearsal: same code, same writes, same reads \u2014 but tagged so dev and prod never see each other's data.\n\n## Decisions already locked (do not re-debate)\n\n1. **Shared tables with an `environment` discriminator column.** Not separate dev tables.\n2. **Top-creations publishes to the same channel as live updates** (the summary channel \u2014 `summary_channel_id` in prod, `DEV_SUMMARY_CHANNEL_ID` in dev). The separate `top_gens_channel_id` routing is retired. Drop the per-pass `max_posts` cap; the gate is reactions \u2265 5 + row-level dedupe.\n3. **Dev publishes to Discord (to `DEV_*` channels) AND persists with `environment='dev'`.** Real rehearsal, not persist-only.\n\n## Scope\n\n### 1. Schema migrations\n\nAdd `environment text not null default 'prod'` to:\n\n- `live_update_runs`\n- `live_update_candidates`\n- `live_update_decisions`\n- `live_update_feed_items`\n- `live_update_checkpoints`\n- `live_update_editorial_memory`\n- `live_update_watchlist`\n- `live_top_creation_runs`\n- `live_top_creation_posts`\n- `live_top_creation_checkpoints`\n\nPlus a uniqueness constraint to enforce \"send once\" at the DB level:\n\n- Unique index on `live_top_creation_posts (environment, duplicate_key)` where status = 'posted'. (Or just `(environment, duplicate_key)` if status semantics make a partial index awkward \u2014 planner to decide.)\n\nThe default `'prod'` means existing rows auto-classify correctly; no backfill semantics to debate.\n\nConvention: inspect the repo to identify the migration tooling/location and follow it. Likely Supabase SQL files under a `migrations/` or `supabase/migrations/` directory \u2014 confirm before writing.\n\n### 2. Storage layer (`src/common/storage_handler.py`)\n\nEvery write method for the tables above: accept and stamp `environment`.\nEvery read method for the tables above: accept and filter on `environment`.\n\nMethods to touch (non-exhaustive \u2014 planner to enumerate from the file):\n- `create_live_update_run`, `update_live_update_run`\n- `store_live_update_candidate(s)`, `store_live_update_decision`, `store_live_update_feed_item`\n- `get_live_update_checkpoint`, `upsert_live_update_checkpoint`\n- `get_recent_live_update_feed_items`\n- `get_live_update_editorial_memory`, `update_live_update_editorial_memory` (whatever update method exists)\n- `get_live_update_watchlist`, `update_live_update_watchlist` (whatever exists)\n- `create_live_top_creation_run`, `update_live_top_creation_run`\n- `store_live_top_creation_post`\n- `get_live_top_creation_checkpoint`, `upsert_live_top_creation_checkpoint`\n- **NEW**: `get_live_top_creation_post_by_duplicate_key(environment, duplicate_key)` \u2014 for pre-publish dedupe lookup.\n\n`get_archived_messages_after_checkpoint` reads from the archived-messages table (shared infra, not live-update-specific) \u2014 it does **not** need an environment column.\n\n### 3. DB handler (`src/common/db_handler.py`)\n\nMirror every storage_handler change \u2014 accept `environment` on the relevant wrappers, default to `'prod'`. Add wrapper for the new `get_live_top_creation_post_by_duplicate_key`.\n\n### 4. `src/features/summarising/live_update_editor.py`\n\n- Add constructor param `environment: str = \"prod\"`. Store as `self.environment`.\n- Remove the `if self.dry_run: return await self._run_dry_once(...)` short-circuit from `run_once`. The dry-run path's lookback-window seeding (when no checkpoint exists yet) should be folded into the normal path: if `get_live_update_checkpoint(checkpoint_key)` returns None and we're in `dev` environment, synthesize an initial checkpoint at `now - dry_run_lookback_hours`. Otherwise behave normally.\n- Every call into `self.db.*` that writes one of the listed tables: pass `environment=self.environment`.\n- Every call that reads one of the listed tables: pass `environment=self.environment` so the filter applies.\n- Channel resolution: keep the current dev-env-vars logic (`DEV_SUMMARY_CHANNEL_ID` / `DEV_LIVE_UPDATE_CHANNEL_ID`) \u2014 that part is fine.\n- The `dry_run_lookback_hours` param can stay (rename internally if it helps; `initial_lookback_hours` is more honest, but renaming is optional).\n- `_run_dry_once` and `_publish_dry_run_debug_report` (lines ~430-547) can be **deleted** \u2014 the dev path no longer needs a separate function. The debug-report behavior, if useful, can be kept as a logging side-effect gated on `environment == 'dev'`.\n\n### 5. `src/features/summarising/live_top_creations.py`\n\n- Add constructor param `environment: str = \"prod\"`.\n- Same persistence cleanup as the editor: remove the `if self.dry_run` short-circuit at `run_once` line 82, fold the lookback-window seed into the normal path for `environment == 'dev'`.\n- **Channel resolution** (`_resolve_top_channel_id`, line 401): collapse to the live-update/summary channel. In prod, return `summary_channel_id` for the guild; in dev, return `DEV_SUMMARY_CHANNEL_ID` (or `DEV_LIVE_UPDATE_CHANNEL_ID` as fallback). Stop reading `DEV_TOP_GENS_CHANNEL_ID` / server `top_gens_channel_id`. Constructor param `top_gens_channel_id` and `live_channel_id` can be removed or repurposed \u2014 planner's call, but the runtime path must only go to the summary channel.\n- **Pre-publish dedupe**: in `_publish_candidate` (line 309), before the `await _send_without_mentions(...)` call, query `db.get_live_top_creation_post_by_duplicate_key(self.environment, candidate[\"duplicate_key\"])`. If a posted row exists, skip publishing and mark the candidate as skipped/duplicate. Update the run summary counters accordingly. This is the \"send only once\" guarantee, surviving checkpoint resets.\n- Remove the `max_posts` per-pass cap (currently `DEFAULT_MAX_POSTS = 5`, applied at `pending[: self.max_posts]` line 159, 238). Allow all eligible candidates through. Optionally keep a high-ceiling safety belt (e.g. 50) \u2014 planner's call.\n- Stamp `environment` on all writes (run create/update, post store, checkpoint upsert).\n- The checkpoint's `posted_duplicate_keys` state can stay as a soft optimization but is no longer the source of truth.\n\n### 6. Cog wiring (`src/features/summarising/summariser_cog.py`)\n\nAt construction (lines ~61, ~68): pass `environment=\"dev\" if self.dev_mode else \"prod\"` into `LiveUpdateEditor` and `LiveTopCreations`. The `dry_run=self.dev_mode` argument can either stay (now meaning only \"seed initial lookback\") or be removed entirely if the planner folds the seeding logic in cleanly.\n\n### 7. Run script (`scripts/run_live_update_dev.py`)\n\nShould require **no structural changes** \u2014 `dev_mode=True` flows through to environment=\"dev\" via the cog path. The script constructs the editor/top-creations directly though, so update those constructor calls (lines 129-140) to pass `environment=\"dev\"` explicitly. The `dry_run=True` and `dry_run_lookback_hours` args either stay or are removed in lockstep with the editor/top-creations API.\n\n### 8. Tests\n\nExisting tests under `tests/test_live_*` (especially `test_live_update_editor_lifecycle.py`, `test_live_update_editor_publishing.py`, `test_live_top_creations.py`, `test_live_runtime_wiring.py`, `test_live_storage_wrappers.py`) currently assert \"dry-run doesn't persist.\" Flip those to assert \"dev environment persists with `environment='dev'` and prod reads do not see those rows.\"\n\nAdd a new test (or extend an existing one) covering: **pre-publish dedupe for top-creations** \u2014 running twice over the same archived message with reactions \u2265 5 results in exactly one `live_top_creation_posts` row and one Discord send.\n\n## Out of scope\n\n- Any change to the archived-messages ingestion path.\n- Any change to the legacy daily-summary code (`summariser.py`, `ChannelSummarizer.generate_summary`, `daily_summaries` table).\n- Any change to how reactions are counted or the `min_reactions = 5` threshold itself.\n- Renaming `dry_run` everywhere \u2014 internal rename is optional; behavior is what matters.\n- Backfilling existing rows \u2014 the default `'prod'` does the right thing.\n\n## Acceptance criteria\n\n1. **Schema**: all listed tables have an `environment` column; unique constraint exists on `live_top_creation_posts (environment, duplicate_key)`.\n2. **Audit pass \u2014 every read filters on environment**: a planner-or-reviewer-driven grep through the storage layer confirms there is no `select` against the listed tables that omits the `environment` filter when called from editor or top-creations code. *This is the load-bearing correctness check.*\n3. **Dev rehearsal works**: running `scripts/run_live_update_dev.py --once` against a real Supabase produces rows in the relevant tables with `environment='dev'`, and a subsequent prod-mode pass does not surface any of those dev rows in `get_recent_live_update_feed_items`, the watchlist, the editorial memory, or the top-creation dedupe lookup.\n4. **Top-creations dedupe**: re-running top-creations against the same archived message twice publishes exactly once.\n5. **Top-creations channel**: posts land in the live-update / summary channel; no traffic to a separate top-gens channel.\n6. **Tests pass**: all existing live-update tests pass (after being flipped from \"no persistence\" to \"dev persistence + isolation\"), plus the new dedupe test.\n\n## Useful starting pointers\n\n- Current dry-run short-circuits: `live_update_editor.py:110`, `live_top_creations.py:82`.\n- Top-creations channel resolution to collapse: `live_top_creations.py:401-429`.\n- Top-creations publish path to add dedupe check: `live_top_creations.py:309`.\n- Cog wiring: `summariser_cog.py:55-72`.\n- Dev run script: `scripts/run_live_update_dev.py`.\n- Legacy boundaries doc (helpful context, not authoritative): `docs/live-update-editor-legacy-boundaries.md`.",
+  "current_state": "done",
+  "iteration": 2,
+  "created_at": "2026-05-11T09:40:31Z",
+  "config": {
+    "project_dir": "/Users/peteromalley/Documents/banodoco-workspace/brain-of-bndc",
+    "auto_approve": true,
+    "robustness": "light",
+    "mode": "code",
+    "strict_notes": false,
+    "agent": "",
+    "profile": "marlowe",
+    "phase_model": [
+      "plan=claude:high",
+      "plan=claude:low",
+      "prep=hermes:deepseek/deepseek-v4-pro",
+      "critique=hermes:moonshotai/kimi-k2.6",
+      "revise=claude:low",
+      "gate=claude:low",
+      "finalize=hermes:deepseek/deepseek-v4-pro",
+      "execute=hermes:deepseek/deepseek-v4-pro",
+      "loop_plan=claude:low",
+      "loop_execute=hermes:deepseek/deepseek-v4-pro",
+      "review=claude:low",
+      "tiebreaker_researcher=claude:low",
+      "tiebreaker_challenger=claude:low"
+    ]
+  },
+  "sessions": {
+    "claude_planner": {
+      "id": "8d540268-cc9d-48ae-a269-d1565c5ee123",
+      "mode": "persistent",
+      "created_at": "2026-05-11T09:43:42Z",
+      "last_used_at": "2026-05-11T10:05:16Z",
+      "refreshed": false
+    },
+    "hermes_critic": {
+      "id": "64efb652-11d8-4d1d-ab6d-ec87aa7d419a",
+      "mode": "persistent",
+      "created_at": "2026-05-11T10:03:47Z",
+      "last_used_at": "2026-05-11T10:03:47Z",
+      "refreshed": false
+    },
+    "hermes_finalizer": {
+      "id": "d84e183a-e742-4e8d-849f-3729efe0d960",
+      "mode": "persistent",
+      "created_at": "2026-05-11T10:17:30Z",
+      "last_used_at": "2026-05-11T10:17:30Z",
+      "refreshed": false
+    },
+    "hermes_executor": {
+      "id": "a3f21cd6-c62b-4841-903f-c4854064d81e",
+      "mode": "persistent",
+      "created_at": "2026-05-11T10:19:55Z",
+      "last_used_at": "2026-05-11T13:03:19Z",
+      "refreshed": true
+    }
+  },
+  "plan_versions": [
+    {
+      "version": 1,
+      "file": "plan_v1.md",
+      "hash": "sha256:cc6d996b3f2d644730656725869447e9735203324a3e118afb6c5a61f8270475",
+      "timestamp": "2026-05-11T09:43:42Z"
+    },
+    {
+      "version": 2,
+      "file": "plan_v2.md",
+      "hash": "sha256:ab2611a61de832e54be5fccc91693759b37daffa60b4d56cf97791b63c8e97b9",
+      "timestamp": "2026-05-11T10:05:16Z"
+    }
+  ],
+  "history": [
+    {
+      "step": "init",
+      "timestamp": "2026-05-11T09:40:31Z",
+      "duration_ms": 0,
+      "cost_usd": 0.0,
+      "result": "success",
+      "environment": {
+        "claude": true,
+        "codex": true
+      }
+    },
+    {
+      "step": "plan",
+      "timestamp": "2026-05-11T09:43:42Z",
+      "duration_ms": 185477,
+      "cost_usd": 0.8075876999999999,
+      "result": "success",
+      "session_mode": "persistent",
+      "session_id": "8d540268-cc9d-48ae-a269-d1565c5ee123",
+      "agent": "claude",
+      "output_file": "plan_v1.md",
+      "artifact_hash": "sha256:cc6d996b3f2d644730656725869447e9735203324a3e118afb6c5a61f8270475"
+    },
+    {
+      "step": "critique",
+      "timestamp": "2026-05-11T10:03:47Z",
+      "duration_ms": 1202250,
+      "cost_usd": 0.72448665,
+      "result": "success",
+      "prompt_tokens": 1371101,
+      "completion_tokens": 17283,
+      "total_tokens": 1388384,
+      "session_mode": "persistent",
+      "session_id": "64efb652-11d8-4d1d-ab6d-ec87aa7d419a",
+      "agent": "hermes",
+      "output_file": "critique_v1.json",
+      "artifact_hash": "sha256:b7bfac171180f2e6e15636059325cb7e8dea5cb81bc3bdeec4e758b5e35d23fc",
+      "flags_count": 6
+    },
+    {
+      "step": "revise",
+      "timestamp": "2026-05-11T10:05:16Z",
+      "duration_ms": 86626,
+      "cost_usd": 0.761538,
+      "result": "success",
+      "session_mode": "persistent",
+      "session_id": "8d540268-cc9d-48ae-a269-d1565c5ee123",
+      "agent": "claude",
+      "output_file": "plan_v2.md",
+      "artifact_hash": "sha256:ab2611a61de832e54be5fccc91693759b37daffa60b4d56cf97791b63c8e97b9",
+      "flags_addressed": [
+        {
+          "id": "FLAG-001",
+          "resolution": "rejected",
+          "reason": "Re-verified: `.migrations_staging/` exists with existing `.sql` files (`20260411220000_backfill_payments.sql` etc.). The reviewer's scan was incorrect. Plan unchanged on this point."
+        },
+        {
+          "id": "FLAG-002",
+          "resolution": "addressed",
+          "reason": "Plan now mandates appending `environment` as the final kwarg on every signature change in both storage_handler and db_handler, preserving compatibility with `send_social_picks.py:116`'s keyword call."
+        },
+        {
+          "id": "FLAG-003",
+          "resolution": "addressed",
+          "reason": "Step 4.4 and Step 5.4 explicitly enumerate the remaining `self.dry_run` sites (editor:1347, top:326/404/434) and require rewrite to `self.environment == \"dev\"`; Step 9.2 adds a runtime grep gate."
+        },
+        {
+          "id": "FLAG-004",
+          "resolution": "addressed",
+          "reason": "Step 1.2 drops and recreates the affected unique constraints as composite `(environment, <key>)`; Step 2.2 updates the `on_conflict` arguments in storage_handler to match."
+        },
+        {
+          "id": "FLAG-005",
+          "resolution": "addressed",
+          "reason": "Step 2.3 requires the manual pre-insert lookups in `store_live_top_creation_post`, `upsert_live_update_editorial_memory`, and `upsert_live_update_watchlist` to add `.eq(\"environment\", environment)` so update-vs-insert decisions don't cross environments."
+        }
+      ]
+    },
+    {
+      "step": "finalize",
+      "timestamp": "2026-05-11T10:17:30Z",
+      "duration_ms": 727019,
+      "cost_usd": 0.23226244999999998,
+      "result": "success",
+      "prompt_tokens": 1254594,
+      "completion_tokens": 11586,
+      "total_tokens": 1266180,
+      "session_mode": "persistent",
+      "session_id": "d84e183a-e742-4e8d-849f-3729efe0d960",
+      "agent": "hermes",
+      "output_file": "finalize.json",
+      "artifact_hash": "sha256:35274bb87e5e2999a4db35599720fda522f7bdfcc08ee0bd078c831058bea176"
+    },
+    {
+      "step": "execute",
+      "timestamp": "2026-05-11T10:19:55Z",
+      "duration_ms": 141847,
+      "cost_usd": 0.025474933999999998,
+      "result": "blocked",
+      "session_mode": "persistent",
+      "session_id": "5e1f5b4d-8eca-4b08-ad3b-fc43c2db90e9",
+      "agent": "hermes",
+      "output_file": "execution.json",
+      "artifact_hash": "sha256:389579ed3119b7680032fe735083ade423c52dee7d71ff9817cd5928cda989a1",
+      "finalize_hash": "sha256:8c03f3251c72ace1143e4d4b594bba6a8e89fe85b7db282df2aab8fb7be293d2",
+      "approval_mode": "auto_approve"
+    },
+    {
+      "step": "execute",
+      "timestamp": "2026-05-11T10:19:58Z",
+      "duration_ms": 0,
+      "cost_usd": 0.0,
+      "result": "blocked",
+      "message": "Blocked: existing blocked task(s) prevent dependent execution: T10. Resolve or replan the blocked task(s) before continuing."
+    },
+    {
+      "step": "execute",
+      "timestamp": "2026-05-11T10:41:08Z",
+      "duration_ms": 0,
+      "cost_usd": 0.0,
+      "result": "blocked",
+      "message": "Blocked: existing blocked task(s) prevent dependent execution: T10. Resolve or replan the blocked task(s) before continuing."
+    },
+    {
+      "step": "execute",
+      "timestamp": "2026-05-11T10:41:17Z",
+      "duration_ms": 0,
+      "cost_usd": 0.0,
+      "result": "blocked",
+      "message": "Blocked: existing blocked task(s) prevent dependent execution: T10. Resolve or replan the blocked task(s) before continuing."
+    },
+    {
+      "step": "execute",
+      "timestamp": "2026-05-11T10:43:35Z",
+      "duration_ms": 0,
+      "cost_usd": 0.0,
+      "result": "blocked",
+      "message": "Blocked: existing blocked task(s) prevent dependent execution: T10. Resolve or replan the blocked task(s) before continuing."
+    },
+    {
+      "step": "execute",
+      "timestamp": "2026-05-11T13:03:19Z",
+      "duration_ms": 7644863,
+      "cost_usd": 3.093503225,
+      "result": "success",
+      "session_mode": "persistent",
+      "session_id": "a3f21cd6-c62b-4841-903f-c4854064d81e",
+      "agent": "hermes",
+      "output_file": "execution.json",
+      "artifact_hash": "sha256:22d2952c02b0de9f66e410e9e84fc0f329c1b1c6fd5f49badddc738cd961d39c",
+      "finalize_hash": "sha256:a99c255330c75060d219cf171d8430585797ed3463b1d3eda7e6b874a0f2a31d",
+      "approval_mode": "auto_approve"
+    }
+  ],
+  "meta": {
+    "significant_counts": [
+      5
+    ],
+    "weighted_scores": [],
+    "plan_deltas": [
+      40.42
+    ],
+    "recurring_critiques": [
+      []
+    ],
+    "total_cost_usd": 5.644853,
+    "overrides": [],
+    "notes": [],
+    "user_approved_gate": true
+  },
+  "last_gate": {
+    "recommendation": "ITERATE"
+  }
+}

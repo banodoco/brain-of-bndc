@@ -1,0 +1,83 @@
+{
+  "output": "Completed T3. Added the Phase-1 topic editor migration under `.migrations_staging/20260513230500_live_update_topic_editor_phase1.sql` and checkpointed batch results to `.megaplan/plans/execute-the-live-update-20260513-2217/execution_batch_4.json`. Verification passed structural SQL checks and `git diff --check`; full pytest was run but still has unrelated live-update failures in the dirty workspace.",
+  "files_changed": [
+    ".migrations_staging/20260513230500_live_update_topic_editor_phase1.sql",
+    ".megaplan/plans/execute-the-live-update-20260513-2217/execution_batch_4.json"
+  ],
+  "commands_run": [
+    "rg -n \"topic_editor|topics|topic_sources|topic_transitions|pg_trgm|rejected_post\" docs .migrations_staging src tests",
+    "sed -n '1,260p' docs/live-update-editor-redesign.md",
+    "sed -n '1,240p' docs/live-update-editor-sprint-plan.md",
+    "sed -n '1,220p' .migrations_staging/20260511110349_live_update_environment_split.sql",
+    "sed -n '1,220p' .migrations_staging/20260512185328_live_update_watchlist_lifecycle.sql",
+    "rg -n \"gen_random_uuid|uuid_generate|CREATE EXTENSION|live_update_editor_runs|live_update_checkpoints\" .migrations_staging ../supabase/migrations src/common/storage_handler.py src/common/db_handler.py",
+    "supabase migration list --linked | tail -20",
+    "pg_isready -h localhost -p 5432 || true",
+    "createdb/psql temp-db migration apply attempt; killed after local password prompts",
+    "psql -w -d postgres -c \"select 1\"",
+    "python structural required/forbidden SQL check",
+    "python topic_transitions.action vocabulary check",
+    "git diff --check -- .migrations_staging/20260513230500_live_update_topic_editor_phase1.sql",
+    "pytest --tb=no -q --no-header",
+    "pytest --tb=short -q --no-header tests/test_live_top_creations.py tests/test_live_update_editor_publishing.py tests/test_live_update_prompts.py",
+    "pytest --tb=no -q --no-header",
+    "python -m json.tool .megaplan/plans/execute-the-live-update-20260513-2217/execution_batch_4.json >/dev/null"
+  ],
+  "deviations": [
+    "The migration file is under `.migrations_staging/`, which is ignored by repo `.gitignore`; file presence was verified directly.",
+    "A real local SQL apply could not complete because local PostgreSQL password authentication is required. Non-mutating structural checks were used instead.",
+    "The full test suite was run as required but failed in four existing live-update tests unrelated to this staged SQL migration: tests/test_live_top_creations.py::test_live_top_creations_dev_env_posts_and_persists_state, tests/test_live_update_editor_publishing.py::test_live_update_dev_env_posts_and_persists_with_environment_dev, tests/test_live_update_editor_publishing.py::test_live_update_dev_env_resolves_dev_live_update_channel_id, and tests/test_live_update_prompts.py::test_llm_prompt_exposes_agent_budget_and_media_reaction_guidance.",
+    "Advisory observation mismatch: executor claimed files not observed in git status/content hash delta: .megaplan/plans/execute-the-live-update-20260513-2217/execution_batch_4.json, .migrations_staging/20260513230500_live_update_topic_editor_phase1.sql",
+    "Advisory audit finding: Executor claimed changed files not present in git status: ../supabase/migrations/20260512185328_live_update_watchlist_lifecycle.sql, .migrations_staging/20260513230500_live_update_topic_editor_phase1.sql, .migrations_staging/README.md",
+    "Advisory audit finding: Git status shows changed files not claimed by any task: .claude/scheduled_tasks.lock, .megaplan/briefs/, .megaplan/debt.json, .megaplan/plans/build-phase-1-of-the-live-20260513-1821/, .megaplan/plans/build-phase-1-of-the-live-20260513-1822/, .megaplan/plans/execute-the-live-update-20260513-2216/, .megaplan/plans/implement-the-watchlist-20260512-1809/, .megaplan/plans/live-update-environment-split/, .megaplan/plans/produce-the-phase-2-prod-20260513-1821/, .megaplan/plans/produce-the-phase-2-prod-20260513-1822/, .megaplan/schemas/directors_notes.json, .megaplan/schemas/execution_doc.json, .megaplan/schemas/feedback.json, .megaplan/schemas/finalize.json, .megaplan/schemas/review.json, .megaplan/schemas/revise.json, docs/debug-utility-validation.md, docs/live-editor-watchlist-plan.md, docs/live-update-editor-legacy-boundaries.md, docs/live-update-editor-phase-2-runbook.md, docs/live-update-editor-redesign.md, docs/live-update-editor-sprint-plan.md, main.py, scripts/backfill_guild_ids.py, scripts/debug.py, scripts/debug_live_editor_audit.py, scripts/discord_tools.py, scripts/inspect_editor_reasoning.py, scripts/run_live_update_dev.py, scripts/send_social_picks.py, src/common/db_handler.py, src/common/storage_handler.py, src/features/admin/admin_cog.py, src/features/admin_chat/agent.py, src/features/admin_chat/tools.py, src/features/archive/archive_cog.py, src/features/gating/intro_embed.py, src/features/health/health_check_cog.py, src/features/summarising/live_top_creations.py, src/features/summarising/live_update_editor.py, src/features/summarising/live_update_prompts.py, src/features/summarising/summariser.py, src/features/summarising/summariser_cog.py, structure.md, tests/test_live_admin_health.py, tests/test_live_runtime_wiring.py, tests/test_live_storage_wrappers.py, tests/test_live_top_creations.py, tests/test_live_update_editor_lifecycle.py, tests/test_live_update_editor_publishing.py, tests/test_live_update_prompts.py, tests/test_social_route_tools.py",
+    "Advisory audit finding: Sense check SC4 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC5 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC6 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC7 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC8 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC9 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC10 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC11 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC12 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC13 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC14 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC15 is missing an executor acknowledgment.",
+    "Advisory audit finding: Tasks left pending after execute (executor never started them): T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15"
+  ],
+  "task_updates": [
+    {
+      "task_id": "T3",
+      "status": "done",
+      "executor_notes": "Added `.migrations_staging/20260513230500_live_update_topic_editor_phase1.sql`. Verified U1 remained satisfied via `supabase migration list --linked` connecting to the linked Banodoco project and showing the prior backlog migration. The migration creates `topics`, `topic_sources`, `topic_aliases`, `topic_transitions`, `editorial_observations`, `topic_editor_runs`, and `topic_editor_checkpoints`; enables `pg_trgm`; keeps new run lifecycle in `topic_editor_runs` only; adds active-only lease uniqueness on `(environment, guild_id, live_channel_id)` where `status = 'running'`; adds topic/source/alias/idempotency/action indexes and uniqueness; and constrains `topic_transitions.action` to `post_simple`, `post_sectioned`, `watch`, `update_sources`, `discard`, `observation`, `override`, `rejected_post_simple`, `rejected_post_sectioned`, and `rejected_watch`. Structural verification scripts found no missing required tables/fragments and no forbidden `rejected_update_sources`, `rejected_discard`, or legacy `live_update_editor_runs` DDL. `git diff --check` passed. A local temp-database apply was attempted, but local PostgreSQL requires a password (`psql -w` failed with `fe_sendauth: no password supplied`), so SQL verification was limited to non-mutating structural checks. Full suite was run twice and failed in existing live-update tests unrelated to this ignored staged SQL file: `tests/test_live_top_creations.py::test_live_top_creations_dev_env_posts_and_persists_state`, `tests/test_live_update_editor_publishing.py::test_live_update_dev_env_posts_and_persists_with_environment_dev`, `tests/test_live_update_editor_publishing.py::test_live_update_dev_env_resolves_dev_live_update_channel_id`, and `tests/test_live_update_prompts.py::test_llm_prompt_exposes_agent_budget_and_media_reaction_guidance`. The affected full test files were also run; only the legacy prompt assertion failed in that narrower order.",
+      "files_changed": [
+        ".migrations_staging/20260513230500_live_update_topic_editor_phase1.sql",
+        ".megaplan/plans/execute-the-live-update-20260513-2217/execution_batch_4.json"
+      ],
+      "commands_run": [
+        "rg -n \"topic_editor|topics|topic_sources|topic_transitions|pg_trgm|rejected_post\" docs .migrations_staging src tests",
+        "sed -n '1,260p' docs/live-update-editor-redesign.md",
+        "sed -n '1,240p' docs/live-update-editor-sprint-plan.md",
+        "sed -n '1,220p' .migrations_staging/20260511110349_live_update_environment_split.sql",
+        "sed -n '1,220p' .migrations_staging/20260512185328_live_update_watchlist_lifecycle.sql",
+        "rg -n \"gen_random_uuid|uuid_generate|CREATE EXTENSION|live_update_editor_runs|live_update_checkpoints\" .migrations_staging ../supabase/migrations src/common/storage_handler.py src/common/db_handler.py",
+        "supabase migration list --linked | tail -20",
+        "pg_isready -h localhost -p 5432 || true",
+        "createdb/psql temp-db migration apply attempt; killed after local password prompts",
+        "psql -w -d postgres -c \"select 1\"",
+        "python structural required/forbidden SQL check",
+        "python topic_transitions.action vocabulary check",
+        "git diff --check -- .migrations_staging/20260513230500_live_update_topic_editor_phase1.sql",
+        "pytest --tb=no -q --no-header",
+        "pytest --tb=short -q --no-header tests/test_live_top_creations.py tests/test_live_update_editor_publishing.py tests/test_live_update_prompts.py",
+        "pytest --tb=no -q --no-header"
+      ],
+      "auto_attributed_files": null
+    }
+  ],
+  "sense_check_acknowledgments": [
+    {
+      "sense_check_id": "SC3",
+      "executor_note": "Yes. The staged migration creates all seven required topic-editor tables, enables `pg_trgm`, adds required operational indexes and uniqueness constraints including an active-only partial lease index on running `topic_editor_runs`, keeps new editor runs out of `live_update_editor_runs`, and constrains `topic_transitions.action` to the base actions plus only `rejected_post_simple`, `rejected_post_sectioned`, and `rejected_watch` for rejected calls."
+    }
+  ]
+}

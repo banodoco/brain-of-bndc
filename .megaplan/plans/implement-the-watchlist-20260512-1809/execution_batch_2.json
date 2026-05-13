@@ -1,0 +1,88 @@
+{
+  "output": "Batch 2 executed successfully. All three tasks (T2, T11, T15) completed. 30 tests pass.\n\nT2: Added insert_live_update_watchlist and update_live_update_watchlist to db_handler.py (sync wrappers) and storage_handler.py (async implementations). Idempotent insert by (environment, watch_key), sets expires_at=now+72h, next_revisit_at=now+6h, evidence jsonb, status=active, revisit_count=0. Update handles publish_now/extend/discard actions with extend bump capped at expires_at. Documented relationship with existing upsert_live_update_watchlist.\n\nT11: Added REASONING: prefix instruction with hard-requirement wording to OUTPUT SHAPE section. Refactored _parse_raw_candidates with 5-branch fallback chain (top_level \u2192 aliases \u2192 per_candidate \u2192 reasoning_prefix regex \u2192 prose_first_paragraph \u2192 none). Records recovery_path on generator instance, flows into last_agent_trace.\n\nT15: Added 14 bar-relaxation tests covering new thresholds, quiet-hour tier drop, last-call watchlist bar, and author_is_high_signal graceful degradation.",
+  "files_changed": [
+    "src/common/db_handler.py",
+    "src/common/storage_handler.py",
+    "src/features/summarising/live_update_prompts.py",
+    "tests/test_live_update_prompts.py",
+    ".megaplan/plans/implement-the-watchlist-20260512-1809/execution_batch_2.json"
+  ],
+  "commands_run": [
+    "pytest tests/test_live_update_prompts.py tests/test_live_update_editor_publishing.py tests/test_live_update_editor_lifecycle.py --tb=short -q --no-header",
+    "python -c import checks for all changed modules",
+    "python -c verify system prompt contains REASONING prefix instruction"
+  ],
+  "deviations": [
+    "T2 required adding storage_handler.py methods (insert_live_update_watchlist, update_live_update_watchlist) even though T4 is the official storage_handler task, because T2's db_handler methods delegate to them and T4 is in a later batch. Without the storage_handler counterparts, the code would not be functional.",
+    "Advisory quality: tests/test_live_update_prompts.py has similar functions generate_chat_completion and generate_chat_completion (100% similarity).",
+    "Advisory observation mismatch: executor claimed files not observed in git status/content hash delta: .megaplan/plans/implement-the-watchlist-20260512-1809/execution_batch_2.json",
+    "Advisory audit finding: Sense check SC3 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC4 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC5 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC6 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC12 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC13 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC14 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC16 is missing an executor acknowledgment.",
+    "Advisory audit finding: Tasks left pending after execute (executor never started them): T3, T4, T5, T6, T12, T13, T14, T16"
+  ],
+  "task_updates": [
+    {
+      "id": "T2",
+      "status": "done",
+      "executor_notes": "Added insert_live_update_watchlist and update_live_update_watchlist to db_handler.py (sync wrappers delegating to storage_handler). Added matching async implementations in storage_handler.py: insert is idempotent by environment/watch_key, sets expires_at=now+72h, next_revisit_at=now+6h, evidence jsonb, status=active, revisit_count=0. Update handles publish_now\u2192published, extend\u2192bumps next_revisit_at capped at expires_at + increments revisit_count, discard\u2192discarded+notes. Documented relationship with existing upsert_live_update_watchlist.",
+      "files_changed": [
+        "src/common/db_handler.py",
+        "src/common/storage_handler.py"
+      ],
+      "task_id": "T2",
+      "commands_run": []
+    },
+    {
+      "id": "T11",
+      "status": "done",
+      "executor_notes": "(a) Added REASONING: prefix instruction with hard-requirement wording to OUTPUT SHAPE. (b) Refactored _parse_raw_candidates with 5-branch fallback chain: top_level \u2192 alias:reasoning/editor_summary/editorial_reasoning \u2192 per_candidate concatenation \u2192 regex REASONING: prefix \u2192 prose_first_paragraph \u2192 none. (c) Records branch name in self.reasoning_recovery_path. (d) Added reasoning_recovery_path to last_agent_trace dict. Initialized in __init__.",
+      "files_changed": [
+        "src/features/summarising/live_update_prompts.py"
+      ],
+      "task_id": "T11",
+      "commands_run": []
+    },
+    {
+      "id": "T15",
+      "status": "done",
+      "executor_notes": "Added 14 bar-relaxation tests: new thresholds (showcase reactions>=3 OR reply>=2, top_creation reactions>=3, project_update unchanged), quiet-hour rule (<50 messages drops one tier), last-call watchlist bar (reactions>=2 OR reply>=1), author_is_high_signal graceful degradation to False. All 30 tests pass.",
+      "files_changed": [
+        "tests/test_live_update_prompts.py"
+      ],
+      "task_id": "T15",
+      "commands_run": []
+    }
+  ],
+  "sense_check_acknowledgments": [
+    {
+      "id": "SC2",
+      "task_id": "T2",
+      "verdict": "pass",
+      "notes": "insert is idempotent by (environment, watch_key). Sets all lifecycle fields. extend uses concrete 6h bump capped at expires_at.",
+      "sense_check_id": "SC2",
+      "executor_note": "insert is idempotent by (environment, watch_key). Sets all lifecycle fields. extend uses concrete 6h bump capped at expires_at."
+    },
+    {
+      "id": "SC11",
+      "task_id": "T11",
+      "verdict": "pass",
+      "notes": "All 5 branches + none implemented. reasoning_recovery_path recorded correctly. Prompt includes hard-requirement wording.",
+      "sense_check_id": "SC11",
+      "executor_note": "All 5 branches + none implemented. reasoning_recovery_path recorded correctly. Prompt includes hard-requirement wording."
+    },
+    {
+      "id": "SC15",
+      "task_id": "T15",
+      "verdict": "pass",
+      "notes": "Tests verify new thresholds, quiet-hour tier drop, last-call bar, and author_is_high_signal degradation.",
+      "sense_check_id": "SC15",
+      "executor_note": "Tests verify new thresholds, quiet-hour tier drop, last-call bar, and author_is_high_signal degradation."
+    }
+  ]
+}

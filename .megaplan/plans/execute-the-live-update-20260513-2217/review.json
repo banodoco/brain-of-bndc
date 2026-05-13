@@ -1,0 +1,403 @@
+{
+  "review_verdict": "needs_rework",
+  "checks": [],
+  "pre_check_flags": [
+    {
+      "id": "PRECHECK-DIFF_SIZE_SANITY",
+      "check": "diff_size_sanity",
+      "detail": "Diff size looks larger than expected: changed_lines=15259, expected\u224810, ratio=1525.90, files=42, hunks=94.",
+      "severity": "significant",
+      "evidence_file": "docs/debug-utility-validation.md"
+    }
+  ],
+  "verified_flag_ids": [
+    "FLAG-001",
+    "FLAG-002",
+    "FLAG-003",
+    "FLAG-004",
+    "FLAG-005",
+    "FLAG-006"
+  ],
+  "disputed_flag_ids": [
+    "verifiability-0",
+    "verifiability-1",
+    "verifiability-2",
+    "verifiability-3",
+    "verifiability-4",
+    "verifiability-5"
+  ],
+  "criteria": [
+    {
+      "name": "The Phase-1 schema migration creates required topic-editor tables with uniqueness and indexes",
+      "priority": "must",
+      "pass": "fail",
+      "evidence": "The migration creates the seven requested tables and many indexes, including `topic_editor_runs_active_lease_idx`, but it omits the required lease expiry column/mechanism from the settled active-only-lease decision. There is no `lease_expires_at` in `.migrations_staging/20260513230500_live_update_topic_editor_phase1.sql`."
+    },
+    {
+      "name": "Transition action vocabulary excludes unapproved rejected update/discard actions",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "`.migrations_staging/20260513230500_live_update_topic_editor_phase1.sql` constrains actions to base actions plus `rejected_post_simple`, `rejected_post_sectioned`, and `rejected_watch`; `rg` found no production `rejected_update_sources` or `rejected_discard` use."
+    },
+    {
+      "name": "`topic_editor_runs` is the single new-editor run lifecycle table",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "The new migration, storage wrappers, `TopicEditor`, admin status, and runbook all use `topic_editor_runs`; legacy `live_update_editor_runs` references remain in legacy/debug paths only."
+    },
+    {
+      "name": "Concurrent-run protection is scoped to active/running leases only",
+      "priority": "must",
+      "pass": "fail",
+      "evidence": "The partial unique index is scoped to `status = 'running'`, so completed/failed rows do not block later runs. However the settled decision also required stale running rows to expire before acquisition; the schema has no `lease_expires_at`, and `StorageHandler.acquire_topic_editor_run` only inserts a row without expiring stale running leases."
+    },
+    {
+      "name": "Backfill is idempotent and produces posted/watching parity counts against legacy tables",
+      "priority": "must",
+      "pass": "fail",
+      "evidence": "`scripts/backfill_live_update_topics.py` is implemented and tested for idempotent upserts and parity output, but execution evidence never runs the real backfill command against prod/dev. Commands only py-compile and pytest the script; there are no actual posted/watching parity counts proving topic counts are at least legacy counts."
+    },
+    {
+      "name": "Every `TopicEditor` storage operation has async storage helper and db_handler wrapper",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "`src/common/storage_handler.py` and `src/common/db_handler.py` both contain wrappers for topic runs, topics, sources, aliases, transitions, observations, checkpoints, and checkpoint mirrors; `tests/test_live_storage_wrappers.py` covers reachability."
+    },
+    {
+      "name": "`TopicEditor.run_once()` can execute with publishing disabled and avoid Discord publishing calls",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "`TopicEditor.run_once()` reads `topic_editor_checkpoints`, writes topic state through `db_handler`, and `_publish_topic` suppresses sends unless `TOPIC_EDITOR_PUBLISHING_ENABLED=true`; executor evidence includes a publishing-off replay with `published=0` and `failed_publish=0`."
+    },
+    {
+      "name": "Dispatcher failure audit mapping uses locked rejected/base action semantics",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "`_reject_create_tool` logs only locked `rejected_*` create/watch actions, while `_dispatch_update_sources` and `_dispatch_discard` log `update_sources`/`discard` with `payload.outcome='tool_error'`."
+    },
+    {
+      "name": "Idempotent replay of the same `(run_id, tool_call_id)` returns the prior result without duplicate transitions",
+      "priority": "must",
+      "pass": "fail",
+      "evidence": "`_is_idempotent_replay` only tracks tool call IDs in an in-memory set and returns a generic `idempotent_replay` outcome. It does not look up or return the prior stored tool result for `(run_id, tool_call_id)`, and cannot handle replays across a process/retry boundary."
+    },
+    {
+      "name": "All four dispatcher invariants are covered by tests",
+      "priority": "must",
+      "pass": "fail",
+      "evidence": "Tests cover structural rejection, collision rejection/override, same-response idempotency, and duplicate source dedupe. But the override logging path conflicts with the DB unique index on `(run_id, tool_call_id)`: accepted transition and override transition use the same `tool_call_id`, so real Supabase can reject the override row. The tests use fakes and do not catch the production unique-index conflict."
+    },
+    {
+      "name": "`render_topic()` is pure and tested for simple, sectioned, story-update, and partial publish failure/update behavior",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "`render_topic(topic)` is a top-level pure formatter in `topic_editor.py`; tests cover simple, sectioned, parent update rendering, suppressed publishing, sent publishing, failed publishing, and partial publish failure."
+    },
+    {
+      "name": "Scheduled/startup/manual runtime routes to topic editor by default with injection seam and rollback selector",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "`src/features/summarising/summariser_cog.py` imports `TopicEditor`, defaults to it when backend is unset or topic-oriented, preserves injected `live_update_editor`, and supports `LIVE_UPDATE_EDITOR_BACKEND=legacy`; `tests/test_live_runtime_wiring.py` covers this."
+    },
+    {
+      "name": "Legacy `live_update_editor.py` and `live_update_prompts.py` are not materially modified except allowed legacy compatibility changes",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "The implementation adds `topic_editor.py` and wiring. Existing legacy modules appear as untracked in this workspace, but executor notes and grep evidence show the new logic was not placed in legacy editor/prompts; test changes preserve legacy compatibility."
+    },
+    {
+      "name": "Admin chat and health checks report topic-editor primary state with legacy rollback labels",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "`src/features/admin_chat/tools.py`, `src/features/admin_chat/agent.py`, and `src/features/health/health_check_cog.py` reference `topic_editor_runs`, `topics`, and `topic_transitions` as primary; legacy tables are labeled rollback state. `tests/test_live_admin_health.py` covers the behavior."
+    },
+    {
+      "name": "Runbook no longer requires stale Phase-1 soak/gate or 20-window replay and uses `topic_editor_runs`",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "`docs/live-update-editor-phase-2-runbook.md` uses `topic_editor_runs` for new-editor verification and includes stale soak/gate/20-window items only in a `What Not To Use` style section, not as active procedure."
+    },
+    {
+      "name": "Existing legacy live-update tests pass or remain marked/updated as legacy compatibility without deleting rollback coverage",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "Executor evidence reports targeted legacy compatibility tests passed and final full suite passed with `341 passed, 19 skipped`; legacy test files remain present."
+    },
+    {
+      "name": "Publishing-off sanity replay over latest prod source-message window completes with trace",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "Executor evidence reports `TOPIC_EDITOR_PUBLISHING_ENABLED=false python scripts/run_live_update_dev.py --topic-editor-replay-prod --source-limit 20` completed run `13ba6483-a33a-4476-bca6-6d50799f5cfa` with 20 sources, 4 read tool calls, publishing OFF, and no published messages."
+    },
+    {
+      "name": "Publishing flip rollback mirrors topic checkpoint back to legacy checkpoint before legacy invocation",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "`docs/live-update-editor-phase-2-runbook.md` documents mirroring `topic_editor_checkpoints` into `live_update_checkpoints`; `src/common/storage_handler.py` and `src/common/db_handler.py` implement `mirror_topic_editor_checkpoint_to_live`."
+    },
+    {
+      "name": "New editor code is organized around deterministic helpers rather than burying behavior in prompt",
+      "priority": "should",
+      "pass": "pass",
+      "evidence": "Canonicalization, alias resolution, collision detection, transition payload shaping, dispatch, and rendering are deterministic functions/methods in `topic_editor.py`; the prompt remains short and structural."
+    },
+    {
+      "name": "Cost/latency metadata is recorded per topic-editor run",
+      "priority": "should",
+      "pass": "pass",
+      "evidence": "`TopicEditor._run_updates` stores token usage, optional cost estimate, model, latency, tool counts, and publish metadata into `topic_editor_runs` updates and trace output."
+    },
+    {
+      "name": "Operator-only runbook values are filled before prod cutover",
+      "priority": "info",
+      "pass": "waived",
+      "evidence": "This is an operator-owned cutover item. The implementation documents the variables and current safe defaults; production trace-channel swap and publishing flip remain after_execute/user actions."
+    }
+  ],
+  "issues": [
+    "T3/T6: Topic-editor run leases do not implement stale expiry; `lease_expires_at` is missing and acquire only inserts a running row.",
+    "T4/T15: The real legacy-to-topic backfill was not executed, so required posted/watching parity counts against legacy tables were never produced.",
+    "T8/T14: Idempotent replay only uses an in-memory seen set and returns a generic replay marker, not the prior result for `(run_id, tool_call_id)`.",
+    "T8: Override transition logging uses the same `tool_call_id` as the accepted transition while the DB has a unique `(run_id, tool_call_id)` index, so real override audit rows can be rejected."
+  ],
+  "rework_items": [
+    {
+      "task_id": "T3",
+      "issue": "The topic-editor lease schema omits stale lease expiry support.",
+      "expected": "`topic_editor_runs` includes a `lease_expires_at` column or equivalent lease expiry mechanism, and active leases can be considered stale based on that timestamp.",
+      "actual": "`.migrations_staging/20260513230500_live_update_topic_editor_phase1.sql` has no `lease_expires_at` column; only a partial unique index on rows where `status = 'running'`.",
+      "evidence_file": ".migrations_staging/20260513230500_live_update_topic_editor_phase1.sql",
+      "flag_id": null,
+      "source": "settled_decision_active_only_lease"
+    },
+    {
+      "task_id": "T6",
+      "issue": "Lease acquisition does not expire stale running rows before creating a new run.",
+      "expected": "Before inserting a new running lease, storage/db code marks stale running rows failed/skipped when `lease_expires_at < now()` so a crashed run cannot permanently block the tuple.",
+      "actual": "`StorageHandler.acquire_topic_editor_run` only inserts into `topic_editor_runs`; no query updates stale running rows, and `rg lease_expires|stale` finds no topic-editor lease expiry implementation.",
+      "evidence_file": "src/common/storage_handler.py",
+      "flag_id": null,
+      "source": "settled_decision_active_only_lease"
+    },
+    {
+      "task_id": "T4",
+      "issue": "The required production/dev backfill parity was not actually run.",
+      "expected": "Run `scripts/backfill_live_update_topics.py` against the target environment and record posted/watching legacy counts versus topic rows, with deltas explained.",
+      "actual": "Execution only compiled and unit-tested `scripts/backfill_live_update_topics.py`; command evidence contains no real backfill invocation or parity output against Supabase data.",
+      "evidence_file": ".megaplan/plans/execute-the-live-update-20260513-2217/execution_batch_13.json",
+      "flag_id": null,
+      "source": "success_criterion_backfill_parity"
+    },
+    {
+      "task_id": "T8",
+      "issue": "Idempotent replay does not return the prior result for a `(run_id, tool_call_id)`.",
+      "expected": "Repeated tool calls for the same `(run_id, tool_call_id)` return the originally recorded tool result and create no duplicate side effects, including across retried execution where prior transitions already exist.",
+      "actual": "`_is_idempotent_replay` only checks an in-memory `seen_tool_call_ids` set and `_dispatch_tool_call` returns `{'outcome': 'idempotent_replay'}` instead of the prior result; no prior transition lookup exists.",
+      "evidence_file": "src/features/summarising/topic_editor.py",
+      "flag_id": null,
+      "source": "success_criterion_idempotency"
+    },
+    {
+      "task_id": "T8",
+      "issue": "Collision override audit rows can violate the DB idempotency unique index.",
+      "expected": "Accepted create/watch transition and any `override` audit rows must all be persistable while preserving idempotency, e.g. by using distinct audit identifiers or a uniqueness model that allows multiple rows for one tool call when one is an override audit.",
+      "actual": "The migration creates `topic_transitions_tool_call_idx` unique on `(run_id, tool_call_id)`, while `_dispatch_create_topic_tool` stores the accepted transition and then `build_override_transitions(..., tool_call_id=call['id'])`; the override row has the same `run_id`/`tool_call_id` and can be rejected by Supabase.",
+      "evidence_file": "src/features/summarising/topic_editor.py",
+      "flag_id": null,
+      "source": "success_criterion_collision_override"
+    }
+  ],
+  "summary": "Needs rework. Most of the topic-editor implementation is present and the major critique flags were addressed, but several hard gates remain incomplete: stale lease expiry is missing, real backfill parity was not run, idempotent replay is only in-memory and does not return the prior result, and override audit rows conflict with the transition idempotency unique index.",
+  "task_verdicts": [
+    {
+      "task_id": "T16",
+      "reviewer_verdict": "Pass. Before-execute Supabase/Discord/env checks were mechanically verified in command evidence.",
+      "evidence_files": [
+        ".megaplan/plans/execute-the-live-update-20260513-2217/execution_batch_1.json"
+      ]
+    },
+    {
+      "task_id": "T1",
+      "reviewer_verdict": "Pass. Audit identified the relevant runtime, storage, docs, admin/health, and test surfaces.",
+      "evidence_files": [
+        ".megaplan/plans/execute-the-live-update-20260513-2217/execution_batch_2.json"
+      ]
+    },
+    {
+      "task_id": "T2",
+      "reviewer_verdict": "Pass. Backlog migration application was verified by Supabase migration history and REST column check evidence.",
+      "evidence_files": [
+        ".megaplan/plans/execute-the-live-update-20260513-2217/execution_batch_3.json"
+      ]
+    },
+    {
+      "task_id": "T3",
+      "reviewer_verdict": "Needs rework. Required topic tables and action vocabulary are present, but lease expiry columns/mechanism are missing.",
+      "evidence_files": [
+        ".migrations_staging/20260513230500_live_update_topic_editor_phase1.sql"
+      ]
+    },
+    {
+      "task_id": "T4",
+      "reviewer_verdict": "Needs rework. Backfill script exists and is unit tested, but the actual backfill/parity check was not executed.",
+      "evidence_files": [
+        "scripts/backfill_live_update_topics.py",
+        ".megaplan/plans/execute-the-live-update-20260513-2217/execution_batch_13.json"
+      ]
+    },
+    {
+      "task_id": "T5",
+      "reviewer_verdict": "Pass. Deterministic canonicalization, alias, collision, and transition helpers are present and tested.",
+      "evidence_files": [
+        "src/features/summarising/topic_editor.py",
+        "tests/test_topic_editor_core.py"
+      ]
+    },
+    {
+      "task_id": "T6",
+      "reviewer_verdict": "Needs rework. Storage/db wrappers exist, but lease acquisition does not expire stale running rows.",
+      "evidence_files": [
+        "src/common/storage_handler.py",
+        "src/common/db_handler.py"
+      ]
+    },
+    {
+      "task_id": "T7",
+      "reviewer_verdict": "Pass. `TopicEditor.run_once` uses injected db handler, tool-use surface, checkpoints, runs, and metadata.",
+      "evidence_files": [
+        "src/features/summarising/topic_editor.py",
+        "tests/test_topic_editor_runtime.py"
+      ]
+    },
+    {
+      "task_id": "T8",
+      "reviewer_verdict": "Needs rework. Base/rejected action mapping is correct, but idempotency and override audit persistence have production gaps.",
+      "evidence_files": [
+        "src/features/summarising/topic_editor.py",
+        ".migrations_staging/20260513230500_live_update_topic_editor_phase1.sql"
+      ]
+    },
+    {
+      "task_id": "T9",
+      "reviewer_verdict": "Pass. Pure renderer and gated publishing behavior are implemented and tested.",
+      "evidence_files": [
+        "src/features/summarising/topic_editor.py",
+        "tests/test_topic_editor_runtime.py"
+      ]
+    },
+    {
+      "task_id": "T10",
+      "reviewer_verdict": "Pass. Trace output and one-shot replay entrypoint are implemented; replay evidence exists in T15.",
+      "evidence_files": [
+        "src/features/summarising/topic_editor.py",
+        "scripts/run_live_update_dev.py"
+      ]
+    },
+    {
+      "task_id": "T11",
+      "reviewer_verdict": "Pass. Runtime selector defaults to topic editor in code and preserves injection/legacy rollback selector.",
+      "evidence_files": [
+        "src/features/summarising/summariser_cog.py",
+        "tests/test_live_runtime_wiring.py"
+      ]
+    },
+    {
+      "task_id": "T12",
+      "reviewer_verdict": "Pass. Admin/health surfaces now center topic-editor state and label legacy rollback state.",
+      "evidence_files": [
+        "src/features/admin_chat/tools.py",
+        "src/features/admin_chat/agent.py",
+        "src/features/health/health_check_cog.py",
+        "tests/test_live_admin_health.py"
+      ]
+    },
+    {
+      "task_id": "T13",
+      "reviewer_verdict": "Pass. Runbook is reconciled to sprint gates and documents rollback checkpoint mirroring.",
+      "evidence_files": [
+        "docs/live-update-editor-phase-2-runbook.md"
+      ]
+    },
+    {
+      "task_id": "T14",
+      "reviewer_verdict": "Needs rework. Added useful tests, but tests miss the real DB override unique-index conflict and do not validate prior-result replay semantics.",
+      "evidence_files": [
+        "tests/test_topic_editor_runtime.py",
+        ".migrations_staging/20260513230500_live_update_topic_editor_phase1.sql"
+      ]
+    },
+    {
+      "task_id": "T15",
+      "reviewer_verdict": "Needs rework. Validation is broad and the final suite reportedly passes, but it did not include real backfill parity and did not catch the lease/idempotency/override persistence gaps.",
+      "evidence_files": [
+        ".megaplan/plans/execute-the-live-update-20260513-2217/execution_batch_13.json"
+      ]
+    }
+  ],
+  "sense_check_verdicts": [
+    {
+      "sense_check_id": "SC1",
+      "verdict": "Confirmed. Audit scope was concrete and relevant."
+    },
+    {
+      "sense_check_id": "SC2",
+      "verdict": "Confirmed. Backlog migration readiness evidence is adequate."
+    },
+    {
+      "sense_check_id": "SC3",
+      "verdict": "Partially confirmed. Required tables and action vocabulary exist, but the lease portion is incomplete because expiry is missing."
+    },
+    {
+      "sense_check_id": "SC4",
+      "verdict": "Partially confirmed. Script idempotency and parity output are tested, but actual live parity was not produced."
+    },
+    {
+      "sense_check_id": "SC5",
+      "verdict": "Confirmed. Deterministic helpers are present and testable."
+    },
+    {
+      "sense_check_id": "SC6",
+      "verdict": "Partially confirmed. Wrappers are present, but lease helper semantics are incomplete."
+    },
+    {
+      "sense_check_id": "SC7",
+      "verdict": "Confirmed. `run_once` uses injected db handler and new run/checkpoint tables."
+    },
+    {
+      "sense_check_id": "SC8",
+      "verdict": "Partially confirmed. Invalid update/discard action mapping is correct; replay semantics are incomplete."
+    },
+    {
+      "sense_check_id": "SC9",
+      "verdict": "Confirmed. Renderer is pure and publishing is gated."
+    },
+    {
+      "sense_check_id": "SC10",
+      "verdict": "Confirmed. Trace/replay path exposes the requested fields without 20-window soak."
+    },
+    {
+      "sense_check_id": "SC11",
+      "verdict": "Confirmed. Runtime selector and injection seam are implemented."
+    },
+    {
+      "sense_check_id": "SC12",
+      "verdict": "Confirmed. Admin/health state is topic-editor primary with legacy rollback labeling."
+    },
+    {
+      "sense_check_id": "SC13",
+      "verdict": "Confirmed. Runbook removes stale active gates and documents rollback checkpoint mirroring."
+    },
+    {
+      "sense_check_id": "SC14",
+      "verdict": "Partially confirmed. Coverage is broad, but it misses production DB uniqueness behavior for override audit rows and prior-result replay semantics."
+    },
+    {
+      "sense_check_id": "SC15",
+      "verdict": "Partially confirmed. Many validations passed, but the required real backfill parity and the lease/idempotency edge cases remain unverified/incomplete."
+    },
+    {
+      "sense_check_id": "SC16",
+      "verdict": "Confirmed. Before-execute user actions were mechanically verified."
+    }
+  ]
+}

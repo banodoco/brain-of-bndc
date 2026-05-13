@@ -1,0 +1,45 @@
+{
+  "output": "T8 complete. Added two new tests: (a) dedupe test in test_live_top_creations.py \u2014 verifies exactly 1 Discord send + 1 DB row on first pass, zero on second (DB dedupe blocks re-post); (b) cross-environment isolation test in test_live_update_editor_publishing.py \u2014 seeds dev rows, runs prod pass, asserts dev rows invisible to prod feed_items/watchlist/memory. EnvIsolationFakeDB separates all data by environment dict. All 34 live-update tests pass (28 core + 6 prompts).",
+  "files_changed": [
+    "tests/test_live_top_creations.py",
+    "tests/test_live_update_editor_publishing.py",
+    ".megaplan/plans/live-update-environment-split/execution_batch_8.json"
+  ],
+  "commands_run": [
+    "pytest tests/test_live_top_creations.py tests/test_live_update_editor_publishing.py tests/test_live_update_editor_lifecycle.py tests/test_live_storage_wrappers.py tests/test_live_runtime_wiring.py -x -q: 28 passed",
+    "pytest tests/test_live_top_creations.py ... tests/test_live_update_prompts.py -x -q: 34 passed"
+  ],
+  "deviations": [
+    "test_live_admin_health.py and test_social_route_tools.py have pre-existing import errors (missing base58 and other deps) \u2014 unrelated to T8",
+    "Advisory quality: tests/test_live_update_editor_publishing.py grew by 218 lines (threshold 200).",
+    "Advisory quality: tests/test_live_update_editor_publishing.py has similar functions get_live_update_editorial_memory and get_live_update_watchlist (100% similarity).",
+    "Advisory quality: tests/test_live_update_editor_publishing.py has similar functions get_archived_messages_after_checkpoint and get_archived_messages_after_checkpoint (100% similarity).",
+    "Advisory observation mismatch: executor claimed files not observed in git status/content hash delta: .megaplan/plans/live-update-environment-split/execution_batch_8.json",
+    "Advisory audit finding: Executor claimed changed files not present in git status: .migrations_staging/20260511110349_live_update_environment_split.sql",
+    "Advisory audit finding: Sense check SC12 is missing an executor acknowledgment.",
+    "Advisory audit finding: Tasks left pending after execute (executor never started them): T9"
+  ],
+  "task_updates": [
+    {
+      "id": "T8",
+      "status": "done",
+      "executor_notes": "Added two new tests. (a) test_live_top_creations_dedupe_exactly_one_send_and_one_db_row: runs top-creations twice over same message (reactions=7). Pass 1 asserts exactly 1 Discord send + 1 DB row. Pass 2 carries forward _posted_by_dup_key dedupe store, asserts 0 sends + 0 new DB rows \u2014 second pass short-circuits via get_live_top_creation_post_by_duplicate_key. (b) test_live_update_cross_environment_isolation_dev_rows_not_visible_to_prod: uses EnvIsolationFakeDB with separate prod/dev dicts. Seeds dev feed_items, memory, watchlist. Runs prod editor pass. Asserts prod reads see only prod data; dev data intact. All 34 live tests pass.",
+      "files_changed": [
+        "tests/test_live_top_creations.py",
+        "tests/test_live_update_editor_publishing.py"
+      ],
+      "task_id": "T8",
+      "commands_run": []
+    }
+  ],
+  "sense_check_acknowledgments": [
+    {
+      "id": "SC11",
+      "task_id": "T8",
+      "question": "Does the dedupe test verify exactly ONE Discord send AND exactly ONE DB row? Both assertions must be present (not just one or the other).",
+      "verdict": "PASS. Pass 1: len(channel.sent) == 1 AND len(db.posts) == 1. Pass 2: len(channel2.sent) == 0 AND len(db2.posts) == 0. Both assertions present for both passes.",
+      "sense_check_id": "SC11",
+      "executor_note": "(not provided)"
+    }
+  ]
+}

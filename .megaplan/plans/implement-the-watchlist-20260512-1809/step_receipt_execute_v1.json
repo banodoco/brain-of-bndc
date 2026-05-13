@@ -1,0 +1,288 @@
+{
+  "receipt_id": "8d744d8b-b077-426a-95b5-8ceb997f8d6f",
+  "plan_id": "implement-the-watchlist-20260512-1809",
+  "phase": "execute",
+  "iteration": 1,
+  "attempt": 1,
+  "timestamp_utc": "2026-05-12T18:10:28.803164+00:00",
+  "profile_name": "thoughtful",
+  "agent": "hermes",
+  "agent_mode": "persistent",
+  "model_configured": "hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+  "model_actual": null,
+  "session_id": "4e30c1a7-b62a-47c7-b9ab-25d4b64411a5",
+  "megaplan_version": "0.8.1",
+  "schema_version": 1,
+  "prompt_hash_raw": null,
+  "prompt_hash_canonical": null,
+  "canonicalization_version": 1,
+  "upstream_artifact_hashes": [
+    "sha256:74e1fdce1ce23a13572810d1cd825c94c48653127679f97fec1277a1fd8ea95c"
+  ],
+  "cost_usd": 10.93633848,
+  "duration_ms": 2983706,
+  "prompt_tokens": 6194040,
+  "completion_tokens": 45606,
+  "verdict": "blocked",
+  "metrics": {
+    "files_claimed": 14,
+    "files_in_diff": 33,
+    "scope_drift_files_added": 27,
+    "scope_drift_files_missing": 8,
+    "loc_added": 11048,
+    "loc_removed": 0,
+    "loc_added_outside_claimed": 4054,
+    "commands_run_count": 0,
+    "advisory_issues_count": 0,
+    "blocking_issues_count": 0,
+    "per_task_files_claimed_count": 13,
+    "batches": [
+      {
+        "output": "Executed tasks T3, T4, T14. All 39 tests pass across all relevant test files (0 failures). Key changes: (1) T3: Rewrote db_handler.get_live_update_watchlist with UPDATE sweep before SELECT, Python-computed revisit_state (fresh/revisit_due/last_call), 20/state cap, 50-row total active cap across ALL states; (2) T4: Removed status filter from storage_handler.get_live_update_watchlist, bumped default limit to 200, upsert left intact; (3) T14: Added 6 parser fallback chain tests covering all 5 recovery branches + none case, all asserting correct reasoning_recovery_path values.",
+        "files_changed": [
+          "src/common/db_handler.py",
+          "src/common/storage_handler.py",
+          "tests/test_live_update_prompts.py"
+        ],
+        "commands_run": [
+          "python -m pytest tests/test_live_update_prompts.py -v --tb=short",
+          "python -m pytest tests/test_live_update_editor_lifecycle.py tests/test_live_update_editor_publishing.py tests/test_live_storage_wrappers.py tests/test_live_update_prompts.py -v --tb=short"
+        ],
+        "deviations": [
+          "Advisory quality: tests/test_live_update_prompts.py has similar functions generate_chat_completion and generate_chat_completion (100% similarity).",
+          "Advisory audit finding: Sense check SC5 is missing an executor acknowledgment.",
+          "Advisory audit finding: Sense check SC6 is missing an executor acknowledgment.",
+          "Advisory audit finding: Sense check SC12 is missing an executor acknowledgment.",
+          "Advisory audit finding: Sense check SC13 is missing an executor acknowledgment.",
+          "Advisory audit finding: Sense check SC16 is missing an executor acknowledgment.",
+          "Advisory audit finding: Tasks left pending after execute (executor never started them): T5, T6, T12, T13, T16"
+        ],
+        "task_updates": [
+          {
+            "id": "T3",
+            "description": "Rewrote `get_live_update_watchlist` in `db_handler.py` to: (a) run an idempotent UPDATE sweep BEFORE the SELECT to auto-archive rows where `expires_at < now()` (set `status='archived'`, append `notes='ttl_expired'`); (b) SELECT active rows (status IN ('active','published')); (c) compute `revisit_state` in Python: `fresh` if `now() < next_revisit_at`, `revisit_due` if past `next_revisit_at` but before `created_at+24h`, `last_call` if past `created_at+24h`; (d) group results into `{fresh: [...], revisit_due: [...], last_call: [...]}` capped at 20 per state, most-recent-first; (e) enforce 50-row active cap across ALL states combined \u2014 auto-archive oldest rows beyond cap (regardless of state). Return the grouped dict.",
+            "status": "done",
+            "executor_notes": "UPDATE sweep via execute_query (parameterized SQL with guild_id/environment scoping). Storage handler get_live_update_watchlist now returns all rows (status filter removed per T4). Timeline computation handles missing timestamps gracefully with fallback estimation from created_at. Cap enforcement auto-archives oldest rows regardless of revisit_state. Returns grouped dict {fresh, revisit_due, last_call}. Verified: caller pass-through compatible (guild_id positional, environment keyword).",
+            "reviewer_verdict": "",
+            "kind": "code",
+            "files_changed": [
+              "src/common/db_handler.py"
+            ],
+            "task_id": "T3",
+            "commands_run": []
+          },
+          {
+            "id": "T4",
+            "description": "Update `src/common/storage_handler.py`: add `insert_live_update_watchlist` and `update_live_update_watchlist` async methods that write the new columns (`expires_at`, `next_revisit_at`, `revisit_count`, `origin_reason`, `evidence`). Update `get_live_update_watchlist` to SELECT `*` without the old `status='active'` filter (the caller now handles filtering). Ensure the existing `upsert_live_update_watchlist` at line 1733 is left intact for the `last_matched_*` update path.",
+            "status": "done",
+            "executor_notes": "Removed `status` parameter and `.eq('status', status)` filter from storage_handler.get_live_update_watchlist. Bumped default limit from 100 to 200 since caller filters in Python. insert_live_update_watchlist and update_live_update_watchlist already exist from T2 execution (lines 1789, 1859). upsert_live_update_watchlist at line 1733 verified untouched \u2014 payload still uses original columns.",
+            "reviewer_verdict": "",
+            "kind": "code",
+            "files_changed": [
+              "src/common/storage_handler.py"
+            ],
+            "task_id": "T4",
+            "commands_run": []
+          },
+          {
+            "id": "T14",
+            "description": "Write parser fallback chain tests in `tests/test_live_update_prompts.py` (or extend existing): (a) Five cases covering each branch \u2014 top-level `editor_reasoning`, alias key (e.g. `reasoning`), per-candidate reasoning concatenation, `REASONING:` prose prefix, first-paragraph last resort. Assert non-empty reasoning string and correct `reasoning_recovery_path` value; (b) Sixth case: totally empty input \u2192 `reasoning_recovery_path='none'`, `editor_reasoning=''`, no crash.",
+            "status": "done",
+            "executor_notes": "Added 6 tests: test_parser_fallback_top_level_editor_reasoning, test_parser_fallback_alias_reasoning, test_parser_fallback_per_candidate_concatenation, test_parser_fallback_reasoning_prefix_regex, test_parser_fallback_prose_first_paragraph, test_parser_fallback_empty_input_none. All 25 tests pass (6 new + 19 existing). Tests use real newlines for regex and prose branches. Each test asserts non-empty reasoning (branches 1-5) or empty (branch 6) and exact recovery_path value.",
+            "reviewer_verdict": "",
+            "kind": "test",
+            "files_changed": [
+              "tests/test_live_update_prompts.py"
+            ],
+            "task_id": "T14",
+            "commands_run": []
+          }
+        ],
+        "sense_check_acknowledgments": [
+          {
+            "id": "SC3",
+            "task_id": "T3",
+            "question": "Does `get_live_update_watchlist` sweep BEFORE select, compute 3 states correctly, cap 20/state, and enforce 50-row cap across ALL states (not just fresh)?",
+            "verdict": "PASS. The function: (a) runs execute_query with an UPDATE BEFORE the SELECT \u2014 sets status='archived', notes appends 'ttl_expired' for rows where expires_at < now() and status NOT IN ('archived','discarded'); (b) SELECTs via storage_handler (no status filter); (c) computes fresh/revisit_due/last_call in Python with correct timeline logic \u2014 fresh if now < next_revisit_at, revisit_due if past next_revisit_at but before created_at+24h, last_call if past created_at+24h, with fallback estimation from created_at when next_revisit_at is missing; (d) groups into {fresh, revisit_due, last_call} each independently capped at 20 items, most-recent-first by updated_at descending; (e) enforces 50-row active cap across ALL states \u2014 auto-archives rows from active_rows[50:] regardless of their revisit_state, sets status='archived' and notes appends 'active_cap_exceeded'.",
+            "sense_check_id": "SC3",
+            "executor_note": "(not provided)"
+          },
+          {
+            "id": "SC4",
+            "task_id": "T4",
+            "question": "Does storage_handler.py expose matching insert/update methods and is the existing `upsert_live_update_watchlist` left intact?",
+            "verdict": "PASS. storage_handler.py has insert_live_update_watchlist (line 1789) and update_live_update_watchlist (line 1859) from T2 execution. get_live_update_watchlist signature changed from (self, guild_id, status='active', limit=100, environment) to (self, guild_id, limit=200, environment) \u2014 removed status filter per spec, bumped default limit. upsert_live_update_watchlist at line 1733 verified intact via read_file \u2014 payload still uses original columns (watch_key, subject_type, criteria, status, priority, notes, last_matched_*).",
+            "sense_check_id": "SC4",
+            "executor_note": "(not provided)"
+          },
+          {
+            "id": "SC14",
+            "task_id": "T14",
+            "question": "Do parser tests cover all 5 branches + none case, asserting non-empty reasoning and correct recovery_path values?",
+            "verdict": "PASS. Six tests added covering all branches: (1) top_level \u2014 asserts reasoning string and recovery_path='top_level'; (2) alias:reasoning \u2014 asserts recovery_path='alias:reasoning'; (3) per_candidate \u2014 asserts concatenated reasoning with ' | ' separator and recovery_path='per_candidate'; (4) reasoning_prefix \u2014 regex matches REASONING: prefix line before blank line + JSON, recovery_path='reasoning_prefix'; (5) prose_first_paragraph \u2014 non-empty reasoning assertion + recovery_path='prose_first_paragraph'; (6) none \u2014 empty input \u2192 recovery_path='none', editor_reasoning='', no crash. All 25 tests pass (39 including cross-module tests).",
+            "sense_check_id": "SC14",
+            "executor_note": "(not provided)"
+          }
+        ]
+      },
+      {
+        "output": "T5 executed successfully. All deliverables completed: (a) watchlist_add and watchlist_update tool definitions added to available_tools array with correct schemas; (b) watchlist rendering bug fixed \u2014 replaced broken watch_type/description with schema-correct subject_type/notes, extracted into new _render_watchlist static method producing state-grouped structure {_explanation, fresh, revisit_due, last_call} with fields {watch_key, title, origin_reason, age_hours, source_message_ids, subject_type, channel_id, notes}; (c) build_user_prompt signature updated from List[Dict] to Dict to match T3 grouped dict return type. All 36 tests pass (25 prompt + 11 lifecycle/publishing). Throwaway verification script confirmed no watch_type/description in output, state-grouped structure correct, age_hours computed, evidence fallback works, non-dict inputs handled gracefully.",
+        "files_changed": [
+          "src/features/summarising/live_update_prompts.py"
+        ],
+        "commands_run": [
+          "pytest tests/test_live_update_prompts.py -x -v --tb=short (25 passed)",
+          "pytest tests/test_live_update_editor_lifecycle.py tests/test_live_update_editor_publishing.py -x -v --tb=short (11 passed)",
+          "pytest tests/test_live_update_prompts.py tests/test_live_update_editor_lifecycle.py tests/test_live_update_editor_publishing.py -x -v --tb=short (36 passed)",
+          "python _verify_t5_watchlist_rendering.py (all checks passed, then deleted)"
+        ],
+        "deviations": [
+          "Advisory quality: code changes lacked test updates: src/features/summarising/live_update_prompts.py.",
+          "Advisory audit finding: Sense check SC6 is missing an executor acknowledgment.",
+          "Advisory audit finding: Sense check SC12 is missing an executor acknowledgment.",
+          "Advisory audit finding: Sense check SC13 is missing an executor acknowledgment.",
+          "Advisory audit finding: Sense check SC16 is missing an executor acknowledgment.",
+          "Advisory audit finding: Tasks left pending after execute (executor never started them): T6, T12, T13, T16"
+        ],
+        "task_updates": [
+          {
+            "id": "T5",
+            "status": "done",
+            "executor_notes": "(a) Added watchlist_add and watchlist_update tool definitions to available_tools array at lines 559-579 with correct schemas matching the brief (watch_key, title, reason, source_message_ids, channel_id, subject_type for add; watch_key, action, notes for update). (b) Fixed watchlist rendering block: replaced broken watch_type/description fields with schema-correct subject_type/notes. Extracted rendering into new _render_watchlist static method that handles state-grouped structure {_explanation, fresh, revisit_due, last_call} with fields {watch_key, title, origin_reason, age_hours, source_message_ids, subject_type, channel_id, notes}. Computes age_hours inline from created_at, falls back to evidence.source_message_ids when source_message_ids is absent, handles non-dict/None gracefully. (c) Updated build_user_prompt signature from List[Dict[str, Any]] to Dict[str, Any] to match T3's grouped dict return type. Throwaway verification script confirmed: no watch_type/description in output, state-grouped structure correct, age_hours computed, evidence fallback works, empty/non-dict inputs handled. All 36 tests across 3 test files pass.",
+            "reviewer_verdict": "",
+            "kind": "code",
+            "files_changed": [
+              "src/features/summarising/live_update_prompts.py"
+            ],
+            "task_id": "T5",
+            "commands_run": []
+          }
+        ],
+        "sense_check_acknowledgments": [
+          {
+            "id": "SC5",
+            "task_id": "T5",
+            "question": "Do watchlist_add/watchlist_update appear in available_tools with correct schemas, and does the watchlist rendering use subject_type/notes with state-grouped structure?",
+            "verdict": "CONFIRMED: watchlist_add tool at line 560 with args {watch_key, title, reason, source_message_ids, channel_id, subject_type}. watchlist_update tool at line 572 with args {watch_key, action: 'publish_now'|'extend'|'discard', notes}. Watchlist rendering at line 462 calls _render_watchlist static method (line 950) which produces state-grouped dict {_explanation, fresh, revisit_due, last_call} with schema-correct fields {watch_key, title, origin_reason, age_hours, source_message_ids, subject_type, channel_id, notes}. No watch_type or description fields anywhere in output.",
+            "executor_note": "Verified by: (1) code review of final state; (2) all 36 tests pass; (3) throwaway verification script confirmed zero watch_type/description fields, correct state-grouped structure, age_hours computation, and evidence fallback.",
+            "sense_check_id": "SC5"
+          }
+        ]
+      },
+      {
+        "output": "Successfully executed T6. Wired watchlist tool dispatch in _run_editor_tool: watchlist_add calls self.db.insert_live_update_watchlist(...) and watchlist_update calls self.db.update_live_update_watchlist(...). Both return structured success/error payloads. Watchlist actions recorded into self.candidate_generator.watchlist_actions list alongside tool_trace in last_agent_trace. environment and guild_id threaded from editor context. All 36 existing tests pass.",
+        "files_changed": [
+          "src/features/summarising/live_update_editor.py",
+          "src/features/summarising/live_update_prompts.py",
+          ".megaplan/plans/implement-the-watchlist-20260512-1809/execution.json",
+          ".megaplan/plans/implement-the-watchlist-20260512-1809/execution_audit.json",
+          ".megaplan/plans/implement-the-watchlist-20260512-1809/execution_batch_2.json",
+          ".megaplan/plans/implement-the-watchlist-20260512-1809/execution_batch_3.json",
+          ".megaplan/plans/implement-the-watchlist-20260512-1809/execution_batch_4.json",
+          ".megaplan/plans/implement-the-watchlist-20260512-1809/execution_batch_5.json",
+          ".megaplan/plans/implement-the-watchlist-20260512-1809/step_receipt_execute_v1.json"
+        ],
+        "commands_run": [
+          "python -m pytest tests/test_live_update_prompts.py tests/test_live_update_editor_lifecycle.py tests/test_live_update_editor_publishing.py -x -v --tb=short"
+        ],
+        "deviations": [
+          "Advisory quality: code changes lacked test updates: src/features/summarising/live_update_editor.py, src/features/summarising/live_update_prompts.py.",
+          "Auto-attributed 7 unclaimed file(s) to task T6 (worker reported empty files_changed): .megaplan/plans/implement-the-watchlist-20260512-1809/execution.json, .megaplan/plans/implement-the-watchlist-20260512-1809/execution_audit.json, .megaplan/plans/implement-the-watchlist-20260512-1809/execution_batch_2.json, .megaplan/plans/implement-the-watchlist-20260512-1809/execution_batch_3.json, .megaplan/plans/implement-the-watchlist-20260512-1809/execution_batch_4.json, .megaplan/plans/implement-the-watchlist-20260512-1809/execution_batch_5.json, .megaplan/plans/implement-the-watchlist-20260512-1809/step_receipt_execute_v1.json",
+          "Advisory observation mismatch: git status/content hash delta found unclaimed files: .megaplan/briefs/live-update-environment-split.md, .megaplan/plans/implement-the-watchlist-20260512-1809/.plan.lock, .megaplan/plans/implement-the-watchlist-20260512-1809/critique_output.json, .megaplan/plans/implement-the-watchlist-20260512-1809/critique_v1.json, .megaplan/plans/implement-the-watchlist-20260512-1809/execution_batch_1.json, .megaplan/plans/implement-the-watchlist-20260512-1809/faults.json, .megaplan/plans/implement-the-watchlist-20260512-1809/final.md, .megaplan/plans/implement-the-watchlist-20260512-1809/finalize.json, .megaplan/plans/implement-the-watchlist-20260512-1809/finalize_output.json, .megaplan/plans/implement-the-watchlist-20260512-1809/finalize_snapshot.json, .megaplan/plans/implement-the-watchlist-20260512-1809/finalize_v1_raw.txt, .megaplan/plans/implement-the-watchlist-20260512-1809/gate.json, .megaplan/plans/implement-the-watchlist-20260512-1809/gate_signals_v1.json, .megaplan/plans/implement-the-watchlist-20260512-1809/phase_result.json, .megaplan/plans/implement-the-watchlist-20260512-1809/plan_v1.md, .megaplan/plans/implement-the-watchlist-20260512-1809/plan_v1.meta.json, .megaplan/plans/implement-the-watchlist-20260512-1809/state.json, .megaplan/plans/implement-the-watchlist-20260512-1809/step_receipt_critique_v1.json, .megaplan/plans/implement-the-watchlist-20260512-1809/step_receipt_finalize_v1.json, .megaplan/plans/implement-the-watchlist-20260512-1809/step_receipt_gate_v1.json, .megaplan/plans/implement-the-watchlist-20260512-1809/step_receipt_plan_v1.json, .megaplan/plans/implement-the-watchlist-20260512-1809/user_actions.md, .megaplan/plans/live-update-environment-split/.plan.lock, .megaplan/plans/live-update-environment-split/critique_output.json, .megaplan/plans/live-update-environment-split/critique_v1.json, .megaplan/plans/live-update-environment-split/execution.json, .megaplan/plans/live-update-environment-split/execution_audit.json, .megaplan/plans/live-update-environment-split/execution_batch_1.json, .megaplan/plans/live-update-environment-split/execution_batch_2.json, .megaplan/plans/live-update-environment-split/execution_batch_3.json, .megaplan/plans/live-update-environment-split/execution_batch_4.json, .megaplan/plans/live-update-environment-split/execution_batch_5.json, .megaplan/plans/live-update-environment-split/execution_batch_6.json, .megaplan/plans/live-update-environment-split/execution_batch_7.json, .megaplan/plans/live-update-environment-split/execution_batch_8.json, .megaplan/plans/live-update-environment-split/execution_batch_9.json, .megaplan/plans/live-update-environment-split/faults.json, .megaplan/plans/live-update-environment-split/final.md, .megaplan/plans/live-update-environment-split/finalize.json, .megaplan/plans/live-update-environment-split/finalize_output.json, .megaplan/plans/live-update-environment-split/finalize_snapshot.json, .megaplan/plans/live-update-environment-split/gate.json, .megaplan/plans/live-update-environment-split/plan_v1.md, .megaplan/plans/live-update-environment-split/plan_v1.meta.json, .megaplan/plans/live-update-environment-split/plan_v2.md, .megaplan/plans/live-update-environment-split/plan_v2.meta.json, .megaplan/plans/live-update-environment-split/review.json, .megaplan/plans/live-update-environment-split/state.json, .megaplan/plans/live-update-environment-split/step_receipt_critique_v1.json, .megaplan/plans/live-update-environment-split/step_receipt_execute_v2.json, .megaplan/plans/live-update-environment-split/step_receipt_finalize_v2.json, .megaplan/plans/live-update-environment-split/step_receipt_plan_v1.json, .megaplan/plans/live-update-environment-split/step_receipt_revise_v2.json, .megaplan/plans/live-update-environment-split/user_actions.md",
+          "Advisory audit finding: Sense check SC12 is missing an executor acknowledgment.",
+          "Advisory audit finding: Sense check SC13 is missing an executor acknowledgment.",
+          "Advisory audit finding: Sense check SC16 is missing an executor acknowledgment.",
+          "Advisory audit finding: Tasks left pending after execute (executor never started them): T12, T13, T16"
+        ],
+        "task_updates": [
+          {
+            "id": "T6",
+            "status": "done",
+            "executor_notes": "Added watchlist_add and watchlist_update handlers in _run_editor_tool (live_update_editor.py). watchlist_add calls self.db.insert_live_update_watchlist with watch_key, title, reason (mapped to origin_reason), source_message_ids, channel_id, subject_type, environment=self.environment, guild_id=guild_id. watchlist_update calls self.db.update_live_update_watchlist with watch_key, action, notes, environment=self.environment. Both return structured {ok: bool, watchlist_entry/error, action} payloads. Watchlist actions recorded into self.candidate_generator.watchlist_actions list (initialized in LiveUpdateCandidateGenerator.__init__, reset in generate_candidates). watchlist_actions included in last_agent_trace alongside tool_trace. Also added watchlist_actions to _agent_run_metadata for metadata persistence. All 36 tests pass.",
+            "task_id": "T6",
+            "files_changed": [
+              ".megaplan/plans/implement-the-watchlist-20260512-1809/execution.json",
+              ".megaplan/plans/implement-the-watchlist-20260512-1809/execution_audit.json",
+              ".megaplan/plans/implement-the-watchlist-20260512-1809/execution_batch_2.json",
+              ".megaplan/plans/implement-the-watchlist-20260512-1809/execution_batch_3.json",
+              ".megaplan/plans/implement-the-watchlist-20260512-1809/execution_batch_4.json",
+              ".megaplan/plans/implement-the-watchlist-20260512-1809/execution_batch_5.json",
+              ".megaplan/plans/implement-the-watchlist-20260512-1809/step_receipt_execute_v1.json"
+            ],
+            "commands_run": [],
+            "auto_attributed_files": true
+          }
+        ],
+        "sense_check_acknowledgments": [
+          {
+            "id": "SC6",
+            "verdict": "PASS",
+            "executor_note": "Both watchlist_add and watchlist_update are dispatched in _run_editor_tool (editor.py), not _run_requested_tool (prompts.py). Each returns structured {ok, watchlist_entry/error, action} payload. Watchlist actions are recorded into self.candidate_generator.watchlist_actions (a List[Dict[str,Any]]) and included in last_agent_trace alongside tool_trace. environment and guild_id are threaded from editor context (self.environment, guild_id method parameter).",
+            "sense_check_id": "SC6"
+          }
+        ]
+      },
+      {
+        "output": "Batch 6 executed successfully. T12 completed: (a) debug_live_editor_audit.py now collects reasoning_recovery_path per-run and prints aggregate distribution + watchlist-actions summary; (b) _build_reasoning_embed now includes a footer with run_id, model, and reasoning_recovery_path. T13 blocked awaiting U1 \u2014 the migration has not been applied (verified: column expires_at does not exist on live_update_watchlist). All 36 existing tests pass.",
+        "files_changed": [
+          "scripts/debug_live_editor_audit.py",
+          "src/features/summarising/live_update_editor.py",
+          ".megaplan/plans/implement-the-watchlist-20260512-1809/execution_batch_6.json"
+        ],
+        "commands_run": [
+          "python3 -c '...' (verify migration status \u2014 confirmed NOT applied: expires_at column missing)",
+          "python -m pytest tests/test_live_update_editor_lifecycle.py tests/test_live_update_prompts.py tests/test_live_update_editor_publishing.py -v --tb=short (36 passed, 0 failed)",
+          "python -c 'ast.parse(...)' (syntax check on both changed files \u2014 OK)"
+        ],
+        "deviations": [
+          "T13 blocked: migration U1 has not been applied. Verified via Supabase query \u2014 column 'expires_at' does not exist on live_update_watchlist. Marked `awaiting U1`.",
+          "Advisory quality: scripts/debug_live_editor_audit.py adds unused imports: Optional.",
+          "Advisory quality: code changes lacked test updates: scripts/debug_live_editor_audit.py, src/features/summarising/live_update_editor.py.",
+          "Advisory observation mismatch: executor claimed files not observed in git status/content hash delta: .megaplan/plans/implement-the-watchlist-20260512-1809/execution_batch_6.json",
+          "Advisory audit finding: Sense check SC16 is missing an executor acknowledgment.",
+          "Advisory audit finding: Tasks left pending after execute (executor never started them): T16"
+        ],
+        "task_updates": [
+          {
+            "id": "T12",
+            "status": "done",
+            "executor_notes": "(a) Added Counter import, recovery_path_counter/wl accumulators. Collect reasoning_recovery_path and watchlist_actions per-run in the audit loop. Added recovery_path to per-run output. After loop, prints aggregate section: reasoning_recovery_path distribution (count per branch) and watchlist-actions summary (watchlist_add/watchlist_update counts). (b) Added embed.set_footer() in _build_reasoning_embed with run_id, model, and reasoning_recovery_path. All 36 tests pass.",
+            "files_changed": [
+              "scripts/debug_live_editor_audit.py",
+              "src/features/summarising/live_update_editor.py"
+            ],
+            "task_id": "T12",
+            "commands_run": []
+          },
+          {
+            "id": "T13",
+            "status": "blocked",
+            "executor_notes": "Blocked awaiting U1: Migration .migrations_staging/20260512185328_live_update_watchlist_lifecycle.sql has NOT been applied. Verified by querying live_update_watchlist \u2014 column 'expires_at' does not exist. User must run the migration against both dev and prod Supabase environments before T13 can proceed.",
+            "task_id": "T13",
+            "files_changed": [],
+            "commands_run": []
+          }
+        ],
+        "sense_check_acknowledgments": [
+          {
+            "id": "SC12",
+            "task_id": "T12",
+            "verdict": "pass",
+            "note": "Audit script now: (1) displays reasoning_recovery_path per-run, (2) prints aggregate reasoning_recovery_path distribution (count per branch) after all runs, (3) prints watchlist-actions summary with counts of watchlist_add and watchlist_update calls from metadata.agent_trace.watchlist_actions. The dev embed footer in _build_reasoning_embed now includes recovery_path alongside run_id and model via embed.set_footer().",
+            "sense_check_id": "SC12",
+            "executor_note": "Audit script now: (1) displays reasoning_recovery_path per-run, (2) prints aggregate reasoning_recovery_path distribution (count per branch) after all runs, (3) prints watchlist-actions summary with counts of watchlist_add and watchlist_update calls from metadata.agent_trace.watchlist_actions. The dev embed footer in _build_reasoning_embed now includes recovery_path alongside run_id and model via embed.set_footer()."
+          },
+          {
+            "id": "SC13",
+            "task_id": "T13",
+            "verdict": "blocked",
+            "note": "T13 cannot execute. Migration U1 (live_update_watchlist_lifecycle.sql) has not been applied \u2014 column 'expires_at' does not exist on the live_update_watchlist table. T13 lifecycle tests require these schema additions to be in place. Marked `awaiting U1`.",
+            "sense_check_id": "SC13",
+            "executor_note": "T13 cannot execute. Migration U1 (live_update_watchlist_lifecycle.sql) has not been applied \u2014 column 'expires_at' does not exist on the live_update_watchlist table. T13 lifecycle tests require these schema additions to be in place. Marked `awaiting U1`."
+          }
+        ]
+      }
+    ]
+  },
+  "scope_drift_severity": "high"
+}

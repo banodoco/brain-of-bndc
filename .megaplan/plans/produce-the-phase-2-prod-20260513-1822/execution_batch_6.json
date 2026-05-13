@@ -1,0 +1,32 @@
+{
+  "output": "Authored \u00a79 (table-rename migration with hand-off chain, dependent-view pre-check, pre/post row-count parity, transactional rename block, operator-filled deletion date) and \u00a710 (deletion checklist, bring-forward/push-out circumstances, DROP migration via same hand-off chain, close-out checklist).",
+  "commands_run": [
+    "ls .migrations_staging/"
+  ],
+  "deviations": [
+    "Advisory audit finding: Sense check SC7 is missing an executor acknowledgment."
+  ],
+  "task_updates": [
+    {
+      "task_id": "T6",
+      "status": "done",
+      "executor_notes": "\u00a79 opens with 'Run this only after the 24-48h watch has passed cleanly and \u00a78 will not be needed.' Hand-off chain (4 numbered steps) names in full: (1) author timestamped file in .migrations_staging/ as 2026MMDDHHMMSS_live_update_legacy_rename.sql matching existing convention 20260511110349_live_update_environment_split.sql and 20260512185328_live_update_watchlist_lifecycle.sql; (2) copy file VERBATIM filename-unchanged into /Users/peteromalley/Documents/banodoco-workspace/supabase/migrations/ per .migrations_staging/README.md; (3) apply via `supabase db push` from workspace repo with TODO(phase-1) note that Phase 1 may have chosen a different applier (Supabase dashboard SQL editor or psql-direct) and SQL body is identical regardless; (4) verify migration recorded in supabase_migrations.schema_migrations with a SELECT query example before treating rename as applied. Pre-flight constraint-preservation note: 'Postgres preserves indexes, sequences, FK constraints, and RLS across ALTER TABLE ... RENAME TO \u2014 do not recreate them. Dependent views are NOT auto-updated.' Pre-check view query `select schemaname, viewname, definition from pg_views where definition ilike '%live_update_%';` with instruction to drop/recreate any matching views. Row-count parity SELECT before AND after as 6-table UNION ALL (counts must match exactly). Migration body: begin;...commit; transaction with ordered ALTER TABLE ... RENAME TO for six legacy tables per docs/live-update-editor-redesign.md:212-223 (cross-checked against src/common/storage_handler.py:652-1968 \u2014 NOT docs/live-update-editor-legacy-boundaries.md which is about daily_summaries): live_update_feed_items, live_update_watchlist, live_update_duplicate_state, live_update_editorial_memory, live_update_candidates, live_update_decisions \u2192 _legacy_<name>. Inline comment 'live_update_editor_runs is NOT renamed (still used by both editors per :223/:562)' and 'swap to `rollback;` for dry-run preview' at commit; line. Post-flight row-count UNION ALL against _legacy_* names. Operator-filled blanks: 'Rename applied on: __________' and '_legacy_* deletion scheduled for: __________' citing :653; explicit 'Do not hardcode a date in this doc'. \u00a710 'Before the deletion date fires' as a 3-item YES checklist (zero recent reads, no open incidents, POM sign-off in writing). Bring-forward circumstances (storage pressure, schema-drift, audit done early). Push-out circumstances (active forensics, regulator request, ongoing partial-publish investigation). DROP migration block: 'Use the same hand-off chain as \u00a79' authored as 2026MMDDHHMMSS_live_update_legacy_drop.sql \u2192 supabase/migrations/ \u2192 supabase db push \u2192 verify in supabase_migrations.schema_migrations. begin;...commit; with DROP TABLE _legacy_<name>; for all six tables and rollback comment for dry-run. Explicit 'live_update_editor_runs is not dropped \u2014 same reason as \u00a79.' Close-out checklist: legacy dropped + DROP migration recorded; runbook archived (move to docs/archive/ or note Phase 2 complete at top); docs/live-update-editor-redesign.md updated to note Phase 2 done (date, partial-publish-incident count, override-rate observed); trip-wire counters from :599-604 re-checked against first week of post-cutover data.",
+      "sections_written": [
+        "\u00a79-table-rename-migration",
+        "\u00a710-deletion-and-close-out"
+      ],
+      "stance": null,
+      "stop_signal": null
+    }
+  ],
+  "sense_check_acknowledgments": [
+    {
+      "sense_check_id": "SC6",
+      "executor_note": "Confirmed. \u00a79 names the full migration hand-off chain in 4 numbered steps: (1) author in .migrations_staging/ with timestamped filename matching the 20260MMDDHHMMSS_*.sql convention (existing examples 20260511110349_live_update_environment_split.sql and 20260512185328_live_update_watchlist_lifecycle.sql verified via `ls`); (2) copy verbatim filename-unchanged to /Users/peteromalley/Documents/banodoco-workspace/supabase/migrations/; (3) apply via `supabase db push`; (4) verify in supabase_migrations.schema_migrations. Renames all SIX legacy tables (live_update_feed_items, live_update_watchlist, live_update_duplicate_state, live_update_editorial_memory, live_update_candidates, live_update_decisions) to _legacy_<name>. Retains live_update_editor_runs with explicit inline comment 'NOT renamed (still used by both editors per :223/:562).' Runs inside BEGIN/COMMIT with `swap to rollback; for dry-run preview` note. Constraint-preservation note explicit (Postgres preserves indexes/sequences/FK/RLS across RENAME TO; dependent views NOT auto-updated). Pre-check pg_views query included. Row-count parity SELECT before AND after as 6-table UNION ALL. Six-table cross-reference is :212-223 + src/common/storage_handler.py:652-1968 \u2014 explicitly NOT docs/live-update-editor-legacy-boundaries.md (with reason 'that section is about daily_summaries'). \u00a710 uses the SAME hand-off chain for DROP TABLE (.migrations_staging/ \u2192 supabase/migrations/ \u2192 supabase db push \u2192 verify) and leaves the deletion date as an operator-filled blank ('Rename applied on: __________ ; _legacy_* deletion scheduled for: __________' with explicit 'Do not hardcode a date in this doc')."
+    }
+  ],
+  "sections_written": [
+    "\u00a79-table-rename-migration",
+    "\u00a710-deletion-and-close-out"
+  ]
+}

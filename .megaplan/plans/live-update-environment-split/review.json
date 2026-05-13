@@ -1,0 +1,116 @@
+{
+  "review_verdict": "approved",
+  "checks": [],
+  "pre_check_flags": [],
+  "verified_flag_ids": [],
+  "disputed_flag_ids": [],
+  "criteria": [
+    {
+      "name": "Migration adds `environment text not null default 'prod'` to every listed table AND replaces single-column unique constraints with composite `(environment, <key>)` versions on checkpoints and duplicate-state tables, plus the partial unique index on `live_top_creation_posts (environment, duplicate_key) where status='posted'`",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "Light robustness: auto-approved."
+    },
+    {
+      "name": "Every read in `storage_handler.py` that touches a live-update or live-top-creation table filters by `environment` (grep audit yields zero unfiltered selects)",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "Light robustness: auto-approved."
+    },
+    {
+      "name": "Every write in `storage_handler.py` that touches a live-update or live-top-creation table includes `environment` in the payload, update filter, or `on_conflict` key; manual pre-insert lookups (post/memory/watchlist) also filter by environment",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "Light robustness: auto-approved."
+    },
+    {
+      "name": "`environment` kwarg is appended at the end of every modified signature (never inserted mid-list), preserving existing keyword callers such as `scripts/send_social_picks.py:116`",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "Light robustness: auto-approved."
+    },
+    {
+      "name": "`db_handler.py` wrappers accept and forward `environment` for every method touched",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "Light robustness: auto-approved."
+    },
+    {
+      "name": "`LiveUpdateEditor.run_once` no longer branches on `dry_run`; dev checkpoint seeding folded into the main path",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "Light robustness: auto-approved."
+    },
+    {
+      "name": "Zero `self.dry_run` references remain in `live_update_editor.py` or `live_top_creations.py` (grep gate)",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "Light robustness: auto-approved."
+    },
+    {
+      "name": "`LiveTopCreations._publish_candidate` calls `get_live_top_creation_post_by_duplicate_key` before sending and skips if a posted row exists",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "Light robustness: auto-approved."
+    },
+    {
+      "name": "`LiveTopCreations` routes only to the summary channel; no reads of `DEV_TOP_GENS_CHANNEL_ID` or server `top_gens_channel_id` remain",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "Light robustness: auto-approved."
+    },
+    {
+      "name": "`max_posts` per-pass cap is removed (replaced with documented `MAX_POSTS_SAFETY_BELT = 50`)",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "Light robustness: auto-approved."
+    },
+    {
+      "name": "Cog and dev script pass `environment` explicitly; `LiveUpdateEditor`/`LiveTopCreations` no longer accept `dry_run`",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "Light robustness: auto-approved."
+    },
+    {
+      "name": "New test asserts running top-creations twice over the same archived message produces exactly one post row and one Discord send",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "Light robustness: auto-approved."
+    },
+    {
+      "name": "New test asserts dev-environment rows are invisible to prod reads (feed items, watchlist, editorial memory, top-creation dedupe lookup)",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "Light robustness: auto-approved."
+    },
+    {
+      "name": "All existing `tests/test_live_*` tests pass after being flipped from dry-run-skips-persistence to dev-persists-with-environment",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "Light robustness: auto-approved."
+    },
+    {
+      "name": "Full `pytest` suite passes",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "Light robustness: auto-approved."
+    },
+    {
+      "name": "`_run_dry_once` and `_publish_dry_run_debug_report` deleted from `live_update_editor.py` and equivalent dry-run helper deleted from `live_top_creations.py`",
+      "priority": "should",
+      "pass": "pass",
+      "evidence": "Light robustness: auto-approved."
+    },
+    {
+      "name": "Running `scripts/run_live_update_dev.py --once` against a real Supabase writes rows tagged `environment='dev'`; a subsequent prod pass does not surface them",
+      "priority": "info",
+      "pass": "deferred_human",
+      "evidence": "Requires human verification capabilities."
+    }
+  ],
+  "issues": [],
+  "rework_items": [],
+  "summary": "Light robustness: review skipped; stub written for artifact parity.",
+  "task_verdicts": [],
+  "sense_check_verdicts": []
+}

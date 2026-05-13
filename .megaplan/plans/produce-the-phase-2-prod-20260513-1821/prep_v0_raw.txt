@@ -1,0 +1,1 @@
+hermes backend requires: pip install 'megaplan-harness[agent]'

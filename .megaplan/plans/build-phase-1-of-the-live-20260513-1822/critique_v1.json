@@ -1,0 +1,202 @@
+{
+  "checks": [
+    {
+      "id": "issue_hints",
+      "question": "Did the work fully address the issue hints, user notes, and approved plan requirements?",
+      "findings": [
+        {
+          "detail": "Plan resolves all five locked decisions in docs/live-update-editor-phase1-locked-decisions.md as the gate artifact (Step 1.3) using the brief defaults (canonicalizer algorithm, 30d retention, trigram 0.55 + author_overlap, single-table rejected logging, defer-to-v2 default unless audit forces). Matches the brief locked-decisions requirement.",
+          "flagged": false
+        },
+        {
+          "detail": "Run-provenance is left ambiguous in Step 7.1: 'Insert a live_update_editor_runs row (existing table is acceptable for run-id provenance, read only; or add a new topic_editor_runs if the existing schema does not fit cleanly).' Inserting into live_update_editor_runs would violate the brief hard constraint that the new editor writes ONLY to the 5 new tables. Plan should commit to a new run table in the new migration.",
+          "flagged": true
+        },
+        {
+          "detail": "Trip-wire surfacing in the trace embed (Step 9.1) covers override rate, record_observation rate, and partial-publish incidents per-run + 7-day rolling, matching the brief hard requirement that all three trip-wires be visible per-run.",
+          "flagged": false
+        },
+        {
+          "detail": "Plan introduces a NEW env var DEV_SHADOW_TRACE_CHANNEL_ID rather than reusing DEV_LIVE_UPDATE_CHANNEL_ID, avoiding collision with the existing reasoning-embed pipeline, matches the brief recommendation.",
+          "flagged": false
+        },
+        {
+          "detail": "The 50-headline fuzz fixture is sourced from feed_items (~18 prod) + live_update_candidates.raw_output + watchlist titles per Step 1.2. Plan asserts collision-rate <10% as a warning rather than a hard failure (Step 3.3), appropriate for a tuning gate.",
+          "flagged": false
+        }
+      ]
+    },
+    {
+      "id": "correctness",
+      "question": "Are the proposed changes technically correct?",
+      "findings": [
+        {
+          "detail": "Step 2.5 specifies the topics/topic_sources backfill as a pure SQL INSERT SELECT FROM live_update_feed_items block inside the migration, but canonical_key derivation requires the Python canonicalize() function (Step 3.1). SQL has no access to the Python canonicalizer, so the backfill cannot populate topics.canonical_key correctly inside the migration. Needs a Python backfill script run after migration apply, or a Postgres-resident canonicalizer.",
+          "flagged": true
+        },
+        {
+          "detail": "Schema-vs-data mismatch: live_update_feed_items does not have a source_authors column (storage_handler.py:746-762 stores title/body/source_message_ids/discord_message_ids/duplicate_key but no authors). The backfill into topics.source_authors requires a join through the messages archive, which the plan pure-SQL formulation does not address.",
+          "flagged": true
+        },
+        {
+          "detail": "live_update_feed_items.source_message_ids is stored as a JSONB array via _as_json_array (storage_handler.py:756), while topic_sources.message_id is bigint NOT NULL. The backfill must jsonb_array_elements_text(...)::bigint per row to unnest and cast, non-trivial; plan does not call this out.",
+          "flagged": true
+        },
+        {
+          "detail": "Dispatcher invariant 2 (Step 6.2) correctly implements both rejection-with-collision (logs action='rejected_*' with topic_id=NULL) AND override-accept (logs action='override' with reason in payload, then the write). Matches v6 doc spec at lines 396-402.",
+          "flagged": false
+        },
+        {
+          "detail": "Idempotency key (Step 6.2 Inv 3): plan uses Anthropic tool_use_id keyed on (run_id, tool_call_id), matches doc invariant 3 and the brief constraint against inventing a parallel UUID.",
+          "flagged": false
+        },
+        {
+          "detail": "Migration includes CREATE EXTENSION IF NOT EXISTS pg_trgm (Step 2.3). Confirmed safe: no prior .migrations_staging/ migration creates it, and IF NOT EXISTS is idempotent if it was already added directly to Supabase.",
+          "flagged": false
+        },
+        {
+          "detail": "Plan structural rejection for post_simple_topic (Step 6.2 Inv 1) uses distinct_authors >= 2 OR len(source_message_ids) >= 3. The dispatcher must derive distinct_authors from the messages archive (authoritative), not from a tool argument (untrusted), but the plan does not specify the lookup path. Worth an explicit statement that author resolution goes through get_live_update_context_for_message_ids or equivalent.",
+          "flagged": true
+        }
+      ]
+    },
+    {
+      "id": "scope",
+      "question": "Search for related code that handles the same concept. Is the reported issue a symptom of something broader?",
+      "findings": [
+        {
+          "detail": "Plan respects scope discipline: explicitly excludes Phase 2 cutover, run-lease/checkpoint behavior, full partial-publish retry history, and _legacy_* renames (Overview + Assumptions). Matches doc Scope discipline section.",
+          "flagged": false
+        },
+        {
+          "detail": "Plan does not modify live_update_editor.py, live_update_prompts.py, or ClaudeClient.generate_chat_completion, adds new sibling modules and a new dispatcher. Old code path remains bit-for-bit identical so the replay runner divergence diff is grounded.",
+          "flagged": false
+        },
+        {
+          "detail": "The doc names concurrent-run protection (lease via live_update_editor_runs) as Phase-1 worth-implementing at line 684, but the plan defers it to Phase-1.5. Acceptable given scope discipline elsewhere, but a deviation from the doc recommendation that should be acknowledged so reviewers do not expect lease behavior in Week-1 trace embeds.",
+          "flagged": true
+        },
+        {
+          "detail": "Cross-environment search_topics scoping (doc line 686, 'Default scoped to current env. Cross-env search is a debug-only opt-in') is not addressed in Step 6.1 tool definitions. Worth a one-line note that search_topics filters by (environment, guild_id) at the dispatcher layer.",
+          "flagged": true
+        },
+        {
+          "detail": "Plan does not say where the dispatcher similarity scan reads from (Step 6.2 Inv 2). The doc requires trigram + alias lookup on topics AND author_overlap, which means joining to topic_sources and to the messages archive for author resolution. Plan implies this via search_topics_by_headline but does not enumerate the author_overlap lookup, the implementation detail that decides whether the threshold is actually tunable.",
+          "flagged": true
+        }
+      ]
+    },
+    {
+      "id": "all_locations",
+      "question": "Does the change touch all locations AND supporting infrastructure?",
+      "findings": [
+        {
+          "detail": "Tool registration lives in the new topic_dispatcher.py (Step 6), not in legacy _run_requested_tool (live_update_prompts.py:562) or _run_editor_tool in live_update_editor.py. Correctly avoids the dispatch-location confusion from recurring debt DEBT-019/DEBT-020.",
+          "flagged": false
+        },
+        {
+          "detail": "Migration handoff: .migrations_staging/ README describes it as 'intended for manual handoff into the workspace Supabase migrations repo', not auto-applied to test DBs. Plan Step 6 dispatcher tests (Validation Order 3) require the 5 new tables in the test database, but the plan does not specify how the migration gets applied for test runs (fixtures? in-memory schema? manual apply?). Without this, fail_to_pass tests cannot run in CI.",
+          "flagged": true
+        },
+        {
+          "detail": "Storage_handler counterparts (Step 5.2) for the new tables are 'mirrored as needed'. Write-side accessors (record_topic_transition, create_topic, add_topic_sources, etc.) need both db_handler.py AND storage_handler.py entries since the lower layer builds the supabase payload with hardcoded keys (storage_handler.py:1733-1780 pattern). Plan underspecifies the lower-layer entries, same shape as recurring debt DEBT-028.",
+          "flagged": true
+        },
+        {
+          "detail": "Shadow runner (Step 10) loads windows from the prod archive and writes in environment='dev'. Dispatcher reads on the new tables must filter by (environment, guild_id) to avoid cross-env collision against prod topics. Plan does not explicitly assert env-scoped read filters in Steps 5/6.",
+          "flagged": true
+        },
+        {
+          "detail": "Trip-wire 7-day rolling metrics require a query over topic_transitions filtered by action and environment. Plan does not specify the aggregate accessor (presumably an additional db_handler method), which is part of the supporting infrastructure for the success-criterion 'override rate per-run + rolling'.",
+          "flagged": true
+        }
+      ]
+    },
+    {
+      "id": "callers",
+      "question": "Find the callers of the changed function. What arguments do they actually pass? Does the fix handle all of them?",
+      "findings": [
+        {
+          "detail": "ClaudeClient.generate_chat_completion is left untouched, plan adds a sibling topic_editor_client.py in src/common/llm/. Existing callers in live_update_prompts.py:163-180, summariser, etc. continue to use the text-mode JSON path unchanged. Correct call-site isolation.",
+          "flagged": false
+        },
+        {
+          "detail": "store_live_update_feed_item and live_update_editor_runs accessors (storage_handler.py:654, 743) remain in place and are not called by the new editor. The replay runner reads them to source historical windows and compute divergence-vs-today, read-only consumption per constraint.",
+          "flagged": false
+        },
+        {
+          "detail": "If Step 7.1 fallback to reuse live_update_editor_runs lands, the existing callers of create_live_update_run and analytics over the runs table would see rows produced by the new editor commingled with the old editor rows. 'read only' plus 'Insert a row' in the same sentence is contradictory. Decision should land on the new-table side.",
+          "flagged": true
+        },
+        {
+          "detail": "Dispatcher structural rejection of post_simple_topic derives distinct_authors from source_message_ids, the only callers are Anthropic tool_use blocks from the agent, but the dispatcher must consult the messages archive (authoritative), not the tool input (untrusted, agent could under-count authors). Plan implies this but does not state it.",
+          "flagged": true
+        },
+        {
+          "detail": "topic_canonicalizer.canonicalize(proposed_key, headline, source_messages) (Step 3.1) takes source_messages: list[dict] as a third argument for creator/artifact/date extraction. The dispatcher calls it with resolved messages from the archive; the backfill (Step 2.5) would need to supply messages too, which the pure-SQL formulation cannot do. Second arm of the backfill-in-SQL gap.",
+          "flagged": true
+        }
+      ]
+    }
+  ],
+  "flags": [
+    {
+      "id": "FLAG-001",
+      "concern": "Run-provenance ambiguity: Step 7.1 leaves it as 'reuse live_update_editor_runs or add a new topic_editor_runs if it does not fit cleanly'. The brief constraint is hard: new editor writes ONLY to the 5 new tables. Plan should commit to a new run table in the new migration and remove the reuse fallback.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "plan_v1.md Step 7.1; brief Constraints: 'Do not modify, dual-write to, or read for decisions from the existing live_update_* tables. The new editor writes ONLY to the 5 new tables.'"
+    },
+    {
+      "id": "FLAG-002",
+      "concern": "Backfill-in-SQL is mechanically impossible as specified: Step 2.5 pure-SQL INSERT SELECT FROM live_update_feed_items cannot (a) call Python canonicalize() for canonical_key, (b) populate source_authors (column does not exist on feed_items), nor (c) trivially convert the JSONB source_message_ids array to bigint rows. Plan needs an explicit Python backfill script that runs after migration apply, or a Postgres-resident canonicalizer.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "plan_v1.md Step 2.5 and Step 3.1; storage_handler.py:743-762 (feed_items column shape, jsonb source_message_ids, no source_authors)"
+    },
+    {
+      "id": "FLAG-003",
+      "concern": "Test infrastructure gap: dispatcher tests require the 5 new tables in the test DB, but .migrations_staging/ is described as manual-handoff for the workspace Supabase repo. Plan does not specify how dispatcher and alias-resolution tests get a schema fixture (test container? skip-if-no-DB? in-memory shim?). Without this, multiple fail_to_pass tests cannot run.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "plan_v1.md Validation Order 3; .migrations_staging/README.md (manual handoff scope); no Supabase fixture infra for the new tables in tests/"
+    },
+    {
+      "id": "FLAG-004",
+      "concern": "Env-scoped read invariant unstated: Plan does not assert that search_topics, alias resolution, dispatcher collision scans, and list_watching_topics all filter by (environment, guild_id) by default. Shadow-mode replay loads prod windows but writes dev; without env filter on reads, dispatcher could collide against prod topics.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "plan_v1.md Step 5.1, 6.2; doc line 686 ('Default scoped to current env')"
+    },
+    {
+      "id": "FLAG-005",
+      "concern": "Dispatcher structural check needs server-side author resolution: Step 6.2 Inv 1 says distinct_authors(source_message_ids) >= 2 rejects post_simple_topic, but the count must be derived from the messages archive (authoritative), not from agent tool input (untrusted). Plan implies this but does not state it.",
+      "category": "correctness",
+      "severity_hint": "likely-minor",
+      "evidence": "plan_v1.md Step 6.2 Inv 1; doc line 395; get_live_update_context_for_message_ids is the obvious source"
+    },
+    {
+      "id": "FLAG-006",
+      "concern": "Storage-layer write accessors underspecified: Step 5 enumerates db_handler accessors but treats storage_handler entries as 'mirror as needed'. Every new write path needs both layers (db_handler wraps storage_handler which builds the supabase payload with hardcoded keys, per storage_handler.py:1733-1780). Same shape as recurring debt DEBT-028.",
+      "category": "completeness",
+      "severity_hint": "likely-minor",
+      "evidence": "plan_v1.md Step 5.2; storage_handler.py:743-762 existing pattern; recurring debt DEBT-028"
+    },
+    {
+      "id": "FLAG-007",
+      "concern": "Concurrent-run protection deferred against doc recommendation: doc line 684 explicitly says 'Worth implementing in Phase 1'. Plan defers it to Phase-1.5. Acceptable per scope discipline, but should be called out as a known deviation so POM does not expect lease behavior in Week-1 trace embeds.",
+      "category": "completeness",
+      "severity_hint": "likely-minor",
+      "evidence": "plan_v1.md Overview + Assumptions; doc line 684"
+    },
+    {
+      "id": "verifiability-0",
+      "concern": "Criterion 12: requires human verification (subjective_judgment).",
+      "category": "verifiability",
+      "severity_hint": "likely-minor",
+      "status": "open"
+    }
+  ],
+  "verified_flag_ids": [],
+  "disputed_flag_ids": []
+}

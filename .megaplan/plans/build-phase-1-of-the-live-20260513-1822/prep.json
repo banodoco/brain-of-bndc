@@ -1,0 +1,230 @@
+{
+  "skip": false,
+  "task_summary": "Build Phase 1 of the live-update editor redesign (docs/live-update-editor-redesign.md v6) as a shadow-mode dev vertical slice with publishing OFF: ship the 5-table topic schema, a native Anthropic tool-use editor (4 read + 6 decision tools) with all 4 dispatcher invariants including the v6 collision-override path, a pure publisher that renders comparison trace embeds in #main_test, and a runner that replays 20+ historical source-message windows against the new editor while leaving today's live_update_* pipeline fully untouched. Before any code, resolve the five locked decisions called out in the doc (canonicalizer + fuzz vs 50 historical headlines, editorial_observations retention/sampling, collision threshold + override semantics, rejected-call logging shape, and the defer-audit-driven decision on whether `state='pending_review'` ships in Day-1 schema). Stop at the shadow-mode decision gate \u2014 Phase 2 prod cutover is explicitly out of scope.",
+  "key_evidence": [
+    {
+      "point": "The v6 redesign doc is the authoritative spec \u2014 it already encodes the schema (topics with publication columns folded in, topic_sources, topic_aliases, topic_transitions, editorial_observations), the exact 4 read + 6 decision tool surface (search_topics, search_messages, get_author_profile, get_message_context + post_simple_topic, post_sectioned_topic, watch_topic, update_topic_source_messages, discard_topic, record_observation), and all 4 dispatcher invariants. Build to the spec verbatim \u2014 divergence is a bug.",
+      "source": "docs/live-update-editor-redesign.md:100-391",
+      "relevance": "high"
+    },
+    {
+      "point": "Locked-decision #5 is not optional: `decision='defer'` IS emitted by live production code today, so the defer-audit query must run before Day 1 to determine whether `state='pending_review'` + a `request_review_topic` tool ship in the initial migration or get deferred to v2. The doc itself calls this out.",
+      "source": "src/features/summarising/live_update_editor.py:1835 (`elif str(candidate.get('agent_decision') or 'publish').lower() == 'defer':`) and live_update_prompts.py:840,905; docs/live-update-editor-redesign.md:670-678",
+      "relevance": "high"
+    },
+    {
+      "point": "Today's stack is text-mode JSON via `ClaudeClient.generate_chat_completion`, NOT native tool-use. Native tool_use end-to-end (with Anthropic `tool_use_id` as the idempotency key on `topic_transitions`) is a real client-layer extension, not just a prompt change.",
+      "source": "src/common/llm/claude_client.py:33-92 (generate_chat_completion \u2192 messages.create) and live_update_prompts.py text-JSON parse paths",
+      "relevance": "high"
+    },
+    {
+      "point": "All existing live_update_* tables and code paths stay untouched in Phase 1. The doc is explicit: 'New editor writes ONLY to the new tables. Publishing path is disabled.' Old tables become `_legacy_*` only in Phase 2. Do not dual-write from the new editor.",
+      "source": "docs/live-update-editor-redesign.md:611-628,646-654",
+      "relevance": "high"
+    },
+    {
+      "point": "Dispatcher invariant #2 (the collision-override path) is the v6-specific fix Codex flagged at v5 \u2014 without `override_collisions=[{topic_id, reason}, ...]` on the three write tools the agent traps in a retry loop on false positives. Every override must log to topic_transitions for threshold tuning. Trip-wire: revisit threshold if override rate >~10% of writes.",
+      "source": "docs/live-update-editor-redesign.md:307-403,597,601-603",
+      "relevance": "high"
+    },
+    {
+      "point": "Schema landmines already fixed in v6 vs v5 that the migration must encode correctly: `topic_transitions` MUST carry `environment` + `guild_id` (denormalized for fast filter) and MUST allow `topic_id` NULL for rejected_create entries; `topic_sources` UNIQUE is (topic_id, message_id) only (a single message can support multiple topics for parent+child story updates).",
+      "source": "docs/live-update-editor-redesign.md:138-205,696-704",
+      "relevance": "high"
+    },
+    {
+      "point": "The migration backlog directory `.migrations_staging/` already contains live-update migrations (20260511 env split, 20260512 watchlist lifecycle). New 5-table migration should land in the same staging directory and assume those predecessors apply.",
+      "source": ".migrations_staging/ (ls output)",
+      "relevance": "medium"
+    },
+    {
+      "point": "Trace-embed channel: today's dev code resolves a debug channel via `DEV_SUMMARY_CHANNEL_ID` / `DEV_LIVE_UPDATE_CHANNEL_ID`. The task says #main_test \u2014 clarify whether to introduce a new env (e.g. `DEV_SHADOW_TRACE_CHANNEL_ID`) or reuse the existing DEV channel pointed at #main_test. Default to a new env var to avoid colliding with the existing reasoning-embed pipeline.",
+      "source": "src/features/summarising/live_update_editor.py:1673-1696,1959-1989; scripts/run_live_update_dev.py:117-128",
+      "relevance": "medium"
+    },
+    {
+      "point": "Existing replay/inspection harness to model on (not extend): `scripts/run_live_update_dev.py` (interval/once/lookback CLI), `scripts/debug_live_editor_audit.py`, `scripts/inspect_editor_reasoning.py`. The new shadow-mode replay runner needs its own entrypoint (e.g. `scripts/run_live_update_shadow.py`) that loads N historical source-message windows from the archive and dispatches them at the NEW editor \u2014 it must NOT route through the current `LiveUpdateEditor` class.",
+      "source": "scripts/run_live_update_dev.py:1-168; scripts/debug_live_editor_audit.py; scripts/inspect_editor_reasoning.py",
+      "relevance": "high"
+    },
+    {
+      "point": "Canonicalizer fuzz target: 50 historical headlines from the `live_update_feed_items` table (currently ~18 prod posts + dev) and recent candidates. The doc explicitly says: 'write the canonicalizer first, fuzz it against 50 historical headlines, and verify it produces stable keys before the new editor runs.' This is a Day-0 task, not Day-1.",
+      "source": "docs/live-update-editor-redesign.md:670 + storage_handler search_live_update_feed_items pattern at storage_handler.py:1629",
+      "relevance": "high"
+    },
+    {
+      "point": "Run-lease/checkpoint behavior, partial-publish retry, and full migration polish are deliberately Phase-1.5 per the doc's 'scope discipline' paragraph. The one-week slice is: schema + tool-use loop + pure renderer + trace embed format + 20-window replay. Resist scope creep into those areas.",
+      "source": "docs/live-update-editor-redesign.md:613",
+      "relevance": "medium"
+    },
+    {
+      "point": "Trip-wires named in the doc that must be observable in the shadow-mode trace embed: override rate, record_observation invocations/run, partial-publish incidents. Trace embed must surface all three so Week-1 decision gate has data.",
+      "source": "docs/live-update-editor-redesign.md:599-603",
+      "relevance": "medium"
+    }
+  ],
+  "relevant_code": [
+    {
+      "file_path": "docs/live-update-editor-redesign.md",
+      "why": "Authoritative v6 spec. Treat as the design contract for schema, tools, dispatcher invariants, prompt, migration scope, locked decisions, and trip-wires. Phase-1 deliverables are \u00a7'Phase 1: shadow-mode dev build' (lines 609-644).",
+      "functions": [
+        "\u00a7Data model (DDL)",
+        "\u00a7Stage 1 tool surface",
+        "\u00a7Dispatcher invariants 1-4 (v6 override path)",
+        "\u00a7Five decisions to lock before starting"
+      ]
+    },
+    {
+      "file_path": "src/features/summarising/live_update_editor.py",
+      "why": "Today's 2380-line editor. Phase 1 must NOT modify this file beyond what's strictly needed for the comparison baseline \u2014 keep the old run path intact so the replay runner can diff new-editor decisions against old-editor decisions on the same windows.",
+      "functions": [
+        "LiveUpdateEditor.run_once",
+        "_run_editor_tool",
+        "_decide_candidate",
+        "_publish_dev_debug_report",
+        "_build_reasoning_embed",
+        "_resolve_debug_channel",
+        "_publish_accepted_candidates"
+      ]
+    },
+    {
+      "file_path": "src/features/summarising/live_update_prompts.py",
+      "why": "Current 8KB prompt + JSON parsing layer + `_meets_editorial_bar` and the defer/skip/duplicate decision values. Not modified in Phase 1; serves as the comparison baseline. Inspect for the defer-audit query and to make sure the new prompt covers the same editorial taste.",
+      "functions": [
+        "LiveUpdateCandidateGenerator",
+        "_parse_json_payload",
+        "_parse_raw_candidates",
+        "_meets_editorial_bar"
+      ]
+    },
+    {
+      "file_path": "src/common/llm/claude_client.py",
+      "why": "Anthropic SDK wrapper. Must be extended (or a sibling `topic_editor_client.py` added) to support native tool_use: `tools=`, `tool_choice`, `tool_use_id` round-trips, extended-thinking blocks, multi-turn tool-result loops. Keep `generate_chat_completion` untouched to avoid breaking existing callers.",
+      "functions": [
+        "ClaudeClient.__init__",
+        "ClaudeClient.generate_chat_completion"
+      ]
+    },
+    {
+      "file_path": "src/common/db_handler.py",
+      "why": "Add new accessors for the 5 new tables (topics, topic_sources, topic_aliases, topic_transitions, editorial_observations) following the existing async-in-thread pattern. Do NOT remove or refactor the existing `live_update_*` accessors in Phase 1.",
+      "functions": [
+        "DatabaseHandler.create_live_update_run",
+        "store_live_update_candidate",
+        "find_live_update_duplicate",
+        "search_live_update_feed_items",
+        "get_live_update_editorial_memory",
+        "upsert_live_update_watchlist"
+      ]
+    },
+    {
+      "file_path": "src/common/storage_handler.py",
+      "why": "Mirror new-table accessors here. The new editor's read tools (search_topics, search_messages, get_author_profile, get_message_context) should reuse `search_live_update_messages` / `get_live_update_*` infrastructure for message archive reads; only `search_topics` is genuinely new and needs trigram + alias resolution.",
+      "functions": [
+        "search_live_update_messages",
+        "search_live_update_feed_items",
+        "search_live_update_editorial_memory",
+        "get_live_update_author_profile",
+        "get_live_update_context_for_message_ids",
+        "_insert_live_row",
+        "_upsert_live_row"
+      ]
+    },
+    {
+      "file_path": "scripts/run_live_update_dev.py",
+      "why": "Reference runner. New `scripts/run_live_update_shadow.py` (or similar) follows the same MinimalDiscordBot + ClaudeClient + DatabaseHandler shape, but loads N historical source-message windows from the prod archive (read-only, environment='dev') instead of polling the live archive, runs them through the NEW editor with publishing OFF, and posts trace embeds.",
+      "functions": [
+        "MinimalDiscordBot",
+        "_run_pass",
+        "_login_with_backoff",
+        "main"
+      ]
+    },
+    {
+      "file_path": "scripts/debug_live_editor_audit.py",
+      "why": "Existing audit/inspection harness \u2014 useful as a template for the divergence-vs-today reporting in the trace embed and for the defer-audit query against `live_update_candidates` required by locked decision #5.",
+      "functions": []
+    },
+    {
+      "file_path": "scripts/inspect_editor_reasoning.py",
+      "why": "Existing reasoning-inspection tool \u2014 pattern for surfacing per-run trace artifacts; the new trace embed builder should reuse its formatting where it helps.",
+      "functions": []
+    },
+    {
+      "file_path": ".migrations_staging/",
+      "why": "Drop the new 5-table migration here (e.g. `20260513XXXXXX_topic_editor_phase1.sql`) alongside the existing live-update migrations. Include the trigram extension + `topics_headline_trgm` GIN index. Do NOT touch the existing `live_update_*` tables in this migration.",
+      "functions": [
+        "20260511110349_live_update_environment_split.sql",
+        "20260512185328_live_update_watchlist_lifecycle.sql"
+      ]
+    },
+    {
+      "file_path": "docs/live-editor-watchlist-plan.md",
+      "why": "Prior watchlist plan \u2014 useful prior art on watchlist/observation semantics, prompt failure modes, and reasoning-reliability fixes that the new agent must not regress against.",
+      "functions": []
+    },
+    {
+      "file_path": "docs/live-update-editor-legacy-boundaries.md",
+      "why": "Defines which existing surfaces are legacy/backfill \u2014 confirms the new editor must NOT write to `daily_summaries` or reuse `ChannelSummarizer.generate_summary` as a pipeline.",
+      "functions": []
+    }
+  ],
+  "test_expectations": [
+    {
+      "test_id": "tests/test_live_update_editor_lifecycle.py",
+      "what_it_checks": "Existing lifecycle tests for the current editor pipeline. Phase 1 must not touch the old code path, so these stay green untouched.",
+      "status": "pass_to_pass"
+    },
+    {
+      "test_id": "tests/test_live_update_editor_publishing.py",
+      "what_it_checks": "Existing publishing path tests. Same constraint \u2014 old editor stays intact.",
+      "status": "pass_to_pass"
+    },
+    {
+      "test_id": "tests/test_live_update_prompts.py",
+      "what_it_checks": "Existing prompt/parser tests. Stay green; new agent has its own prompt fixtures.",
+      "status": "pass_to_pass"
+    },
+    {
+      "test_id": "tests/test_topic_canonicalizer.py (new)",
+      "what_it_checks": "Canonicalizer determinism + fuzz harness: feed 50 historical headlines (loaded from live_update_feed_items + recent candidate raw_output), assert (a) idempotence under whitespace/case/article variation, (b) parent/child story-update headlines collide on the same canonical_key prefix or trigger an alias hit, (c) collision rate within doc-stated bounds (<10% override expected). Required by locked decision #1.",
+      "status": "fail_to_pass"
+    },
+    {
+      "test_id": "tests/test_topic_dispatcher_invariants.py (new)",
+      "what_it_checks": "All 4 dispatcher invariants: (1) post_simple_topic rejected when authors>=2 OR len(source_message_ids)>=3 with `rejected_*` row in topic_transitions; (2) write-time collision scan returns existing topic_id+aliases as tool error, AND `override_collisions=[{topic_id, reason}]` accepts the write while logging an `override` audit row; (3) idempotency on Anthropic tool_use_id replays no-ops; (4) (topic_id, message_id) UNIQUE rejects duplicate add, multiple topics for one message accepted (parent+child story update).",
+      "status": "fail_to_pass"
+    },
+    {
+      "test_id": "tests/test_topic_publisher_render.py (new)",
+      "what_it_checks": "Pure `render_topic(topic)`: simple-form produces single message with headline/body/media/jump-link; sectioned produces header + N section messages with per-section media/jump-links; story-update prefixes 'Update:' and links to parent.discord_message_ids[0]; partial-publish recovery path is exercised but not flipped on (publishing remains off in Phase 1).",
+      "status": "fail_to_pass"
+    },
+    {
+      "test_id": "tests/test_shadow_mode_replay.py (new)",
+      "what_it_checks": "Replay runner end-to-end smoke: given a fixture window of source messages, runs the new editor with publishing OFF, asserts topic_transitions rows are written, no Discord network call is attempted, and a trace embed payload is produced containing source-message count, tool-call counts by name, posted/watched/updated/discarded/observation tallies, cost (tokens), latency, and a per-window divergence-vs-today's-editor summary.",
+      "status": "fail_to_pass"
+    },
+    {
+      "test_id": "tests/test_topic_aliases_resolution.py (new)",
+      "what_it_checks": "search_topics returns canonical_key + all `topic_aliases` rows for a topic; dispatcher resolves an agent's `proposed_key` through aliases so a drift-spelled slug maps to the existing topic_id; new aliases of `alias_kind='proposed'` are written on each call. Required by locked decision #3.",
+      "status": "fail_to_pass"
+    }
+  ],
+  "constraints": [
+    "Phase 2 prod cutover is out of scope \u2014 STOP at the shadow-mode Week-1 decision gate. No production publishing path changes, no flipping the live editor to the new system, no renaming old tables to _legacy_*.",
+    "Publishing must be OFF for the new editor end-to-end. The new code path must not call any Discord `channel.send` against the live feed channel. Trace/preview embeds go ONLY to #main_test (configured via env var, default to a new DEV_SHADOW_TRACE_CHANNEL_ID).",
+    "Do not modify, dual-write to, or read for decisions from the existing live_update_* tables. The new editor writes ONLY to the 5 new tables.",
+    "Do not modify the existing `LiveUpdateEditor` class, `LiveUpdateCandidateGenerator`, or `ClaudeClient.generate_chat_completion`. The old run path must remain bit-for-bit identical so the replay runner can diff against today's editor on the same windows.",
+    "Resolve all five locked decisions in writing (a short markdown doc beside the redesign \u2014 `docs/live-update-editor-phase1-locked-decisions.md`) BEFORE any code lands. Include the defer-audit query results against live `live_update_candidates`. Plan must reference this doc as a Day-0 deliverable.",
+    "Schema-level v6 corrections are mandatory: topic_transitions carries environment + guild_id (denormalized) and allows topic_id NULL; topic_sources UNIQUE is (topic_id, message_id) only; topics has publication_status/publication_error/discord_message_ids/publication_attempts/last_published_at folded in.",
+    "Dispatcher invariant #2 (collision override) is non-negotiable \u2014 all three write tools (post_simple_topic, post_sectioned_topic, watch_topic) accept `override_collisions: list[{topic_id, reason}]` and log every override to topic_transitions.",
+    "Every dispatcher rejection (schema, collision, idempotency, source uniqueness) writes a `rejected_*` row to topic_transitions with topic_id=NULL for failed creates \u2014 observability is a hard requirement, not optional.",
+    "Anthropic `tool_use_id` is the idempotency key \u2014 do not invent a parallel UUID for replay protection.",
+    "Trace embed in #main_test MUST surface: source-message count, tool calls fired (by name), topics posted/watched/updated/discarded, near-miss observations, cost (tokens / $), latency, and divergence vs today's editor's decision on the same window. Override rate and record_observation rate must be visible per-run for the trip-wires.",
+    "Stay inside the ~800-1000 LOC budget cited in the doc; if the implementation grows past 1500 LOC, raise scope alarm \u2014 that's a sign of Phase-1.5 creep (run-lease, partial-publish retry, polishing) being smuggled in.",
+    "Do not commit to the unrealistic '3-day migration' from v1 \u2014 Phase 1 is one focused week as a vertical slice, not a polished drop-in replacement."
+  ],
+  "primary_criterion": "A runnable shadow-mode dev system in which the locked-decisions doc is committed first, then the 5-table migration is applied to dev, the new native-tool-use editor + dispatcher (with all 4 v6 invariants including the override path) + pure publisher render path are in place, the replay runner can dispatch 20+ historical source-message windows through it with publishing OFF, and trace embeds posted to #main_test let POM compare the new agent's calls against today's editor's calls \u2014 closing the week with a yes/no answer to \"would I let this publish to prod?\"",
+  "suggested_approach": "Sequence:\n\n1) Day 0 (no code): Run the defer-audit SQL against live `live_update_candidates` for the last 30 days (count of `decision='defer'` rows + POM's post-hoc treatment). Publish `docs/live-update-editor-phase1-locked-decisions.md` resolving all five locked decisions from doc \u00a7\"Five decisions to lock before starting\": (1) canonicalizer rule + 50-headline fuzz fixture, (2) editorial_observations retention (~3/run agent-discretion, 30d retention) + sampling, (3) collision similarity threshold (canonical-key-prefix OR trigram(headline)\u22650.55 AND author_overlap\u22651) + override semantics, (4) confirm single-table rejected-call logging on `topic_transitions`, (5) decide whether `state='pending_review'` + `request_review_topic` ships in Day-1 schema or v2.\n\n2) Day 1 \u2014 schema + write the canonicalizer first: land the 5-table migration in `.migrations_staging/20260513XXXXXX_topic_editor_phase1.sql` (DDL verbatim from v6 doc, including the gin_trgm index, the env+guild_id columns on topic_transitions, the nullable topic_id, and the (topic_id, message_id)-only UNIQUE on topic_sources). Build `src/features/summarising/topic_canonicalizer.py` with the fuzz test against 50 historical headlines (locked-decision #1). Backfill `topics`+`topic_sources` from existing `live_update_feed_items` and (if unblocked) `live_update_watchlist` \u2014 backfill only, no dual-write afterward.\n\n3) Day 2 \u2014 native tool-use editor scaffold in a new module `src/features/summarising/topic_editor.py`. Do NOT touch `live_update_editor.py`. Add a `topic_editor_client.py` (or extend ClaudeClient) supporting `tools=`, `tool_choice`, `tool_use_id` round-trips, extended-thinking blocks. Implement the 4 read tools + 6 decision tools verbatim from doc lines 264-391 (the spec is the contract). Implement the dispatcher with all 4 invariants including the v6 `override_collisions` path; every rejection writes a `topic_transitions` row with `action='rejected_*'`, `topic_id=NULL` for create attempts, and rejection details in `payload`. Use Anthropic `tool_use_id` as the idempotency key on (run_id, tool_call_id).\n\n4) Day 3 \u2014 pure publisher `render_topic(topic)` (no DB, no decisions) and the trace-embed builder. Wire publishing OFF \u2014 render to in-memory `DiscordMessage` objects, post a single preview/trace embed to the channel resolved by a new `DEV_SHADOW_TRACE_CHANNEL_ID` env var (default `#main_test` semantics). The trace embed includes all fields the doc specifies (source-message count, tool calls fired, topics posted/watched/updated/discarded, near-miss observations, cost, latency, and per-topic divergence vs today's editor on the same window). Override rate + observation rate get their own embed lines so the trip-wires are visible.\n\n5) Days 4-5 \u2014 replay runner `scripts/run_live_update_shadow.py`: loads \u226520 historical source-message windows from the prod archive (filtered to recent runs of today's editor so the comparison is grounded), constructs an in-memory dev environment context (current watching topics, recent posted topics for `search_topics` priming), dispatches each window at the new editor with publishing off, and posts one trace embed per window plus an aggregate summary embed. Diff against today's editor's recorded decisions for those windows (already in `live_update_candidates` / `live_update_feed_items`). Tune prompt + threshold until divergences are explainable as \"valid different call,\" not \"drift.\" Deliberately roll one window twice through different runs to exercise alias resolution.\n\n6) Week-1 decision gate: POM reviews trace embeds + override-rate / observation-rate metrics and answers \"would I be comfortable letting this publish to prod?\" STOP HERE. Phase 2 is a separate decision and not committed to this week.\n\nRisk callouts:\n- Tool-use client integration is the biggest schedule risk (Codex v5 flagged this). Budget the full Day 2 for it and resist coupling it to broader ClaudeClient refactors.\n- 50-headline fuzz target may be short \u2014 the live `live_update_feed_items` table only has ~18 prod rows. Augment with recent dev candidates' raw_output headlines and recent watchlist titles to reach 50.\n- The defer-audit (locked decision #5) is the only one that can force a Day-1 schema rewrite if pending_review turns out to be load-bearing. Run that query before any DDL ships.\n- Do not promote the new tables out of staging until the decision gate passes. Migration stays in `.migrations_staging/` for Phase 1."
+}

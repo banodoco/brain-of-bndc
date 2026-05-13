@@ -1,0 +1,206 @@
+{
+  "version": 3,
+  "timestamp": "2026-05-13T20:32:55Z",
+  "hash": "sha256:527000ef1812eeeabd62e56b64d98662e27de32e8257390b75938411d3081f54",
+  "changes_summary": "Kept the implementation direction unchanged and resolved the remaining critique by making rejected-call action mapping explicit: only post/watch create-style failures use the locked `rejected_*` actions, while invalid update/discard calls use base-action audit rows with `payload.outcome='tool_error'` and no invented rejected action names.",
+  "flags_addressed": [
+    "FLAG-006",
+    "correctness"
+  ],
+  "questions": [
+    "What is the exact Supabase deployment path for migrations in this workspace now: copy staged SQL into `/Users/peteromalley/Documents/banodoco-workspace/supabase/migrations/` and run `supabase db push`, or use a different project/link command?",
+    "Which concrete Discord channel should receive the trace embed in prod, and should it be the same channel as `#daily-updates` or a separate operator/debug channel?",
+    "For the one prod sanity replay, is it acceptable to write topic rows/transitions with publishing off, or should replay run in a dry-run transaction/fake storage and leave prod topic tables unchanged?",
+    "What exact environment variable names should be used for backend selection and publishing control if existing deployment conventions prefer names other than `LIVE_UPDATE_EDITOR_BACKEND` and `TOPIC_EDITOR_PUBLISHING_ENABLED`?"
+  ],
+  "success_criteria": [
+    {
+      "criterion": "The Phase-1 schema migration creates `topics`, `topic_sources`, `topic_aliases`, `topic_transitions`, `editorial_observations`, `topic_editor_runs`, and `topic_editor_checkpoints` with required uniqueness and indexes.",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "run_shell"
+      ]
+    },
+    {
+      "criterion": "`topic_transitions.action` permits accepted/base actions plus only the locked rejected actions: `rejected_post_simple`, `rejected_post_sectioned`, and `rejected_watch`; no unapproved rejected update/discard actions are introduced.",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "parse_diff",
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "`topic_editor_runs` is the single run lifecycle table for the new editor, and `topic_transitions.run_id` links to new editor run IDs rather than relying on `live_update_editor_runs.metadata.editor`.",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "Concurrent-run protection is scoped to active/running leases only: completed or failed historical runs do not block a later run for the same `(environment, guild_id, live_channel_id)` tuple.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Backfill is idempotent and produces topic counts where posted topics are at least legacy `live_update_feed_items` count and watching topics are at least legacy `live_update_watchlist` count for the target environment, allowing only explained post-backfill deltas.",
+      "priority": "must",
+      "requires": [
+        "run_shell",
+        "observe_runtime_logs"
+      ]
+    },
+    {
+      "criterion": "Every new storage method used by `TopicEditor` has both an async `src/common/storage_handler.py` implementation and a reachable `src/common/db_handler.py` wrapper.",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "parse_diff",
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "`TopicEditor.run_once()` can execute with publishing disabled, consume archived messages from `topic_editor_checkpoints`, write accepted topic state to new tables, and avoid Discord publishing calls.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "observe_runtime_logs"
+      ]
+    },
+    {
+      "criterion": "Post/watch dispatcher failures are logged with the locked rejected action names, while invalid `update_topic_source_messages` and `discard_topic` calls are logged with base actions and `payload.outcome='tool_error'`.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "parse_diff",
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Idempotent replay of the same `(run_id, tool_call_id)` returns the prior result and does not create duplicate accepted or rejected transitions.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "All four dispatcher invariants are covered by tests: simple-post structural rejection, collision rejection/override, `(run_id, tool_call_id)` idempotency, and `(topic_id, message_id)` source uniqueness.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "`render_topic()` is pure and has tests for simple, sectioned, story-update, and partial-publish failure/update behavior.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "Scheduled runs, startup `--summary-now`, and owner `summarynow` route to the new topic editor by default, while the active-editor constructor injection seam remains usable by tests and rollback wiring.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "Legacy `live_update_editor.py` and `live_update_prompts.py` are not materially modified except for invocation suppression or explicit legacy compatibility marking.",
+      "priority": "must",
+      "requires": [
+        "parse_diff",
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Admin chat live-update status and health checks report primary state from `topic_editor_runs`, `topics`, and `topic_transitions`, with legacy tables clearly labeled as rollback state.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "parse_diff",
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "`docs/live-update-editor-phase-2-runbook.md` no longer requires the stale Phase-1 soak/gate or 20-window replay for this sprint and uses `topic_editor_runs` for new-editor verification.",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "Existing legacy live-update tests either pass unchanged or are clearly marked/updated as legacy compatibility tests without deleting rollback coverage.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "A publishing-off sanity replay over the latest prod source-message window completes and produces a trace showing source count, tool calls, outcomes, rejections/overrides, latency, and would-publish messages.",
+      "priority": "must",
+      "requires": [
+        "run_shell",
+        "observe_runtime_logs"
+      ]
+    },
+    {
+      "criterion": "Publishing flip has a documented rollback that mirrors the new checkpoint back to `live_update_checkpoints.last_message_id` before re-enabling legacy invocation.",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "The new editor code remains organized around deterministic helpers for canonicalization, dispatch, lease lifecycle, and rendering rather than burying those behaviors in the LLM prompt.",
+      "priority": "should",
+      "requires": [
+        "read_files",
+        "subjective_judgment"
+      ]
+    },
+    {
+      "criterion": "Cost/latency metadata is recorded per topic-editor run so post-flip regressions are visible without log scraping.",
+      "priority": "should",
+      "requires": [
+        "read_files",
+        "observe_runtime_logs"
+      ]
+    },
+    {
+      "criterion": "Operator-only runbook values are filled before prod cutover: publishing toggle, bot identities, trace channel, and rollback backend selector.",
+      "priority": "info",
+      "requires": [
+        "verify_physical_device"
+      ]
+    }
+  ],
+  "assumptions": [
+    "The locked decisions in `docs/live-update-editor-sprint-plan.md` supersede the older runbook's week-long shadow-mode gate, 20-window replay requirement, defer audit, and separate Phase-2 decision timeline.",
+    "The new editor owns a dedicated `topic_editor_runs` table and does not write new-editor run rows to `live_update_editor_runs`; legacy run rows remain for rollback visibility.",
+    "The new checkpoint owner is a separate `topic_editor_checkpoints` table.",
+    "Concurrent-run protection is implemented through active-row lease semantics on `topic_editor_runs`: completed/failed rows do not block future runs, and stale running rows are expired before acquire.",
+    "The locked rejected-call schema means only `rejected_post_simple`, `rejected_post_sectioned`, and `rejected_watch` are valid rejected action names.",
+    "Invalid `update_topic_source_messages` and `discard_topic` calls are audited under base actions (`update_sources` and `discard`) with `payload.outcome='tool_error'`, not as new rejected action names.",
+    "Idempotent replay of a tool call returns the prior recorded result and must not create duplicate rejected transitions.",
+    "The new implementation should live primarily in `src/features/summarising/topic_editor.py`, with optional small companion modules only if tests or readability justify them.",
+    "The existing `src/common/llm/claude_client.py` exposes the underlying Anthropic async client, so native tool-use can be implemented without a broad LLM wrapper refactor.",
+    "The active editor keeps the existing `db_handler` dependency shape, so every new storage helper needed by `TopicEditor` must have a matching `src/common/db_handler.py` wrapper.",
+    "The legacy editor and prompt modules remain rollback implementation details and should not receive the new topic-editor logic.",
+    "Publishing is disabled by default until the explicit prod flip via a concrete toggle such as `TOPIC_EDITOR_PUBLISHING_ENABLED=false`.",
+    "Admin chat and health-check updates are not scope creep because they are required for safe prod operation after the primary status tables change."
+  ],
+  "delta_from_previous_percent": 11.6,
+  "structure_warnings": []
+}

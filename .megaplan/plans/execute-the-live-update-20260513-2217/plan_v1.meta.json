@@ -1,0 +1,136 @@
+{
+  "version": 1,
+  "timestamp": "2026-05-13T20:23:23Z",
+  "hash": "sha256:64df626a75334b379683b70503b5951f82e1e311960a6bd9e2b333d2bde3d535",
+  "questions": [
+    "What is the exact Supabase deployment path for migrations in this workspace now: copy staged SQL into `/Users/peteromalley/Documents/banodoco-workspace/supabase/migrations/` and run `supabase db push`, or use a different project/link command?",
+    "Which concrete Discord channel should receive the trace embed in prod, and should it be the same channel as `#daily-updates` or a separate operator/debug channel?",
+    "Should legacy suppression use scheduler-level routing only, publish-call suppression only, or both with scheduler-level primary routing plus a publisher safety flag?",
+    "What is the preferred publishing toggle name and deployment mechanism: environment variable, DB config row, or existing feature-flag/config pattern?",
+    "For the one prod sanity replay, is it acceptable to write topic rows/transitions with publishing off, or should replay run in a dry-run transaction/fake storage and leave prod topic tables unchanged?"
+  ],
+  "success_criteria": [
+    {
+      "criterion": "The Phase-1 schema migration creates `topics`, `topic_sources`, `topic_aliases`, `topic_transitions`, `editorial_observations`, and the chosen run/checkpoint lease support with required uniqueness and indexes.",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "run_shell"
+      ]
+    },
+    {
+      "criterion": "Backfill is idempotent and produces topic counts where posted topics are at least legacy `live_update_feed_items` count and watching topics are at least legacy `live_update_watchlist` count for the target environment, allowing only explained post-backfill deltas.",
+      "priority": "must",
+      "requires": [
+        "run_shell",
+        "observe_runtime_logs"
+      ]
+    },
+    {
+      "criterion": "`TopicEditor.run_once()` can execute with publishing disabled, consume archived messages from the new checkpoint, write accepted topic state to new tables, and avoid Discord publishing calls.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "observe_runtime_logs"
+      ]
+    },
+    {
+      "criterion": "All four dispatcher invariants are covered by tests: simple-post structural rejection, collision rejection/override, `(run_id, tool_call_id)` idempotency, and `(topic_id, message_id)` source uniqueness.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "Every dispatcher rejection path writes a `topic_transitions` row with the locked `rejected_*` action shape and enough payload to identify the failed tool call and reason.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "`render_topic()` is pure and has tests for simple, sectioned, story-update, and partial-publish failure/update behavior.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "Scheduled runs, startup `--summary-now`, and owner `summarynow` route to the new topic editor by default, while explicitly named legacy/backfill routes remain available for rollback.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "Legacy `live_update_editor.py` and `live_update_prompts.py` are not materially modified except for invocation suppression or explicit legacy compatibility marking.",
+      "priority": "must",
+      "requires": [
+        "parse_diff",
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Existing legacy live-update tests either pass unchanged or are clearly marked/updated as legacy compatibility tests without deleting rollback coverage.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "A publishing-off sanity replay over the latest prod source-message window completes and produces a trace showing source count, tool calls, outcomes, rejections/overrides, latency, and would-publish messages.",
+      "priority": "must",
+      "requires": [
+        "run_shell",
+        "observe_runtime_logs"
+      ]
+    },
+    {
+      "criterion": "Publishing flip has a documented rollback that mirrors the new checkpoint back to `live_update_checkpoints.last_message_id` before re-enabling legacy invocation.",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "The new editor code remains organized around deterministic helpers for canonicalization, dispatch, and rendering rather than burying those behaviors in the LLM prompt.",
+      "priority": "should",
+      "requires": [
+        "read_files",
+        "subjective_judgment"
+      ]
+    },
+    {
+      "criterion": "Cost/latency metadata is recorded per run so post-flip regressions are visible without log scraping.",
+      "priority": "should",
+      "requires": [
+        "read_files",
+        "observe_runtime_logs"
+      ]
+    },
+    {
+      "criterion": "Operator-only runbook values are filled before prod cutover: toggle name, suppression mechanism, bot identities, trace channel, and run-source discriminator.",
+      "priority": "info",
+      "requires": [
+        "verify_physical_device"
+      ]
+    }
+  ],
+  "assumptions": [
+    "The locked decisions in `docs/live-update-editor-sprint-plan.md` supersede the older v6 redesign\u2019s week-long shadow-mode gate, defer audit, and separate Phase-2 timeline.",
+    "The new implementation should live primarily in `src/features/summarising/topic_editor.py`, with optional small companion modules only if tests or readability justify them.",
+    "The existing `src/common/llm/claude_client.py` exposes the underlying Anthropic async client, so native tool-use can be implemented without a broad LLM wrapper refactor.",
+    "The legacy editor and prompt modules remain rollback implementation details and should not receive the new topic-editor logic.",
+    "The migration can use `.migrations_staging/` first, then be copied/applied to the workspace-level Supabase project following the repository\u2019s current staging convention.",
+    "Publishing is disabled by default until the explicit prod flip, even after the new editor is wired as primary.",
+    "A run-source discriminator can be stored in `live_update_editor_runs.metadata` unless the schema migration chooses a dedicated column.",
+    "The checkpoint owner will be a separate `topic_editor_checkpoints` table unless implementation evidence strongly favors a column on `topic_editor_runs`."
+  ],
+  "structure_warnings": []
+}

@@ -1,0 +1,187 @@
+{
+  "checks": [
+    {
+      "id": "issue_hints",
+      "question": "Did the work fully address the issue hints, user notes, and approved plan requirements?",
+      "guidance": "Cross-check the result against explicit user notes, critique corrections, and watch items. Flag anything the implementation ignored, contradicted, or only partially covered.",
+      "findings": [],
+      "prior_findings": [
+        {
+          "detail": "Verified FLAG-001 fix: Step 2.2 introduces a NEW topic_editor_runs table in the migration and Step 8.1 specifies the new editor inserts only there via create_topic_editor_run/finish_topic_editor_run. The 'reuse live_update_editor_runs' fallback from rev 1 is removed. Editor never writes to legacy tables.",
+          "flagged": false,
+          "status": "n/a"
+        },
+        {
+          "detail": "Brief says 'ship the 5-table topic schema'; rev 2 ships 6 tables (5 spec + topic_editor_runs). Defensible expansion to satisfy the 'writes ONLY to new tables' constraint after FLAG-001, but does exceed the literal scope wording. Success criterion updated to 'exactly 6 tables'. Worth surfacing as a deliberate scope expansion rather than implicit drift.",
+          "flagged": true,
+          "status": "addressed"
+        },
+        {
+          "detail": "Defer-audit timing: Step 1.1 runs the audit on Day 0 but Step 2 lands the DDL on Day 1. Plan does not branch Step 2 / Step 7 conditionally on audit outcome. If the audit forces state='pending_review' + request_review_topic per locked-decision #5, the DDL and tool list must include them in this migration, not rev-the-migration mid-week. Plan should add an explicit 'if audit forces pending_review, append state + tool to Step 2/7 before SQL freeze' branch.",
+          "flagged": true,
+          "status": "addressed"
+        },
+        {
+          "detail": "Trip-wire metrics in the trace embed (Step 10.1) now surface override rate (per-run + 7-day rolling via get_topic_transition_rates), observation rate, partial-publish incidents, AND a lease: DEFERRED indicator. Matches all three trip-wires from the brief plus the FLAG-007 disclosure.",
+          "flagged": false,
+          "status": "n/a"
+        },
+        {
+          "detail": "Locked-decisions doc gate (Step 1.3) is unchanged from rev 1 \u2014 still covers all five decisions and is referenced from migration header + editor docstrings.",
+          "flagged": false,
+          "status": "n/a"
+        }
+      ]
+    },
+    {
+      "id": "correctness",
+      "question": "Are the proposed changes technically correct?",
+      "guidance": "Look for logic errors, invalid assumptions, broken invariants, schema mismatches, or behavior that would fail at runtime. When the fix adds a conditional branch, check whether it handles all relevant cases \u2014 not just the one reported in the issue.",
+      "findings": [],
+      "prior_findings": [
+        {
+          "detail": "Verified FLAG-002 fix: Step 2.5 says 'No backfill SQL inside the migration.' Step 4 is a new Python script scripts/backfill_topics_from_feed_items.py that resolves authors via get_live_update_context_for_message_ids and calls the Python canonicalizer. Idempotent on (environment, guild_id, canonical_key). All three sub-issues (canonicalize in Python, derive source_authors via archive join, parse jsonb->bigint in Python) are addressed.",
+          "flagged": false,
+          "status": "n/a"
+        },
+        {
+          "detail": "Verified FLAG-005 fix: Step 7.2 introduces _resolve_authors(source_message_ids) that consults get_live_update_context_for_message_ids for authoritative author resolution before applying invariant #1 and the author-overlap leg of invariant #2. Dispatcher never trusts the agent's tool args for author count.",
+          "flagged": false,
+          "status": "n/a"
+        },
+        {
+          "detail": "Hot-path cost: get_live_update_context_for_message_ids (storage_handler.py:1224-1266) is a heavy accessor that joins discord_messages -> channels -> engagement context -> author profiles, designed for prompt assembly, not the dispatch hot path. Calling it on every post_simple_topic/post_sectioned_topic/watch_topic invocation will add measurable latency and cost vs a lean select author_id from discord_messages where message_id in (...). Plan should add a thin get_message_author_ids accessor for the dispatcher.",
+          "flagged": true,
+          "status": "addressed"
+        },
+        {
+          "detail": "Trigram approximation in fake store: Step 11 uses difflib.SequenceMatcher.ratio as a Python-side stand-in for pg_trgm similarity. The two algorithms produce different scores for the same string pair \u2014 SequenceMatcher uses LCS-style matching while pg_trgm uses character-trigram set intersection. A test threshold tuned at 0.55 against SequenceMatcher may pass tests but diverge from production pg_trgm. Plan should pin a fixture-based oracle (precomputed expected pairs) rather than relying on the stand-in for threshold tuning.",
+          "flagged": true,
+          "status": "addressed"
+        },
+        {
+          "detail": "Step 4.2 inserts topics with state='posted' and publication_status='sent' for the backfill, but the existing live_update_feed_items rows have a status column (storage_handler.py:759 defaults to 'posted') that can be 'pending'/'posted'/'failed'. Backfill must filter to status='posted' AND discord_message_ids non-empty, otherwise non-posted legacy rows enter the new schema with publication_status='sent' inconsistent with reality. Plan does not enumerate the filter.",
+          "flagged": true,
+          "status": "addressed"
+        },
+        {
+          "detail": "Migration Step 2 includes the topic_editor_runs DDL inline; pg_trgm extension + indexes; no SQL backfill. CREATE EXTENSION IF NOT EXISTS pg_trgm remains safe across re-runs.",
+          "flagged": false,
+          "status": "n/a"
+        }
+      ]
+    },
+    {
+      "id": "scope",
+      "question": "Search for related code that handles the same concept. Is the reported issue a symptom of something broader?",
+      "guidance": "Look at how the changed function is used across the codebase. Does the fix only address one caller's scenario while others remain broken? Flag missing required work or out-of-scope edits. A minimal patch is often right, but check whether the underlying problem is bigger than what the issue describes.",
+      "findings": [],
+      "prior_findings": [
+        {
+          "detail": "Verified FLAG-007 fix: Step 8.3 docstring explicitly defers concurrent-run lease to Phase 1.5 against the doc's Phase-1 recommendation (line 684); Step 10.1 surfaces lease: DEFERRED in every trace embed so POM cannot miss the deviation.",
+          "flagged": false,
+          "status": "n/a"
+        },
+        {
+          "detail": "Verified scope-2 fix: Step 7.1 states search_topics is dispatcher-scoped to (environment, guild_id) with no cross-env access on the agent surface. Step 6.3 adds the hard env-scoped read invariant with cross_env=False as the only escape.",
+          "flagged": false,
+          "status": "n/a"
+        },
+        {
+          "detail": "Verified scope-3 fix: Step 7.2 Inv 2 enumerates the similarity-scan read path \u2014 search_topics_by_headline (trigram + alias join) + topic_sources join + authoritative archive authors for author_overlap. The detail that lets the threshold actually be tunable is now in the plan.",
+          "flagged": false,
+          "status": "n/a"
+        },
+        {
+          "detail": "Env-scoping invariant applies to new topic_* tables ONLY. The plan's Step 4 backfill and Step 12 replay runner read from live_update_feed_items / live_update_candidates / discord_messages \u2014 those existing accessors filter by guild_id but not always by environment (storage_handler.py:1238-1250 in get_live_update_context_for_message_ids accepts environment='prod' parameter but does not pass it to the Supabase query). Plan does not clarify the env-scoping boundary, which could confuse executors into adding env filters to legacy accessors and breaking the 'do not modify live_update_*' constraint.",
+          "flagged": true,
+          "status": "addressed"
+        },
+        {
+          "detail": "Brief constraint: 'Do not modify, dual-write to, or read for decisions from the existing live_update_* tables.' Step 12.3 says shadow runner reads live_update_candidates / live_update_feed_items for the divergence-vs-today comparison. This is read-for-comparison (not read-for-decision), which is the spirit of the constraint, but the brief wording is broad. Plan should explicitly state the read is comparison-only and never feeds back into dispatcher state.",
+          "flagged": true,
+          "status": "addressed"
+        }
+      ]
+    },
+    {
+      "id": "all_locations",
+      "question": "Does the change touch all locations AND supporting infrastructure?",
+      "guidance": "Search for all instances of the symbol/pattern being changed. Also ask: does this feature require setup, registration, or integration code beyond the core logic? Missing glue code causes test failures even when the core fix is correct.",
+      "findings": [],
+      "prior_findings": [
+        {
+          "detail": "Verified FLAG-006 fix: Step 6.1 + 6.2 enumerate every db_handler.py accessor AND require a matching storage_handler.py counterpart (DEBT-028 two-layer pattern). List is concrete: create_topic, update_topic_state, get_topic_by_id, get_topic_by_canonical_key, add_topic_sources, add_topic_alias, resolve_topic_by_alias, record_topic_transition, record_editorial_observation, search_topics_by_headline, list_watching_topics, create_topic_editor_run, finish_topic_editor_run, get_topic_transition_rates.",
+          "flagged": false,
+          "status": "n/a"
+        },
+        {
+          "detail": "Verified FLAG-003 fix attempt with caveat: Step 11 introduces tests/fakes/topic_store.py + a topic_store_fake pytest fixture. However, plan calls this 'Small' scope and 'aligned with the existing conftest.py stub pattern' \u2014 the existing pattern (conftest.py:13-39, sys.modules stubs) is shallow: it replaces import surfaces with stateless return-value stubs (return 'yes|approved'). The fake topic store needs stateful behavior \u2014 env-scoped reads, (topic_id, message_id) UNIQUE enforcement, alias resolution by canonical_key, trigram similarity, idempotency on (run_id, tool_call_id), per-run transition logs. That is a medium-scope shim, not aligned with the conftest stub idiom. Plan's framing understates the work.",
+          "flagged": true,
+          "status": "addressed"
+        },
+        {
+          "detail": "Verified all_locations-3 (env-scoped reads): Step 6.3 mandates env-scoped reads on every NEW accessor with cross_env=False escape hatch. Step 7.2 reuses these for the collision scan.",
+          "flagged": false,
+          "status": "n/a"
+        },
+        {
+          "detail": "Verified all_locations-4 (rolling metrics): Step 6.1 adds get_topic_transition_rates(environment, guild_id, window_hours=168) aggregate; Step 10.1 wires it into the trace embed. Supporting infrastructure complete.",
+          "flagged": false,
+          "status": "n/a"
+        },
+        {
+          "detail": "Migration includes the 6th topic_editor_runs table but Step 2.2 schema does not declare a FK from topic_transitions.run_id -> topic_editor_runs.run_id. The dispatcher's idempotency invariant keys on (run_id, tool_call_id) against topic_transitions; without the FK or a documented loose-link, orphan run_ids in transitions are silently allowed, undermining audit-trail integrity.",
+          "flagged": true,
+          "status": "addressed"
+        },
+        {
+          "detail": "Plan does not specify at which seam (DatabaseHandler vs StorageHandler) the tests/fakes/topic_store.py fake intercepts. Since Step 6 mandates the two-layer pattern, the fake must replace the right layer (most likely DatabaseHandler.<accessor> for production parity) or it will subtly diverge from real behavior. Worth a one-line directive.",
+          "flagged": true,
+          "status": "addressed"
+        }
+      ]
+    },
+    {
+      "id": "callers",
+      "question": "Find the callers of the changed function. What arguments do they actually pass? Does the fix handle all of them?",
+      "guidance": "Grep for call sites. For each caller, check what values it passes \u2014 especially edge cases like None, zero, empty, or composite inputs. Then ask: should this change be here, or in a caller, callee, or new method?",
+      "findings": [],
+      "prior_findings": [
+        {
+          "detail": "Verified callers-1 fix: With topic_editor_runs as a dedicated table, no caller of the legacy create_live_update_run is affected. The 'read only / Insert a row' contradiction from rev 1 is gone.",
+          "flagged": false,
+          "status": "n/a"
+        },
+        {
+          "detail": "Verified callers-2 fix: Step 7.2 _resolve_authors uses the archive (get_live_update_context_for_message_ids) authoritatively for invariant #1's author count; agent tool args are never trusted.",
+          "flagged": false,
+          "status": "n/a"
+        },
+        {
+          "detail": "Verified callers-3 fix: Step 3.1 makes source_messages optional with headline-only fallback; Step 4 (Python backfill) resolves messages from the archive before calling canonicalize(). Backfill caller now supplies the correct shape.",
+          "flagged": false,
+          "status": "n/a"
+        },
+        {
+          "detail": "get_live_update_context_for_message_ids is invoked by both the dispatcher's _resolve_authors (Step 7.2) and the backfill script (Step 4). Both callers extract just author_id from the embedded source_message in the heavy source_context dict. Either caller could subtly break if the function's contract changes. A thin get_message_author_ids accessor would make the dependency obvious and decoupled.",
+          "flagged": true,
+          "status": "addressed"
+        },
+        {
+          "detail": "Step 12.3 reads from live_update_candidates and live_update_feed_items for divergence-vs-today. The shadow runner needs environment='prod' for archive source reads AND comparison-decisions reads, while writing topic_* state in environment='dev'. Plan does not explicitly say the runner uses prod for archive vs dev for topic writes \u2014 a real risk of cross-wiring at the call site.",
+          "flagged": true,
+          "status": "addressed"
+        },
+        {
+          "detail": "tests/fakes/topic_store.py is referenced but no caller-by-caller mapping is provided showing which production accessor each fake method satisfies. Without that mapping, the fake is liable to drift from the real interface (signature/return-shape mismatches) once production code lands.",
+          "flagged": true,
+          "status": "addressed"
+        }
+      ]
+    }
+  ],
+  "flags": [],
+  "verified_flag_ids": [],
+  "disputed_flag_ids": []
+}

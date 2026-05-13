@@ -1,0 +1,72 @@
+{
+  "output": "Batch 13 complete. T15 validation passed end to end, including SQL application/remote schema checks, focused tests, legacy compatibility tests, throwaway dispatcher reproduction, publishing-off replay, and full pytest.",
+  "files_changed": [
+    "../supabase/migrations/20260513230500_live_update_topic_editor_phase1.sql",
+    "tests/test_live_top_creations.py",
+    "tests/test_live_update_editor_publishing.py",
+    "tests/test_live_update_prompts.py",
+    ".megaplan/plans/execute-the-live-update-20260513-2217/execution_batch_13.json"
+  ],
+  "commands_run": [
+    "rg -n '^(SUPABASE_URL|SUPABASE_SERVICE_KEY|LIVE_UPDATE_TRACE_CHANNEL_ID|TOPIC_EDITOR_PUBLISHING_ENABLED|LIVE_UPDATE_EDITOR_BACKEND|DISCORD_TOKEN)=' .env .env.example",
+    "supabase projects list && supabase migration list --linked | tail -30",
+    "python structural required/forbidden SQL check for .migrations_staging/20260513230500_live_update_topic_editor_phase1.sql",
+    "cp .migrations_staging/20260513230500_live_update_topic_editor_phase1.sql ../supabase/migrations/20260513230500_live_update_topic_editor_phase1.sql && supabase migration up --linked",
+    "curl Supabase REST select for topics/topic_sources/topic_aliases/topic_transitions/editorial_observations/topic_editor_runs/topic_editor_checkpoints returned HTTP 200",
+    "python -m py_compile src/features/summarising/topic_editor.py scripts/backfill_live_update_topics.py scripts/run_live_update_dev.py src/common/storage_handler.py src/common/db_handler.py src/features/summarising/summariser_cog.py src/features/admin_chat/tools.py src/features/admin_chat/agent.py src/features/health/health_check_cog.py",
+    "pytest --tb=short -q --no-header tests/test_topic_editor_runtime.py tests/test_topic_editor_core.py tests/test_backfill_live_update_topics.py tests/test_live_storage_wrappers.py tests/test_live_runtime_wiring.py tests/test_live_admin_health.py",
+    "pytest --tb=short -q --no-header tests/test_live_top_creations.py tests/test_live_update_editor_publishing.py tests/test_live_update_prompts.py tests/test_live_update_editor_lifecycle.py",
+    "python tmp_topic_editor_dispatch_repro.py",
+    "TOPIC_EDITOR_PUBLISHING_ENABLED=false python scripts/run_live_update_dev.py --topic-editor-replay-prod --source-limit 20",
+    "git diff --check -- topic-editor/live-update validation paths",
+    "python production SQL/action-vocabulary forbidden-token check",
+    "supabase migration list --linked | rg '20260512185328|20260513230500'",
+    "pytest --tb=no -q --no-header",
+    "python -m json.tool .megaplan/plans/execute-the-live-update-20260513-2217/execution_batch_13.json >/dev/null"
+  ],
+  "deviations": [
+    "Advisory quality: tests/test_live_update_editor_publishing.py has similar functions get_live_update_editorial_memory and get_live_update_watchlist (100% similarity).",
+    "Advisory quality: tests/test_live_update_editor_publishing.py has similar functions get_archived_messages_after_checkpoint and get_archived_messages_after_checkpoint (100% similarity).",
+    "Advisory quality: tests/test_live_update_prompts.py has similar functions generate_chat_completion and generate_chat_completion (100% similarity).",
+    "Advisory observation mismatch: executor claimed files not observed in git status/content hash delta: ../supabase/migrations/20260513230500_live_update_topic_editor_phase1.sql, .megaplan/plans/execute-the-live-update-20260513-2217/execution_batch_13.json",
+    "Advisory audit finding: Executor claimed changed files not present in git status: ../supabase/migrations/20260512185328_live_update_watchlist_lifecycle.sql, ../supabase/migrations/20260513230500_live_update_topic_editor_phase1.sql, .migrations_staging/20260513230500_live_update_topic_editor_phase1.sql, .migrations_staging/README.md",
+    "Advisory audit finding: Git status shows changed files not claimed by any task: .claude/scheduled_tasks.lock, .megaplan/briefs/, .megaplan/debt.json, .megaplan/plans/build-phase-1-of-the-live-20260513-1821/, .megaplan/plans/build-phase-1-of-the-live-20260513-1822/, .megaplan/plans/execute-the-live-update-20260513-2216/, .megaplan/plans/implement-the-watchlist-20260512-1809/, .megaplan/plans/live-update-environment-split/, .megaplan/plans/produce-the-phase-2-prod-20260513-1821/, .megaplan/plans/produce-the-phase-2-prod-20260513-1822/, .megaplan/schemas/directors_notes.json, .megaplan/schemas/execution_doc.json, .megaplan/schemas/feedback.json, .megaplan/schemas/finalize.json, .megaplan/schemas/review.json, .megaplan/schemas/revise.json, docs/debug-utility-validation.md, docs/live-editor-watchlist-plan.md, docs/live-update-editor-legacy-boundaries.md, docs/live-update-editor-redesign.md, docs/live-update-editor-sprint-plan.md, main.py, scripts/backfill_guild_ids.py, scripts/debug.py, scripts/debug_live_editor_audit.py, scripts/discord_tools.py, scripts/inspect_editor_reasoning.py, scripts/send_social_picks.py, src/features/admin/admin_cog.py, src/features/archive/archive_cog.py, src/features/gating/intro_embed.py, src/features/summarising/live_top_creations.py, src/features/summarising/live_update_editor.py, src/features/summarising/live_update_prompts.py, src/features/summarising/summariser.py, structure.md, tests/test_live_update_editor_lifecycle.py, tests/test_social_route_tools.py"
+  ],
+  "task_updates": [
+    {
+      "task_id": "T15",
+      "status": "done",
+      "executor_notes": "Verified U1/U2 prerequisites before validation: Supabase CLI remains linked to Banodoco `ujlwuvkrxlvoswwkerdf`; `.env`/`.env.example` contain `LIVE_UPDATE_TRACE_CHANNEL_ID=1316024582041243668`, `TOPIC_EDITOR_PUBLISHING_ENABLED=false`, and `LIVE_UPDATE_EDITOR_BACKEND=legacy`. SQL validation passed: structural SQL check found all required topic-editor tables/fragments and no forbidden rejected update/discard actions; copied `.migrations_staging/20260513230500_live_update_topic_editor_phase1.sql` into `../supabase/migrations/`, applied it with `supabase migration up --linked`, verified remote migration history includes `20260513230500`, and verified REST 200 responses for `topics`, `topic_sources`, `topic_aliases`, `topic_transitions`, `editorial_observations`, `topic_editor_runs`, and `topic_editor_checkpoints`. Focused topic-editor/storage/runtime/admin-health tests passed: 37 passed. Legacy compatibility tests passed after fixing test isolation/current-prompt assertions: 43 passed. The throwaway dispatcher reproduction script verified idempotent replay, duplicate source dedupe, and base-action `tool_error` vocabulary with no `rejected_update_sources`/`rejected_discard`, then was deleted. Publishing-off replay succeeded with `TOPIC_EDITOR_PUBLISHING_ENABLED=false python scripts/run_live_update_dev.py --topic-editor-replay-prod --source-limit 20`: completed run `13ba6483-a33a-4476-bca6-6d50799f5cfa`, 20 sources, 4 read tool calls, publishing OFF, published=0, failed_publish=0, no would-publish messages. Full suite passed: 341 passed, 19 skipped.",
+      "files_changed": [
+        "../supabase/migrations/20260513230500_live_update_topic_editor_phase1.sql",
+        "tests/test_live_top_creations.py",
+        "tests/test_live_update_editor_publishing.py",
+        "tests/test_live_update_prompts.py",
+        ".megaplan/plans/execute-the-live-update-20260513-2217/execution_batch_13.json"
+      ],
+      "commands_run": [
+        "rg -n '^(SUPABASE_URL|SUPABASE_SERVICE_KEY|LIVE_UPDATE_TRACE_CHANNEL_ID|TOPIC_EDITOR_PUBLISHING_ENABLED|LIVE_UPDATE_EDITOR_BACKEND|DISCORD_TOKEN)=' .env .env.example",
+        "supabase projects list && supabase migration list --linked | tail -30",
+        "python structural required/forbidden SQL check for .migrations_staging/20260513230500_live_update_topic_editor_phase1.sql",
+        "cp .migrations_staging/20260513230500_live_update_topic_editor_phase1.sql ../supabase/migrations/20260513230500_live_update_topic_editor_phase1.sql && supabase migration up --linked",
+        "curl Supabase REST select for topics/topic_sources/topic_aliases/topic_transitions/editorial_observations/topic_editor_runs/topic_editor_checkpoints returned HTTP 200",
+        "python -m py_compile src/features/summarising/topic_editor.py scripts/backfill_live_update_topics.py scripts/run_live_update_dev.py src/common/storage_handler.py src/common/db_handler.py src/features/summarising/summariser_cog.py src/features/admin_chat/tools.py src/features/admin_chat/agent.py src/features/health/health_check_cog.py",
+        "pytest --tb=short -q --no-header tests/test_topic_editor_runtime.py tests/test_topic_editor_core.py tests/test_backfill_live_update_topics.py tests/test_live_storage_wrappers.py tests/test_live_runtime_wiring.py tests/test_live_admin_health.py",
+        "pytest --tb=short -q --no-header tests/test_live_top_creations.py tests/test_live_update_editor_publishing.py tests/test_live_update_prompts.py tests/test_live_update_editor_lifecycle.py",
+        "python tmp_topic_editor_dispatch_repro.py",
+        "TOPIC_EDITOR_PUBLISHING_ENABLED=false python scripts/run_live_update_dev.py --topic-editor-replay-prod --source-limit 20",
+        "git diff --check -- topic-editor/live-update validation paths",
+        "python production SQL/action-vocabulary forbidden-token check",
+        "supabase migration list --linked | rg '20260512185328|20260513230500'",
+        "pytest --tb=no -q --no-header"
+      ],
+      "auto_attributed_files": null
+    }
+  ],
+  "sense_check_acknowledgments": [
+    {
+      "sense_check_id": "SC15",
+      "executor_note": "Yes. SQL validation, remote schema checks, focused topic-editor pytest, legacy compatibility pytest, admin/health coverage, the throwaway dispatcher/idempotency/action-vocabulary reproduction, publishing-off replay, diff checks, and the full suite all passed. Publishing stayed disabled throughout validation."
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+The `finalize_output.json` has been written and validated. Here's a summary of what it contains:
+
+**13 tasks** covering the complete execution:
+| ID | Kind | Description |
+|---|---|---|
+| T1 | code | Migration SQL with 5 new columns + backfill |
+| T2 | code | `db_handler.py` — insert/update/get watchlist with consolidation |
+| T3 | code | `storage_handler.py` — new lifecycle columns + Supabase methods |
+| T4 | code | Tool definitions in `available_tools` + dispatch in `_run_editor_tool` |
+| T5 | code | Fix watchlist rendering — `subject_type`/`notes`, state-grouped |
+| T6 | code | Remove publish cap — code + prompt rewrites |
+| T7 | code | Lower editorial bar — new thresholds, quiet-hour, last-call |
+| T8 | code | Persist `raw_text` on every run |
+| T9 | code | REASONING prefix prompt + parser 5-branch fallback chain |
+| T10 | code | Audit script — recovery path distribution + watchlist summary |
+| T11 | test | Lifecycle + tool dispatch tests |
+| T12 | test | Parser fallback (6 cases) + bar-relaxation tests |
+| T13 | test | Run full test suite, verify no regressions |
+
+**3 user actions:** Supabase credentials (U1), migration apply (U2), 24h dev soak (U3)
+
+**14 watch items** tracking every critique flag and settled decision from the gate analysis, plus **13 sense checks** mapped 1:1 to tasks for reviewer verification. The `meta_commentary` includes precise execution ordering and 10 critical gotchas covering the `int(None)` fix, TTL cleanup pattern, active-cap spanning, dual dispatch locations, caller threading, and reasoning recovery handoff.

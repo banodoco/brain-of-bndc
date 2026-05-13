@@ -1,0 +1,598 @@
+{
+  "tasks": [
+    {
+      "id": "T16",
+      "description": "Read user_actions.md. For each before_execute action, programmatically verify completion using bash tools \u2014 grep .env for required keys, query the migrations table, curl the dev server, etc. Reading the file does NOT count as verification; you must run a command. For actions that genuinely cannot be verified mechanically (manual UI checks), explicitly ask the user. If anything is incomplete or unverifiable, mark this task blocked with reason and STOP.",
+      "depends_on": [],
+      "status": "pending",
+      "executor_notes": "",
+      "files_changed": [],
+      "commands_run": [],
+      "evidence_files": [],
+      "reviewer_verdict": ""
+    },
+    {
+      "id": "T1",
+      "description": "Phase 0 \u2014 Write docs/live-update-editor-phase1-locked-decisions.md resolving all 5 locked decisions: (1) canonicalizer rule, (2) editorial_observations retention (~3/run agent-discretion, 30d retention) + sampling, (3) collision similarity threshold (canonical-key-prefix OR pg_trgm \u2265 0.55 AND author_overlap \u2265 1) + override semantics, (4) confirm single-table rejected logging on topic_transitions, (5) record defer-audit outcome and ship-Day-1-or-v2 decision for pending_review. Also document the implementer judgment calls from the gate warnings: lean accessor missing message_id \u2192 tool-error; duplicate dedupe; null author counts as phantom distinct author; create_topic_editor_run failure aborts run_once loudly; borderline 3-5/week defer volume defaults to v2 unless POM intervenes. Depends on U1 (defer-audit SQL) and U2 (pg_trgm fixture). After U1, build tests/fixtures/historical_headlines.json (50 headlines from live_update_feed_items + recent live_update_candidates.raw_output + recent watchlist titles).",
+      "depends_on": [
+        "T16"
+      ],
+      "status": "pending",
+      "kind": "docs",
+      "executor_notes": "",
+      "files_changed": [],
+      "commands_run": [],
+      "auto_attributed_files": null,
+      "evidence_files": [],
+      "reviewer_verdict": "",
+      "stance": null,
+      "stop_signal": null
+    },
+    {
+      "id": "T2",
+      "description": "Phase 1 Step 2 \u2014 Write the schema migration at .migrations_staging/20260513XXXXXX_topic_editor_phase1.sql. DDL for 6 tables (5 spec + topic_editor_runs): topics (with publication_status, publication_error, discord_message_ids, publication_attempts, last_published_at folded in), topic_sources (UNIQUE (topic_id, message_id) only), topic_aliases, topic_transitions (environment + guild_id columns, topic_id NULLABLE, run_id NOT NULL REFERENCES topic_editor_runs(run_id) ON DELETE RESTRICT), editorial_observations, topic_editor_runs (run_id uuid PK, environment, guild_id, live_channel_id NULL, model, started_at, finished_at, tokens_in, tokens_out, latency_ms, status, notes jsonb). Include CREATE EXTENSION IF NOT EXISTS pg_trgm + topics_headline_trgm GIN index + all spec indexes. NO backfill SQL. If T1's defer-audit shows \u22655/week acted-upon defers, document state='pending_review' as a valid value in migration comment (no DB-side enum). MUST NOT touch any live_update_* table.",
+      "depends_on": [
+        "T16",
+        "T1"
+      ],
+      "status": "pending",
+      "kind": "code",
+      "executor_notes": "",
+      "files_changed": [],
+      "commands_run": [],
+      "auto_attributed_files": null,
+      "evidence_files": [],
+      "reviewer_verdict": "",
+      "stance": null,
+      "stop_signal": null
+    },
+    {
+      "id": "T3",
+      "description": "Phase 1 Step 3 \u2014 Implement src/features/summarising/topic_canonicalizer.py with two pure functions: canonicalize(proposed_key, headline, source_messages=None) -> str and similarity_score(headline_a, headline_b, authors_a, authors_b, trigram_similarity) -> dict (author_overlap computed; trigram passed in from caller). Write tests/test_topic_canonicalizer.py exercising determinism/idempotence on tests/fixtures/historical_headlines.json (parent/child collide on canonical_key prefix, whitespace/case/article variance idempotent). Write tests/test_topic_similarity_oracle.py asserting dispatcher match/no-match decision at threshold 0.55 equals expected_match_at_0_55 for every row in tests/fixtures/similarity_pairs.json. Add a conftest guardrail asserting every pair used in threshold-tuning tests appears in similarity_pairs.json (so difflib fallback in the fake store cannot leak back into threshold tests).",
+      "depends_on": [
+        "T16",
+        "T1"
+      ],
+      "status": "pending",
+      "kind": "code",
+      "executor_notes": "",
+      "files_changed": [],
+      "commands_run": [],
+      "auto_attributed_files": null,
+      "evidence_files": [],
+      "reviewer_verdict": "",
+      "stance": null,
+      "stop_signal": null
+    },
+    {
+      "id": "T4",
+      "description": "Phase 1 Step 4 \u2014 Write scripts/backfill_topics_from_feed_items.py as one-shot post-migration Python script. Pulls live_update_feed_items filtered to status='posted' AND len(discord_message_ids) > 0. For each row: parse JSONB source_message_ids, resolve authors via the NEW lean get_message_author_ids (NOT the heavy context accessor), call topic_canonicalizer.canonicalize, insert topics (state='posted', publication_status='sent', discord_message_ids populated), then topic_sources rows. Idempotent on (environment, guild_id, canonical_key). Run flag --dry-run for preview. Dev-only. Note: this script depends on T6 for get_message_author_ids \u2014 order accordingly.",
+      "depends_on": [
+        "T16",
+        "T2",
+        "T3",
+        "T6"
+      ],
+      "status": "pending",
+      "kind": "code",
+      "executor_notes": "",
+      "files_changed": [],
+      "commands_run": [],
+      "auto_attributed_files": null,
+      "evidence_files": [],
+      "reviewer_verdict": "",
+      "stance": null,
+      "stop_signal": null
+    },
+    {
+      "id": "T5",
+      "description": "Phase 2 Step 5 \u2014 Add src/common/llm/topic_editor_client.py as a sibling client to ClaudeClient. DO NOT modify claude_client.py. Wraps anthropic messages.create with tools=, tool_choice='auto', multi-turn tool-result loops, extended-thinking blocks, surfacing tool_use_id. Expose run_tool_loop(system_prompt, user_msg, tools, dispatcher, max_turns=12) -> RunTrace (transport-only; dispatcher is injected). RunTrace dataclass captures tool calls, tokens_in/out, latency_ms, raw turns.",
+      "depends_on": [
+        "T16"
+      ],
+      "status": "pending",
+      "kind": "code",
+      "executor_notes": "",
+      "files_changed": [],
+      "commands_run": [],
+      "auto_attributed_files": null,
+      "evidence_files": [],
+      "reviewer_verdict": "",
+      "stance": null,
+      "stop_signal": null
+    },
+    {
+      "id": "T6",
+      "description": "Phase 2 Step 6 \u2014 Add new accessors in src/common/db_handler.py (async-in-thread) each with a matching src/common/storage_handler.py payload-builder (DEBT-028 two-layer pattern): create_topic, update_topic_state, get_topic_by_id, get_topic_by_canonical_key, add_topic_sources (handles (topic_id, message_id) UNIQUE), add_topic_alias, resolve_topic_by_alias, record_topic_transition (validates run_id exists in topic_editor_runs; topic_id NULLABLE for rejected creates), record_editorial_observation, search_topics_by_headline (trigram+alias join returning rows + trigram score), list_watching_topics, create_topic_editor_run, finish_topic_editor_run, get_topic_transition_rates(environment, guild_id, window_hours=168), AND the lean get_message_author_ids(message_ids: list[int]) -> dict[int, int] backed by `SELECT message_id, author_id FROM discord_messages WHERE message_id = ANY($1)`. Lean accessor docstring: missing message_id \u2192 caller responsibility to detect and treat as tool-error; duplicates deduped at caller; author_id NULL counts as phantom distinct author. Every NEW topic_* read accessor filters by (environment, guild_id) mandatorily with cross_env: bool = False escape hatch. DO NOT modify any existing live_update_* accessor.",
+      "depends_on": [
+        "T16",
+        "T2"
+      ],
+      "status": "pending",
+      "kind": "code",
+      "executor_notes": "",
+      "files_changed": [],
+      "commands_run": [],
+      "auto_attributed_files": null,
+      "evidence_files": [],
+      "reviewer_verdict": "",
+      "stance": null,
+      "stop_signal": null
+    },
+    {
+      "id": "T7",
+      "description": "Phase 2 Step 7 \u2014 Implement src/features/summarising/topic_tools.py with the 10 Anthropic tool schemas verbatim from docs/live-update-editor-redesign.md:264-391 (search_topics, search_messages, get_author_profile, get_message_context, post_simple_topic, post_sectioned_topic, watch_topic, update_topic_source_messages, discard_topic, record_observation). Write tools accept override_collisions: list[{topic_id, reason}]. search_topics is env-scoped at the dispatcher layer. If T1's defer-audit forced pending_review, add an 11th tool request_review_topic. Implement src/features/summarising/topic_dispatcher.py with TopicDispatcher.dispatch(tool_name, tool_use_id, args, run_ctx) enforcing all 4 invariants: Inv 1 structural (authoritative distinct_authors via _resolve_authors \u2192 get_message_author_ids; \u22652 distinct authors OR \u22653 source_message_ids \u2192 reject post_simple_topic, write topic_transitions row with topic_id=NULL action='rejected_post_simple'); Inv 2 collision+override (canonicalize \u2192 search_topics_by_headline returns rows+trigram; compute author_overlap; match at canonical-key-prefix OR (trigram\u22650.55 AND author_overlap\u22651); reject if matched topic_id not in override_collisions, action='rejected_*'; if override present, accept write + log action='override' per matched topic_id with reason in payload); Inv 3 idempotency (check (run_id, tool_call_id) first); Inv 4 source uniqueness (rely on (topic_id, message_id) UNIQUE; on conflict log rejected_*). Missing message_id in author lookup \u2192 tool-error.",
+      "depends_on": [
+        "T16",
+        "T6"
+      ],
+      "status": "pending",
+      "kind": "code",
+      "executor_notes": "",
+      "files_changed": [],
+      "commands_run": [],
+      "auto_attributed_files": null,
+      "evidence_files": [],
+      "reviewer_verdict": "",
+      "stance": null,
+      "stop_signal": null
+    },
+    {
+      "id": "T8",
+      "description": "Phase 2 Step 8 \u2014 Implement src/features/summarising/topic_editor.py with TopicEditor.run_once(window, environment, guild_id): insert a topic_editor_runs row via create_topic_editor_run FIRST (if that insert fails, abort run_once loudly with raised exception \u2014 do NOT swallow); assemble context (new source messages, list_watching_topics env-scoped, recently-posted topics); call topic_editor_client.run_tool_loop with TopicDispatcher; close via finish_topic_editor_run; return a RunTrace. Implement src/features/summarising/topic_editor_prompt.py \u2014 system prompt covering editorial taste from _meets_editorial_bar (live_update_prompts.py:903), cap record_observation ~3/run, mention request_review_topic only if T1 fired the pending_review branch. Note: concurrent-run lease deferred to Phase 1.5; trace embed surfaces 'lease: DEFERRED'.",
+      "depends_on": [
+        "T16",
+        "T5",
+        "T7"
+      ],
+      "status": "pending",
+      "kind": "code",
+      "executor_notes": "",
+      "files_changed": [],
+      "commands_run": [],
+      "auto_attributed_files": null,
+      "evidence_files": [],
+      "reviewer_verdict": "",
+      "stance": null,
+      "stop_signal": null
+    },
+    {
+      "id": "T9",
+      "description": "Phase 3 Step 9 \u2014 Implement src/features/summarising/topic_publisher.py with pure render_topic(topic) -> list[RenderedMessage]. No DB, no Discord network. Forms: simple (single message with headline/body/media/jump-link), sectioned (header + N section messages with per-section media/jump-links), story-update (prefix 'Update:' + parent.discord_message_ids[0] link), partial-publish recovery path (exercised but not flipped on \u2014 publishing remains OFF in Phase 1). Write tests/test_topic_publisher_render.py covering all four forms; asserts no DB/Discord calls.",
+      "depends_on": [
+        "T16"
+      ],
+      "status": "pending",
+      "kind": "code",
+      "executor_notes": "",
+      "files_changed": [],
+      "commands_run": [],
+      "auto_attributed_files": null,
+      "evidence_files": [],
+      "reviewer_verdict": "",
+      "stance": null,
+      "stop_signal": null
+    },
+    {
+      "id": "T10",
+      "description": "Phase 3 Step 10 \u2014 Implement src/features/summarising/topic_trace_embed.py with build_trace_embed(run_trace, divergence, rolling_rates) returning a Discord embed payload containing: archive-env / topic-env header, source-message count, tool calls fired by name, topics posted/watched/updated/discarded counts, near-miss observations count, cost (tokens_in/out + estimated $), latency_ms, per-run override-rate, 7-day rolling override-rate (via get_topic_transition_rates), record_observation rate (per-run + rolling), partial-publish incidents, lease: DEFERRED indicator, per-window divergence-vs-today summary. Resolve trace channel via NEW env var DEV_SHADOW_TRACE_CHANNEL_ID (unset \u2192 log-only, no send).",
+      "depends_on": [
+        "T16",
+        "T6",
+        "T8"
+      ],
+      "status": "pending",
+      "kind": "code",
+      "executor_notes": "",
+      "files_changed": [],
+      "commands_run": [],
+      "auto_attributed_files": null,
+      "evidence_files": [],
+      "reviewer_verdict": "",
+      "stance": null,
+      "stop_signal": null
+    },
+    {
+      "id": "T11",
+      "description": "Phase 4 Step 11 \u2014 Build tests/fakes/topic_store.py as a stateful in-memory fake intercepting at the DatabaseHandler seam (NOT StorageHandler). Mandatory module docstring with a one-table caller-map: every fake method \u2194 production DatabaseHandler accessor it satisfies, with exact signature + return shape. Backed by Python dicts/sets modeling: env-scoped indexes by (environment, guild_id); (topic_id, message_id) UNIQUE enforcement; (environment, guild_id, alias_key) UNIQUE alias resolution; idempotency on (run_id, tool_call_id); per-run transition log; run_id FK validation against fake topic_editor_runs. Similarity: use similarity_pairs.json oracle for any pair present; difflib.SequenceMatcher.ratio ONLY as retrieval placeholder for unknown pairs. Wire into tests/conftest.py as a pytest fixture for dependency injection on TopicDispatcher and TopicEditor.",
+      "depends_on": [
+        "T16",
+        "T3",
+        "T6",
+        "T7"
+      ],
+      "status": "pending",
+      "kind": "test",
+      "executor_notes": "",
+      "files_changed": [],
+      "commands_run": [],
+      "auto_attributed_files": null,
+      "evidence_files": [],
+      "reviewer_verdict": "",
+      "stance": null,
+      "stop_signal": null
+    },
+    {
+      "id": "T12",
+      "description": "Phase 4 \u2014 Write tests/test_topic_dispatcher_invariants.py and tests/test_topic_aliases_resolution.py against the fake store. Invariants test exercises all 4: (1) post_simple_topic rejected when authors\u22652 OR len(source_message_ids)\u22653 with rejected_* row in topic_transitions (topic_id=NULL); (2) write-time collision returns existing topic_id+aliases as tool error AND override_collisions=[{topic_id, reason}] accepts the write while logging action='override'; (3) idempotency on Anthropic tool_use_id replays no-ops; (4) (topic_id, message_id) UNIQUE rejects duplicate add, multiple topics for one message accepted. Aliases test: search_topics returns canonical_key + all topic_aliases rows; dispatcher resolves a drift-spelled proposed_key through aliases to existing topic_id; new aliases of alias_kind='proposed' written each call. Includes the same-window-rolled-twice test: same fixture window dispatched in two different runs resolves to same topic_id via alias.",
+      "depends_on": [
+        "T16",
+        "T11"
+      ],
+      "status": "pending",
+      "kind": "test",
+      "executor_notes": "",
+      "files_changed": [],
+      "commands_run": [],
+      "auto_attributed_files": null,
+      "evidence_files": [],
+      "reviewer_verdict": "",
+      "stance": null,
+      "stop_signal": null
+    },
+    {
+      "id": "T13",
+      "description": "Phase 4 Step 12 \u2014 Write scripts/run_live_update_shadow.py modeled on scripts/run_live_update_dev.py but NOT routing through LiveUpdateEditor. CLI flags: --archive-env (default 'prod', source-message + telemetry-only legacy reads), --topic-env (default 'dev', new topic_* writes + topic_editor_runs), --windows N (default 20), --lookback HOURS, --once. Surface both env knobs in the trace-embed header to prevent cross-wiring. Per window: run TopicEditor with publishing OFF (no channel.send to live feed), post one trace embed per window to DEV_SHADOW_TRACE_CHANNEL_ID. After all windows: post an aggregate summary embed. Deliberately roll one window twice and assert alias resolution to the same topic_id. live_update_candidates / live_update_feed_items reads are TELEMETRY-ONLY for divergence field \u2014 never feed back into dispatcher state. Add a code-level comment marker on those calls.",
+      "depends_on": [
+        "T16",
+        "T8",
+        "T10"
+      ],
+      "status": "pending",
+      "kind": "code",
+      "executor_notes": "",
+      "files_changed": [],
+      "commands_run": [],
+      "auto_attributed_files": null,
+      "evidence_files": [],
+      "reviewer_verdict": "",
+      "stance": null,
+      "stop_signal": null
+    },
+    {
+      "id": "T14",
+      "description": "Phase 4 Step 13 \u2014 Write tests/test_shadow_mode_replay.py smoke test using the fake store. Fixture window \u2192 TopicEditor.run_once \u2192 assert topic_transitions rows recorded with expected actions, no channel.send invoked (mocked), trace-embed payload contains: archive-env/topic-env header, source-message count, tool calls by name, posted/watched/updated/discarded tallies, near-miss observations, cost (tokens), latency, per-run override-rate, 7-day rolling override-rate, record_observation rate, partial-publish incidents, lease: DEFERRED. Verify no live DB required (fake store at DatabaseHandler seam).",
+      "depends_on": [
+        "T16",
+        "T13"
+      ],
+      "status": "pending",
+      "kind": "test",
+      "executor_notes": "",
+      "files_changed": [],
+      "commands_run": [],
+      "auto_attributed_files": null,
+      "evidence_files": [],
+      "reviewer_verdict": "",
+      "stance": null,
+      "stop_signal": null
+    },
+    {
+      "id": "T15",
+      "description": "Run the validation suite per the plan's Validation Order: (1) pytest tests/test_topic_canonicalizer.py tests/test_topic_similarity_oracle.py; (2) pytest tests/test_topic_publisher_render.py; (3) pytest tests/test_topic_dispatcher_invariants.py tests/test_topic_aliases_resolution.py; (4) pytest tests/test_shadow_mode_replay.py; (5) pytest tests/test_live_update_editor_lifecycle.py tests/test_live_update_editor_publishing.py tests/test_live_update_prompts.py (existing tests MUST remain green untouched). If any test fails, read the error, fix the code, and re-run until green. Then write a throwaway script that imports topic_editor + dispatcher + fake store, dispatches a fixture window, prints the resulting topic_transitions log + trace embed dict to stdout \u2014 confirm the dispatcher invariants fire (e.g. force a 2-author post_simple_topic call and observe rejected_post_simple row), then delete the script. Verify the diff is contained: `git diff --stat` should show ZERO modifications to src/features/summarising/live_update_editor.py, src/features/summarising/live_update_prompts.py, src/common/llm/claude_client.py. Verify net new LOC is in the 800-1500 range (alarm above 1500).",
+      "depends_on": [
+        "T16",
+        "T4",
+        "T9",
+        "T12",
+        "T14"
+      ],
+      "status": "pending",
+      "kind": "test",
+      "executor_notes": "",
+      "files_changed": [],
+      "commands_run": [],
+      "auto_attributed_files": null,
+      "evidence_files": [],
+      "reviewer_verdict": "",
+      "stance": null,
+      "stop_signal": null
+    }
+  ],
+  "watch_items": [
+    "PUBLISHING MUST STAY OFF \u2014 no channel.send against the live feed channel from the new editor. Trace/preview embeds go ONLY to DEV_SHADOW_TRACE_CHANNEL_ID (#main_test).",
+    "DO NOT MODIFY src/features/summarising/live_update_editor.py, live_update_prompts.py, or claude_client.py:generate_chat_completion. Bit-for-bit identical so divergence diff is grounded.",
+    "DO NOT touch any existing live_update_* table or DB accessor. New editor writes ONLY to the 6 new tables.",
+    "Migration stays in .migrations_staging/ for Phase 1. Do not promote until Week-1 decision gate passes.",
+    "Env-scoping invariant applies ONLY to NEW topic_* read accessors. Do not 'fix' env-handling on existing live_update_* accessors \u2014 that violates the no-modify constraint.",
+    "Shadow runner's reads of live_update_candidates / live_update_feed_items are TELEMETRY-ONLY for the divergence field. Never feed back into dispatcher state. Mark the call sites with a code comment.",
+    "topic_transitions.run_id NOT NULL + FK ON DELETE RESTRICT means create_topic_editor_run failure must abort run_once loudly \u2014 do not swallow or use synthetic IDs.",
+    "Lean get_message_author_ids contract: missing message_id \u2192 caller treats as tool-error (fails dispatch); duplicates deduped; author_id NULL counts as phantom distinct author (multi-author guardrail fails closed).",
+    "Dispatcher author resolution uses lean get_message_author_ids on hot path. The heavy get_live_update_context_for_message_ids stays untouched (used only by existing prompt assembly).",
+    "Every dispatcher rejection writes a topic_transitions row with action='rejected_*' and topic_id=NULL for failed creates. Every override writes action='override' with reason in payload.",
+    "Write tools (post_simple_topic, post_sectioned_topic, watch_topic) MUST accept override_collisions: list[{topic_id, reason}]. Without it the agent traps in retry loops on false positives.",
+    "Anthropic tool_use_id is THE idempotency key. Do not invent a parallel UUID for replay protection.",
+    "Similarity threshold tuning asserts against tests/fixtures/similarity_pairs.json oracle (pinned pg_trgm output), NOT difflib. Conftest guardrail must fail-fast if a threshold test references a pair not in the oracle.",
+    "Fake store intercepts at DatabaseHandler seam (production parity), NOT StorageHandler. Caller-map docstring is mandatory and signature-aligned with production accessors.",
+    "LOC budget: 800-1000 target, 1500 alarm. If implementation grows past 1500 LOC raise scope alarm \u2014 sign of Phase-1.5 creep (run-lease, partial-publish retry, polishing).",
+    "Concurrent-run lease is DEFERRED to Phase 1.5. Trace embed shows 'lease: DEFERRED' as a known deviation, not a bug.",
+    "Pending_review conditional branch: only ships in Day-1 migration if T1 defer-audit shows \u22655/week acted-upon defers. Borderline 3-5/week \u2192 defer to v2 unless POM explicitly intervenes.",
+    "Every new db_handler.py method needs a matching storage_handler.py payload-builder counterpart (DEBT-028 two-layer pattern).",
+    "Phase 2 prod cutover, _legacy_* renames, run-lease/checkpoint, full partial-publish retry history are OUT OF SCOPE. Stop at Week-1 shadow decision gate.",
+    "Existing tests tests/test_live_update_editor_lifecycle.py / _publishing.py / _prompts.py must remain green untouched."
+  ],
+  "sense_checks": [
+    {
+      "id": "SC1",
+      "task_id": "T1",
+      "question": "Does docs/live-update-editor-phase1-locked-decisions.md exist, resolve all 5 locked decisions, include the defer-audit numerical outcome with a clear ship-Day-1-or-v2 verdict for pending_review, document the borderline 3-5/week rule, and record the implementer judgment-call contracts (lean accessor missing/duplicate/null behavior, run-insert failure aborts loudly)?",
+      "verdict": "",
+      "executor_note": ""
+    },
+    {
+      "id": "SC2",
+      "task_id": "T2",
+      "question": "Does the migration file create exactly 6 tables (5 spec + topic_editor_runs), declare topic_transitions.run_id REFERENCES topic_editor_runs(run_id) ON DELETE RESTRICT, allow topic_transitions.topic_id NULL, have topic_sources UNIQUE on (topic_id, message_id) only, include CREATE EXTENSION pg_trgm + topics_headline_trgm GIN index, and avoid touching any live_update_* table?",
+      "verdict": "",
+      "executor_note": ""
+    },
+    {
+      "id": "SC3",
+      "task_id": "T3",
+      "question": "Do canonicalizer fuzz tests pass on the 50-headline fixture, and does the pinned-oracle similarity test pass on every row at threshold 0.55? Is the conftest guardrail asserting threshold-test pairs are oracle-covered in place?",
+      "verdict": "",
+      "executor_note": ""
+    },
+    {
+      "id": "SC4",
+      "task_id": "T4",
+      "question": "Does the backfill script filter source rows to status='posted' AND len(discord_message_ids) > 0, use the lean get_message_author_ids (NOT the heavy context accessor), call topic_canonicalizer.canonicalize, and write topics + topic_sources idempotently on (environment, guild_id, canonical_key)?",
+      "verdict": "",
+      "executor_note": ""
+    },
+    {
+      "id": "SC5",
+      "task_id": "T5",
+      "question": "Is topic_editor_client.py a sibling to ClaudeClient (claude_client.py:generate_chat_completion untouched), supporting tools=, tool_choice, tool_use_id round-trips, extended-thinking blocks, and multi-turn tool-result loops?",
+      "verdict": "",
+      "executor_note": ""
+    },
+    {
+      "id": "SC6",
+      "task_id": "T6",
+      "question": "Are all new db_handler methods backed by matching storage_handler payload-builders (DEBT-028)? Does every NEW topic_* read accessor mandatorily filter by (environment, guild_id) with cross_env=False as the only escape? Is get_message_author_ids implemented as a lean SELECT against discord_messages with documented missing/duplicate/null contract? Are existing live_update_* accessors unchanged?",
+      "verdict": "",
+      "executor_note": ""
+    },
+    {
+      "id": "SC7",
+      "task_id": "T7",
+      "question": "Do all 10 (or 11) Anthropic tool schemas match the v6 spec verbatim with override_collisions on the three write tools? Does the dispatcher enforce all 4 invariants with authoritative author resolution via get_message_author_ids? Does every rejection write a topic_transitions row with action='rejected_*' (topic_id=NULL for failed creates) and every override write action='override' with reason in payload?",
+      "verdict": "",
+      "executor_note": ""
+    },
+    {
+      "id": "SC8",
+      "task_id": "T8",
+      "question": "Does TopicEditor.run_once insert the topic_editor_runs row first and abort loudly on failure (no synthetic run_id fallback)? Does it close via finish_topic_editor_run and return a RunTrace? Is the prompt covering the editorial taste from _meets_editorial_bar and capping observations ~3/run?",
+      "verdict": "",
+      "executor_note": ""
+    },
+    {
+      "id": "SC9",
+      "task_id": "T9",
+      "question": "Does render_topic produce correct output for simple, sectioned, story-update (with 'Update:' prefix + parent link), and partial-publish recovery forms, with zero DB or Discord network calls?",
+      "verdict": "",
+      "executor_note": ""
+    },
+    {
+      "id": "SC10",
+      "task_id": "T10",
+      "question": "Does the trace embed surface all required fields including archive-env/topic-env header, per-run + 7-day rolling override-rate via get_topic_transition_rates, record_observation rate, partial-publish incidents, lease: DEFERRED, and per-window divergence? Is DEV_SHADOW_TRACE_CHANNEL_ID the channel resolver?",
+      "verdict": "",
+      "executor_note": ""
+    },
+    {
+      "id": "SC11",
+      "task_id": "T11",
+      "question": "Does tests/fakes/topic_store.py intercept at the DatabaseHandler seam (not StorageHandler), carry a mandatory caller-map docstring (fake method \u2194 production accessor with signature + return shape), enforce (topic_id, message_id) UNIQUE / env-scoped reads / alias resolution / idempotency on (run_id, tool_call_id), and use the similarity_pairs.json oracle for known pairs?",
+      "verdict": "",
+      "executor_note": ""
+    },
+    {
+      "id": "SC12",
+      "task_id": "T12",
+      "question": "Do dispatcher and alias tests cover all 4 invariants (incl. override path and (topic_id, message_id) duplicate behavior) and the same-window-rolled-twice alias resolution? Do they run entirely against the fake store with no live DB dependency?",
+      "verdict": "",
+      "executor_note": ""
+    },
+    {
+      "id": "SC13",
+      "task_id": "T13",
+      "question": "Does scripts/run_live_update_shadow.py take --archive-env and --topic-env flags, NOT route through LiveUpdateEditor, load \u226520 historical source-message windows, post per-window + aggregate trace embeds to DEV_SHADOW_TRACE_CHANNEL_ID, deliberately roll one window twice for alias-resolution check, and mark the live_update_* reads as telemetry-only with a code comment?",
+      "verdict": "",
+      "executor_note": ""
+    },
+    {
+      "id": "SC14",
+      "task_id": "T14",
+      "question": "Does the shadow smoke test exercise the full editor with publishing OFF using the fake store, assert topic_transitions rows recorded, assert no channel.send invoked (mock), and verify the trace-embed payload contains every required field including the env header and lease: DEFERRED?",
+      "verdict": "",
+      "executor_note": ""
+    },
+    {
+      "id": "SC15",
+      "task_id": "T15",
+      "question": "Do all five validation-order steps pass green? Does `git diff --stat` confirm zero modifications to live_update_editor.py / live_update_prompts.py / claude_client.py? Is net new LOC in the 800-1500 range? Did the throwaway reproduction script exercise dispatcher rejection invariants and get deleted afterward?",
+      "verdict": "",
+      "executor_note": ""
+    },
+    {
+      "id": "SC16",
+      "task_id": "T16",
+      "question": "Were all before_execute user_actions programmatically verified before execution proceeded?",
+      "executor_note": "",
+      "verdict": ""
+    }
+  ],
+  "user_actions": [
+    {
+      "id": "U1",
+      "description": "Run the defer-audit SQL against the live live_update_candidates table for the last 30 days (count of `decision='defer'` rows grouped by environment + guild_id, plus a sample of POM's post-hoc treatment of those rows). Provide the numerical result + qualitative read to the executor BEFORE T1 finalizes. The executor needs the number to decide the pending_review conditional branch: \u22655/week acted-upon defers \u2192 ship state='pending_review' + request_review_topic in Day-1; 3-5/week borderline \u2192 default to v2 unless you explicitly say otherwise; <3/week \u2192 defer to v2.",
+      "phase": "before_execute",
+      "blocks_task_ids": [
+        "T1",
+        "T2",
+        "T7"
+      ],
+      "rationale": "Phase 0 locked decision #5 cannot be resolved without a live-DB query, and the migration DDL + tool surface depend on the outcome.",
+      "requires_human_only_reason": "Requires live Supabase access + interpretive judgment on POM's prior treatment of defer rows."
+    },
+    {
+      "id": "U2",
+      "description": "Generate tests/fixtures/similarity_pairs.json by running `SELECT similarity(a, b)` on a Postgres instance with the pg_trgm extension (dev Supabase or local Postgres) for ~30 (headline_a, headline_b, expected_pg_trgm_similarity, expected_match_at_0_55) rows drawn from tests/fixtures/historical_headlines.json. Include both 'should collide' and 'should NOT collide' pairs. Hand the file to the executor before T3 runs. This is a one-time external dependency; once committed, CI is hermetic.",
+      "phase": "before_execute",
+      "blocks_task_ids": [
+        "T3"
+      ],
+      "rationale": "T3's pinned-oracle similarity test asserts against real pg_trgm output. Without this fixture the threshold-tuning test cannot run.",
+      "requires_human_only_reason": "Requires access to a Postgres instance with pg_trgm extension (dev Supabase or local install) \u2014 outside the executor's local repo environment."
+    },
+    {
+      "id": "U3",
+      "description": "Set DEV_SHADOW_TRACE_CHANNEL_ID in the dev environment (.env or equivalent) to the Discord channel ID for #main_test. Unset is acceptable for unit tests (trace embeds become log-only) but T13's manual replay run will not post any embeds without it.",
+      "phase": "after_execute",
+      "blocks_task_ids": [
+        "T13"
+      ],
+      "rationale": "Required for the manual 20-window replay against #main_test; unit tests do not require it.",
+      "requires_human_only_reason": "Requires Discord channel ID + dev-environment .env access."
+    },
+    {
+      "id": "U4",
+      "description": "Apply the new migration .migrations_staging/20260513XXXXXX_topic_editor_phase1.sql to dev Supabase (manual handoff to the workspace Supabase repo, per existing .migrations_staging/ convention). Then run scripts/backfill_topics_from_feed_items.py --dry-run to preview, then without --dry-run to populate. Tests use the in-memory fake store and do NOT require this, but the manual 20-window replay run does.",
+      "phase": "after_execute",
+      "blocks_task_ids": [
+        "T13"
+      ],
+      "rationale": "Migration application is a manual handoff to a separate Supabase repo per current workflow.",
+      "requires_human_only_reason": "Requires Supabase dashboard / migration-tooling access outside the executor's repo."
+    },
+    {
+      "id": "U5",
+      "description": "Run `python scripts/run_live_update_shadow.py --archive-env prod --topic-env dev --windows 20`. Review the 20 per-window trace embeds + aggregate summary in #main_test. Apply Week-1 decision-gate judgment: are divergences vs today's editor explainable as 'valid different call' rather than drift? Override rate within bounds (<~10%)? POM answers 'would I be comfortable letting this publish to prod?' STOP HERE \u2014 Phase 2 is a separate decision.",
+      "phase": "after_execute",
+      "blocks_task_ids": [],
+      "rationale": "Subjective Week-1 decision-gate review is human-only by design.",
+      "requires_human_only_reason": "Subjective editorial-judgment review; the stop point of Phase 1."
+    }
+  ],
+  "meta_commentary": "Execution gotchas and judgment calls:\n\n1) **T1 is gated on U1 (defer-audit SQL).** Do not start T2's migration DDL until you have the audit number \u2014 it determines whether the migration includes `state='pending_review'` as a documented topics.state value and whether T7's tool list grows to 11 tools. If U1 returns a borderline (3-5/week) volume, default to v2 unless POM has explicitly told you otherwise in U1's response.\n\n2) **T3 is gated on U2 (similarity_pairs.json).** Do not write the pinned-oracle test before the fixture exists. The fixture is generated from real pg_trgm output once and committed; thereafter CI is hermetic.\n\n3) **Task dependency T4 \u2192 T6:** The backfill script needs `get_message_author_ids` which lives in T6. T4 is sequenced after T6 even though it's described in Phase 1 of the plan \u2014 order tasks by code dependency, not phase number.\n\n4) **Hard scope guards:**\n   - `git diff --stat` after T15 must show ZERO modifications to `src/features/summarising/live_update_editor.py`, `src/features/summarising/live_update_prompts.py`, `src/common/llm/claude_client.py`. If you accidentally touched them while reading, `git checkout --` them.\n   - The 5 new tables (+ topic_editor_runs = 6) are NEW tables only. Do not migrate, alter, or read-for-decision any `live_update_*` table. The shadow runner DOES read `live_update_candidates` / `live_update_feed_items` but ONLY for the telemetry-only divergence comparison; mark those call sites with a code comment so a future reviewer doesn't refactor them into the dispatcher.\n\n5) **DEBT-028 two-layer pattern is mandatory.** Every new `db_handler.py` method must have a matching `storage_handler.py` payload-builder (hardcoded keys, follows the existing live_update_* shape at storage_handler.py:743-762). Don't shortcut by putting payload-building in db_handler.\n\n6) **Fake store seam.** It intercepts at the `DatabaseHandler` seam, not the `StorageHandler` lower layer. The lower layer is pure Supabase payload building and not worth faking. The fake must enforce: (topic_id, message_id) UNIQUE, env-scoped reads, idempotency on (run_id, tool_call_id), alias resolution, and FK validation of run_id against fake topic_editor_runs.\n\n7) **Similarity oracle leakage guard.** The fake store uses difflib for unknown pairs as a retrieval placeholder ONLY. Add a conftest assertion that fails fast if any pair used in a threshold-tuning test isn't in `similarity_pairs.json`. This is a maintenance trip-wire so the FLAG-010 fix doesn't decay.\n\n8) **Run-insert failure semantics.** With `topic_transitions.run_id NOT NULL` + FK ON DELETE RESTRICT, the parent run row must exist before any transition write. If `create_topic_editor_run` raises in T8's `run_once`, abort loudly and surface to the runner's stderr \u2014 do NOT use a synthetic run_id and do NOT swallow. The trace embed for that window will be missing, which is the correct loud-failure signal.\n\n9) **Lean-accessor contract on edge cases:**\n   - Missing `message_id` in `get_message_author_ids` result \u2192 caller treats as tool-error (fails the dispatch). For invariant #1's structural check, this means the dispatcher REJECTS the call rather than silently under-counting authors.\n   - Duplicate `message_id` in input \u2192 dedupe at the caller.\n   - `author_id IS NULL` (webhook/system message) \u2192 count as a phantom distinct author, so multi-author guardrail fails closed.\n\n10) **Trace embed channel default.** Use a NEW env var `DEV_SHADOW_TRACE_CHANNEL_ID`. Do NOT reuse `DEV_LIVE_UPDATE_CHANNEL_ID` \u2014 that would collide with the existing reasoning-embed pipeline.\n\n11) **LOC budget alarm.** Net new code stays in 800-1500 LOC. If you cross 1500, you've probably smuggled in Phase 1.5 work (run-lease, partial-publish retry, polish). Stop and triage.\n\n12) **Validation order at T15.** Run tests in dependency order (pure \u2192 fake-store \u2192 existing untouched). Existing `tests/test_live_update_editor_*.py` and `test_live_update_prompts.py` MUST remain green \u2014 if any flips red, your diff has accidentally touched the old editor path.\n\n13) **The throwaway reproduction script in T15** should import the new dispatcher + fake store, deliberately trigger a 2-author `post_simple_topic` call, and assert the resulting topic_transitions log contains an `action='rejected_post_simple'` row with `topic_id=NULL`. Print the result, then delete the script (do NOT commit it).\n\n14) **Phase 2 is out of scope.** When U5's decision-gate review concludes, STOP. Do not flip the editor over to the new system, do not rename old tables to `_legacy_*`, do not change the production publish path. Phase 2 is a separate plan.",
+  "validation": {
+    "plan_steps_covered": [
+      {
+        "plan_step_summary": "Phase 0 Step 1 \u2014 Defer audit + locked-decisions doc + headline/similarity-pair fixtures",
+        "finalize_item_ids": [
+          "U1",
+          "U2",
+          "T1"
+        ]
+      },
+      {
+        "plan_step_summary": "Phase 1 Step 2 \u2014 Schema migration (6 tables, pg_trgm extension, FKs, indexes, conditional pending_review)",
+        "finalize_item_ids": [
+          "T2"
+        ]
+      },
+      {
+        "plan_step_summary": "Phase 1 Step 3 \u2014 Canonicalizer + fuzz test + pinned-oracle similarity test",
+        "finalize_item_ids": [
+          "T3"
+        ]
+      },
+      {
+        "plan_step_summary": "Phase 1 Step 4 \u2014 Python backfill script (status-filtered, idempotent)",
+        "finalize_item_ids": [
+          "T4"
+        ]
+      },
+      {
+        "plan_step_summary": "Phase 2 Step 5 \u2014 Native tool-use client (sibling to ClaudeClient)",
+        "finalize_item_ids": [
+          "T5"
+        ]
+      },
+      {
+        "plan_step_summary": "Phase 2 Step 6 \u2014 Storage + DB accessors for new tables incl. lean get_message_author_ids and get_topic_transition_rates",
+        "finalize_item_ids": [
+          "T6"
+        ]
+      },
+      {
+        "plan_step_summary": "Phase 2 Step 7 \u2014 10 (or 11) tool schemas + dispatcher enforcing all 4 invariants",
+        "finalize_item_ids": [
+          "T7"
+        ]
+      },
+      {
+        "plan_step_summary": "Phase 2 Step 8 \u2014 TopicEditor agent + prompt; run-insert failure aborts loudly",
+        "finalize_item_ids": [
+          "T8"
+        ]
+      },
+      {
+        "plan_step_summary": "Phase 3 Step 9 \u2014 Pure render_topic with simple/sectioned/story-update/partial-publish forms + test",
+        "finalize_item_ids": [
+          "T9"
+        ]
+      },
+      {
+        "plan_step_summary": "Phase 3 Step 10 \u2014 Trace embed builder + DEV_SHADOW_TRACE_CHANNEL_ID wiring with trip-wire fields",
+        "finalize_item_ids": [
+          "T10",
+          "U3"
+        ]
+      },
+      {
+        "plan_step_summary": "Phase 4 Step 11 \u2014 Stateful fake store at DatabaseHandler seam with mandatory caller-map docstring",
+        "finalize_item_ids": [
+          "T11"
+        ]
+      },
+      {
+        "plan_step_summary": "Phase 4 \u2014 Dispatcher invariants + alias-resolution tests (cited in test expectations, derives from Steps 7 + 11)",
+        "finalize_item_ids": [
+          "T12"
+        ]
+      },
+      {
+        "plan_step_summary": "Phase 4 Step 12 \u2014 Shadow-mode replay runner with --archive-env/--topic-env; manual 20-window run",
+        "finalize_item_ids": [
+          "T13",
+          "U4",
+          "U5"
+        ]
+      },
+      {
+        "plan_step_summary": "Phase 4 Step 13 \u2014 End-to-end shadow smoke test",
+        "finalize_item_ids": [
+          "T14"
+        ]
+      },
+      {
+        "plan_step_summary": "Validation order (pytest suites + diff scope guard + LOC budget check)",
+        "finalize_item_ids": [
+          "T15"
+        ]
+      },
+      {
+        "plan_step_summary": "Week-1 decision gate (subjective POM review of 20 trace embeds)",
+        "finalize_item_ids": [
+          "U5"
+        ]
+      },
+      {
+        "plan_step_summary": "Verify before_execute user_actions",
+        "finalize_item_ids": [
+          "T16"
+        ]
+      }
+    ],
+    "orphan_tasks": [],
+    "completeness_notes": "Every plan step (Phase 0 \u2192 decision gate) maps to at least one task or user_action. T12 covers the test files cited in the brief's test expectations (test_topic_dispatcher_invariants.py, test_topic_aliases_resolution.py) \u2014 these are derivable from Step 7 (dispatcher) + Step 11 (fake store) and explicitly listed in the plan's Validation Order. T4 depends on T6 (rather than T3 alone, as plan order implies) because the backfill needs the lean get_message_author_ids accessor introduced in Step 6 \u2014 this is sequencing tightened from the plan's day-based ordering to match code dependencies. The 'manual decision gate' step is covered solely by U5 because it is subjective POM judgment, which is human-only by design; this is the only plan step covered exclusively by a user_action and the rationale is recorded in U5.requires_human_only_reason.",
+    "coverage_complete": true
+  },
+  "baseline_test_command": "pytest --tb=no -q --no-header",
+  "baseline_test_failures": [],
+  "baseline_test_note": "Baseline test suite was not executed during finalize (read-only planning phase). The plan's pass_to_pass test expectations name tests/test_live_update_editor_lifecycle.py, tests/test_live_update_editor_publishing.py, and tests/test_live_update_prompts.py \u2014 these MUST remain green untouched. The executor should run this command early to capture the baseline state, then re-run at T15 to confirm zero regression. Any pre-existing failures should be recorded in executor_notes for T15 so they aren't conflated with new-editor regressions. New tests (test_topic_canonicalizer.py, test_topic_similarity_oracle.py, test_topic_publisher_render.py, test_topic_dispatcher_invariants.py, test_topic_aliases_resolution.py, test_shadow_mode_replay.py) are created during execution and become part of the green suite at T15."
+}

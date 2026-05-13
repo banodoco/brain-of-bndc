@@ -1,0 +1,88 @@
+{
+  "output": "Executed tasks T3, T4, T14. All 39 tests pass across all relevant test files (0 failures). Key changes: (1) T3: Rewrote db_handler.get_live_update_watchlist with UPDATE sweep before SELECT, Python-computed revisit_state (fresh/revisit_due/last_call), 20/state cap, 50-row total active cap across ALL states; (2) T4: Removed status filter from storage_handler.get_live_update_watchlist, bumped default limit to 200, upsert left intact; (3) T14: Added 6 parser fallback chain tests covering all 5 recovery branches + none case, all asserting correct reasoning_recovery_path values.",
+  "files_changed": [
+    "src/common/db_handler.py",
+    "src/common/storage_handler.py",
+    "tests/test_live_update_prompts.py"
+  ],
+  "commands_run": [
+    "python -m pytest tests/test_live_update_prompts.py -v --tb=short",
+    "python -m pytest tests/test_live_update_editor_lifecycle.py tests/test_live_update_editor_publishing.py tests/test_live_storage_wrappers.py tests/test_live_update_prompts.py -v --tb=short"
+  ],
+  "deviations": [
+    "Advisory quality: tests/test_live_update_prompts.py has similar functions generate_chat_completion and generate_chat_completion (100% similarity).",
+    "Advisory audit finding: Sense check SC5 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC6 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC12 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC13 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC16 is missing an executor acknowledgment.",
+    "Advisory audit finding: Tasks left pending after execute (executor never started them): T5, T6, T12, T13, T16"
+  ],
+  "task_updates": [
+    {
+      "id": "T3",
+      "description": "Rewrote `get_live_update_watchlist` in `db_handler.py` to: (a) run an idempotent UPDATE sweep BEFORE the SELECT to auto-archive rows where `expires_at < now()` (set `status='archived'`, append `notes='ttl_expired'`); (b) SELECT active rows (status IN ('active','published')); (c) compute `revisit_state` in Python: `fresh` if `now() < next_revisit_at`, `revisit_due` if past `next_revisit_at` but before `created_at+24h`, `last_call` if past `created_at+24h`; (d) group results into `{fresh: [...], revisit_due: [...], last_call: [...]}` capped at 20 per state, most-recent-first; (e) enforce 50-row active cap across ALL states combined \u2014 auto-archive oldest rows beyond cap (regardless of state). Return the grouped dict.",
+      "status": "done",
+      "executor_notes": "UPDATE sweep via execute_query (parameterized SQL with guild_id/environment scoping). Storage handler get_live_update_watchlist now returns all rows (status filter removed per T4). Timeline computation handles missing timestamps gracefully with fallback estimation from created_at. Cap enforcement auto-archives oldest rows regardless of revisit_state. Returns grouped dict {fresh, revisit_due, last_call}. Verified: caller pass-through compatible (guild_id positional, environment keyword).",
+      "reviewer_verdict": "",
+      "kind": "code",
+      "files_changed": [
+        "src/common/db_handler.py"
+      ],
+      "task_id": "T3",
+      "commands_run": []
+    },
+    {
+      "id": "T4",
+      "description": "Update `src/common/storage_handler.py`: add `insert_live_update_watchlist` and `update_live_update_watchlist` async methods that write the new columns (`expires_at`, `next_revisit_at`, `revisit_count`, `origin_reason`, `evidence`). Update `get_live_update_watchlist` to SELECT `*` without the old `status='active'` filter (the caller now handles filtering). Ensure the existing `upsert_live_update_watchlist` at line 1733 is left intact for the `last_matched_*` update path.",
+      "status": "done",
+      "executor_notes": "Removed `status` parameter and `.eq('status', status)` filter from storage_handler.get_live_update_watchlist. Bumped default limit from 100 to 200 since caller filters in Python. insert_live_update_watchlist and update_live_update_watchlist already exist from T2 execution (lines 1789, 1859). upsert_live_update_watchlist at line 1733 verified untouched \u2014 payload still uses original columns.",
+      "reviewer_verdict": "",
+      "kind": "code",
+      "files_changed": [
+        "src/common/storage_handler.py"
+      ],
+      "task_id": "T4",
+      "commands_run": []
+    },
+    {
+      "id": "T14",
+      "description": "Write parser fallback chain tests in `tests/test_live_update_prompts.py` (or extend existing): (a) Five cases covering each branch \u2014 top-level `editor_reasoning`, alias key (e.g. `reasoning`), per-candidate reasoning concatenation, `REASONING:` prose prefix, first-paragraph last resort. Assert non-empty reasoning string and correct `reasoning_recovery_path` value; (b) Sixth case: totally empty input \u2192 `reasoning_recovery_path='none'`, `editor_reasoning=''`, no crash.",
+      "status": "done",
+      "executor_notes": "Added 6 tests: test_parser_fallback_top_level_editor_reasoning, test_parser_fallback_alias_reasoning, test_parser_fallback_per_candidate_concatenation, test_parser_fallback_reasoning_prefix_regex, test_parser_fallback_prose_first_paragraph, test_parser_fallback_empty_input_none. All 25 tests pass (6 new + 19 existing). Tests use real newlines for regex and prose branches. Each test asserts non-empty reasoning (branches 1-5) or empty (branch 6) and exact recovery_path value.",
+      "reviewer_verdict": "",
+      "kind": "test",
+      "files_changed": [
+        "tests/test_live_update_prompts.py"
+      ],
+      "task_id": "T14",
+      "commands_run": []
+    }
+  ],
+  "sense_check_acknowledgments": [
+    {
+      "id": "SC3",
+      "task_id": "T3",
+      "question": "Does `get_live_update_watchlist` sweep BEFORE select, compute 3 states correctly, cap 20/state, and enforce 50-row cap across ALL states (not just fresh)?",
+      "verdict": "PASS. The function: (a) runs execute_query with an UPDATE BEFORE the SELECT \u2014 sets status='archived', notes appends 'ttl_expired' for rows where expires_at < now() and status NOT IN ('archived','discarded'); (b) SELECTs via storage_handler (no status filter); (c) computes fresh/revisit_due/last_call in Python with correct timeline logic \u2014 fresh if now < next_revisit_at, revisit_due if past next_revisit_at but before created_at+24h, last_call if past created_at+24h, with fallback estimation from created_at when next_revisit_at is missing; (d) groups into {fresh, revisit_due, last_call} each independently capped at 20 items, most-recent-first by updated_at descending; (e) enforces 50-row active cap across ALL states \u2014 auto-archives rows from active_rows[50:] regardless of their revisit_state, sets status='archived' and notes appends 'active_cap_exceeded'.",
+      "sense_check_id": "SC3",
+      "executor_note": "(not provided)"
+    },
+    {
+      "id": "SC4",
+      "task_id": "T4",
+      "question": "Does storage_handler.py expose matching insert/update methods and is the existing `upsert_live_update_watchlist` left intact?",
+      "verdict": "PASS. storage_handler.py has insert_live_update_watchlist (line 1789) and update_live_update_watchlist (line 1859) from T2 execution. get_live_update_watchlist signature changed from (self, guild_id, status='active', limit=100, environment) to (self, guild_id, limit=200, environment) \u2014 removed status filter per spec, bumped default limit. upsert_live_update_watchlist at line 1733 verified intact via read_file \u2014 payload still uses original columns (watch_key, subject_type, criteria, status, priority, notes, last_matched_*).",
+      "sense_check_id": "SC4",
+      "executor_note": "(not provided)"
+    },
+    {
+      "id": "SC14",
+      "task_id": "T14",
+      "question": "Do parser tests cover all 5 branches + none case, asserting non-empty reasoning and correct recovery_path values?",
+      "verdict": "PASS. Six tests added covering all branches: (1) top_level \u2014 asserts reasoning string and recovery_path='top_level'; (2) alias:reasoning \u2014 asserts recovery_path='alias:reasoning'; (3) per_candidate \u2014 asserts concatenated reasoning with ' | ' separator and recovery_path='per_candidate'; (4) reasoning_prefix \u2014 regex matches REASONING: prefix line before blank line + JSON, recovery_path='reasoning_prefix'; (5) prose_first_paragraph \u2014 non-empty reasoning assertion + recovery_path='prose_first_paragraph'; (6) none \u2014 empty input \u2192 recovery_path='none', editor_reasoning='', no crash. All 25 tests pass (39 including cross-module tests).",
+      "sense_check_id": "SC14",
+      "executor_note": "(not provided)"
+    }
+  ]
+}

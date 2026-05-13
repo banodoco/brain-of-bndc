@@ -1,0 +1,91 @@
+{
+  "output": "Executed batch 12 tasks T13 and T14. Runbook was reconciled to the sprint cutover model, focused test coverage was extended, checkpoint file was written, focused tests passed, and the full suite was rerun with only the known prior legacy failures remaining.",
+  "files_changed": [
+    "docs/live-update-editor-phase-2-runbook.md",
+    "tests/test_topic_editor_runtime.py",
+    ".megaplan/plans/execute-the-live-update-20260513-2217/execution_batch_12.json"
+  ],
+  "commands_run": [
+    "rg -n '^(LIVE_UPDATE_TRACE_CHANNEL_ID|TOPIC_EDITOR_PUBLISHING_ENABLED|LIVE_UPDATE_EDITOR_BACKEND)=' .env .env.example",
+    "sed -n '1,260p' docs/live-update-editor-phase-2-runbook.md",
+    "rg -n \"soak|20-window|20 window|Phase-1|gate|topic_editor_runs|live_update_editor_runs|rollback|checkpoint|LIVE_UPDATE_EDITOR_BACKEND|TOPIC_EDITOR_PUBLISHING_ENABLED|LIVE_UPDATE_TRACE_CHANNEL_ID\" docs/live-update-editor-phase-2-runbook.md docs/live-update-editor-sprint-plan.md tests src/features/summarising src/common src/features/admin_chat src/features/health",
+    "sed -n '1,520p' tests/test_topic_editor_runtime.py",
+    "sed -n '1,280p' tests/test_topic_editor_core.py",
+    "sed -n '1,280p' tests/test_live_storage_wrappers.py",
+    "sed -n '1,280p' tests/test_live_runtime_wiring.py && sed -n '1,280p' tests/test_live_admin_health.py",
+    "sed -n '180,330p' src/features/summarising/topic_editor.py && sed -n '817,870p' src/features/summarising/topic_editor.py && sed -n '980,1045p' src/features/summarising/topic_editor.py",
+    "sed -n '870,930p' src/common/storage_handler.py",
+    "rg -n \"Phase-1 soak|Week-1|20-window|20\\+ windows|shadow-mode|Branch A|Branch B|<LIVE_EDITOR_PUBLISH_TOGGLE>|live_update_editor_runs.*new-editor|from live_update_editor_runs\" docs/live-update-editor-phase-2-runbook.md",
+    "python -m py_compile tests/test_topic_editor_runtime.py src/features/summarising/topic_editor.py",
+    "pytest --tb=short -q --no-header tests/test_topic_editor_runtime.py tests/test_topic_editor_core.py tests/test_live_storage_wrappers.py tests/test_live_runtime_wiring.py tests/test_live_admin_health.py tests/test_backfill_live_update_topics.py",
+    "git diff --check -- docs/live-update-editor-phase-2-runbook.md tests/test_topic_editor_runtime.py",
+    "rg -n \"select .*from live_update_editor_runs|from live_update_editor_runs|<LIVE_EDITOR_PUBLISH_TOGGLE>|20\\+ windows|Replay-divergence|re-soak|Week-1|Phase 1 soak passed|Branch A|Branch B\" docs/live-update-editor-phase-2-runbook.md",
+    "pytest --tb=no -q --no-header",
+    "git diff -- docs/live-update-editor-phase-2-runbook.md tests/test_topic_editor_runtime.py",
+    "rg -n \"topic_editor_runs|topic_editor_checkpoints|mirror_topic_editor_checkpoint_to_live|TOPIC_EDITOR_PUBLISHING_ENABLED|LIVE_UPDATE_TRACE_CHANNEL_ID|LIVE_UPDATE_EDITOR_BACKEND|20-window|Phase-1 soak|Week-1 gate|Branch A|Branch B\" docs/live-update-editor-phase-2-runbook.md",
+    "git status --short -- docs/live-update-editor-phase-2-runbook.md tests/test_topic_editor_runtime.py .megaplan/plans/execute-the-live-update-20260513-2217/execution_batch_12.json",
+    "git ls-files -- docs/live-update-editor-phase-2-runbook.md tests/test_topic_editor_runtime.py",
+    "sed -n '1,320p' docs/live-update-editor-phase-2-runbook.md",
+    "git status --short | sed -n '1,120p'",
+    "test -d .megaplan/plans/execute-the-live-update-20260513-2217 && echo exists",
+    "python -m json.tool .megaplan/plans/execute-the-live-update-20260513-2217/execution_batch_12.json >/dev/null",
+    "git diff --check -- docs/live-update-editor-phase-2-runbook.md tests/test_topic_editor_runtime.py .megaplan/plans/execute-the-live-update-20260513-2217/execution_batch_12.json"
+  ],
+  "deviations": [
+    "Full test suite still fails with the same four previously observed legacy live-update failures: tests/test_live_top_creations.py::test_live_top_creations_dev_env_posts_and_persists_state, tests/test_live_update_editor_publishing.py::test_live_update_dev_env_posts_and_persists_with_environment_dev, tests/test_live_update_editor_publishing.py::test_live_update_dev_env_resolves_dev_live_update_channel_id, and tests/test_live_update_prompts.py::test_llm_prompt_exposes_agent_budget_and_media_reaction_guidance.",
+    "Advisory quality: tests/test_topic_editor_runtime.py has similar functions __init__ and __init__ (100% similarity).",
+    "Advisory quality: tests/test_topic_editor_runtime.py has similar functions __init__ and __init__ (100% similarity).",
+    "Advisory quality: tests/test_topic_editor_runtime.py has similar functions __init__ and __init__ (100% similarity).",
+    "Advisory quality: tests/test_topic_editor_runtime.py has similar functions __init__ and __init__ (100% similarity).",
+    "Advisory observation mismatch: executor claimed files not observed in git status/content hash delta: .megaplan/plans/execute-the-live-update-20260513-2217/execution_batch_12.json",
+    "Advisory audit finding: Executor claimed changed files not present in git status: ../supabase/migrations/20260512185328_live_update_watchlist_lifecycle.sql, .migrations_staging/20260513230500_live_update_topic_editor_phase1.sql, .migrations_staging/README.md",
+    "Advisory audit finding: Git status shows changed files not claimed by any task: .claude/scheduled_tasks.lock, .megaplan/briefs/, .megaplan/debt.json, .megaplan/plans/build-phase-1-of-the-live-20260513-1821/, .megaplan/plans/build-phase-1-of-the-live-20260513-1822/, .megaplan/plans/execute-the-live-update-20260513-2216/, .megaplan/plans/implement-the-watchlist-20260512-1809/, .megaplan/plans/live-update-environment-split/, .megaplan/plans/produce-the-phase-2-prod-20260513-1821/, .megaplan/plans/produce-the-phase-2-prod-20260513-1822/, .megaplan/schemas/directors_notes.json, .megaplan/schemas/execution_doc.json, .megaplan/schemas/feedback.json, .megaplan/schemas/finalize.json, .megaplan/schemas/review.json, .megaplan/schemas/revise.json, docs/debug-utility-validation.md, docs/live-editor-watchlist-plan.md, docs/live-update-editor-legacy-boundaries.md, docs/live-update-editor-redesign.md, docs/live-update-editor-sprint-plan.md, main.py, scripts/backfill_guild_ids.py, scripts/debug.py, scripts/debug_live_editor_audit.py, scripts/discord_tools.py, scripts/inspect_editor_reasoning.py, scripts/send_social_picks.py, src/features/admin/admin_cog.py, src/features/archive/archive_cog.py, src/features/gating/intro_embed.py, src/features/summarising/live_top_creations.py, src/features/summarising/live_update_editor.py, src/features/summarising/live_update_prompts.py, src/features/summarising/summariser.py, structure.md, tests/test_live_top_creations.py, tests/test_live_update_editor_lifecycle.py, tests/test_live_update_editor_publishing.py, tests/test_live_update_prompts.py, tests/test_social_route_tools.py",
+    "Advisory audit finding: Sense check SC15 is missing an executor acknowledgment.",
+    "Advisory audit finding: Tasks left pending after execute (executor never started them): T15"
+  ],
+  "task_updates": [
+    {
+      "task_id": "T13",
+      "status": "done",
+      "executor_notes": "Verified U2 prerequisites before editing: `.env` and `.env.example` contain `LIVE_UPDATE_TRACE_CHANNEL_ID=1316024582041243668`, `TOPIC_EDITOR_PUBLISHING_ENABLED=false`, and `LIVE_UPDATE_EDITOR_BACKEND=legacy`. Replaced the stale Phase-2 runbook with a sprint-aligned cutover runbook: removed operator instructions to satisfy Phase-1 soak/week gate/shadow/20-window/Branch-A-or-B requirements, switched new-editor triage and verification to `topic_editor_runs`, documented concrete sprint gates, documented operator-provided values, and documented rollback by disabling publishing, mirroring `topic_editor_checkpoints` back to `live_update_checkpoints`, and selecting `LIVE_UPDATE_EDITOR_BACKEND=legacy`. A grep check found stale Phase-1/20-window/Branch references only in the explicit `What Not To Use` section, not as active procedure.",
+      "files_changed": [
+        "docs/live-update-editor-phase-2-runbook.md"
+      ],
+      "commands_run": [
+        "rg -n '^(LIVE_UPDATE_TRACE_CHANNEL_ID|TOPIC_EDITOR_PUBLISHING_ENABLED|LIVE_UPDATE_EDITOR_BACKEND)=' .env .env.example",
+        "sed -n '1,260p' docs/live-update-editor-phase-2-runbook.md",
+        "rg -n \"topic_editor_runs|topic_editor_checkpoints|mirror_topic_editor_checkpoint_to_live|TOPIC_EDITOR_PUBLISHING_ENABLED|LIVE_UPDATE_TRACE_CHANNEL_ID|LIVE_UPDATE_EDITOR_BACKEND|20-window|Phase-1 soak|Week-1 gate|Branch A|Branch B\" docs/live-update-editor-phase-2-runbook.md",
+        "git diff --check -- docs/live-update-editor-phase-2-runbook.md tests/test_topic_editor_runtime.py"
+      ],
+      "auto_attributed_files": null
+    },
+    {
+      "task_id": "T14",
+      "status": "done",
+      "executor_notes": "Reviewed the focused topic-editor, storage/db wrapper, runtime wiring, admin/health, backfill, and legacy live-update test files. Existing coverage already exercised deterministic canonicalization/alias/collision helpers, storage/db wrapper reachability, dispatcher invariants, duplicate source handling, idempotent replay, renderer behavior, gated publishing, runtime wiring, rollback selector, admin/health topic-editor status, and legacy compatibility files. Added focused gaps in `tests/test_topic_editor_runtime.py` for active lease skip behavior, accepted/rejected audit action vocabulary rejecting `rejected_update_sources`, and publisher partial failure after a mid-batch Discord send failure. Focused test modules passed: 37 passed. Full suite was rerun and failed only with the same four previously observed legacy live-update failures.",
+      "files_changed": [
+        "tests/test_topic_editor_runtime.py"
+      ],
+      "commands_run": [
+        "sed -n '1,520p' tests/test_topic_editor_runtime.py",
+        "sed -n '1,280p' tests/test_topic_editor_core.py",
+        "sed -n '1,280p' tests/test_live_storage_wrappers.py",
+        "sed -n '1,280p' tests/test_live_runtime_wiring.py && sed -n '1,280p' tests/test_live_admin_health.py",
+        "python -m py_compile tests/test_topic_editor_runtime.py src/features/summarising/topic_editor.py",
+        "pytest --tb=short -q --no-header tests/test_topic_editor_runtime.py tests/test_topic_editor_core.py tests/test_live_storage_wrappers.py tests/test_live_runtime_wiring.py tests/test_live_admin_health.py tests/test_backfill_live_update_topics.py",
+        "pytest --tb=no -q --no-header"
+      ],
+      "auto_attributed_files": null
+    }
+  ],
+  "sense_check_acknowledgments": [
+    {
+      "sense_check_id": "SC13",
+      "executor_note": "Yes. The runbook now explicitly says the stale Phase-1 soak, Week-1 gate, shadow gate, 20-window replay, Branch A/B logic, and `live_update_editor_runs` new-editor lifecycle checks are not active sprint requirements. Active verification uses `topic_editor_runs`; rollback includes mirroring `topic_editor_checkpoints` back to `live_update_checkpoints` before selecting `LIVE_UPDATE_EDITOR_BACKEND=legacy`."
+    },
+    {
+      "sense_check_id": "SC14",
+      "executor_note": "Yes. Focused tests cover the accepted topic-editor criteria across deterministic helpers, wrappers, dispatcher invariants, action vocabulary, idempotency, duplicate sources, rendering, publish failure handling, lease behavior, runtime selector, admin/health status, and legacy compatibility. Existing legacy live-update tests were not deleted or marked away in this batch; the full suite still exposes the same four prior legacy failures."
+    }
+  ]
+}

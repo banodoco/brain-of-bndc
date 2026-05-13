@@ -1,0 +1,34 @@
+{
+  "receipt_id": "119d57e1-50e6-4aee-80da-3f70499206fb",
+  "plan_id": "build-phase-1-of-the-live-20260513-1822",
+  "phase": "gate",
+  "iteration": 1,
+  "attempt": 1,
+  "timestamp_utc": "2026-05-13T16:43:21.580132+00:00",
+  "profile_name": "all-codex",
+  "agent": "claude",
+  "agent_mode": "persistent",
+  "model_configured": "claude",
+  "model_actual": null,
+  "session_id": "e93b948e-d646-4e04-8318-e86de6b23137",
+  "megaplan_version": "0.8.1",
+  "schema_version": 1,
+  "prompt_hash_raw": "87d2a58c6e6f47c2b68827d423dcec0cc0665a6f79815a503fe571b03ebee9ed",
+  "prompt_hash_canonical": "14cbe3965cd2f4a9e58eb8373bfb168775a2804a7a8c6570ffdebc8bd69460a4",
+  "canonicalization_version": 1,
+  "upstream_artifact_hashes": [
+    "sha256:718e138019f39ff8cda4cddfc6a2681e9ff7822e9d4100767ea6dc877a3cf9bf"
+  ],
+  "cost_usd": 0.6856214999999999,
+  "duration_ms": 76539,
+  "prompt_tokens": 227481,
+  "completion_tokens": 7879,
+  "verdict": null,
+  "metrics": {
+    "recommendation": "ITERATE",
+    "blocking_flags_resolved": 0,
+    "blocking_flags_remaining": 0,
+    "override_forced": false
+  },
+  "scope_drift_severity": null
+}

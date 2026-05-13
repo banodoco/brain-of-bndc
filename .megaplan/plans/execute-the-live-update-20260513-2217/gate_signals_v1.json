@@ -1,0 +1,343 @@
+{
+  "robustness": "standard",
+  "signals": {
+    "iteration": 1,
+    "idea": "Execute the live-update editor redesign per docs/live-update-editor-sprint-plan.md as a single sprint: build the new editor end-to-end and flip publishing to it in prod. The sprint plan locks 6 decisions (canonicalizer, similarity threshold, observations retention, rejected-call schema, defer dropped, checkpoint ownership) and lists the ordered work. Design reference: docs/live-update-editor-redesign.md (v6). Cutover ops reference: docs/live-update-editor-phase-2-runbook.md. The work covers: complete Supabase OAuth + apply backlog migration; write & apply the Phase-1 migration (5 new tables + topic_editor_runs); backfill prod feed_items/watchlist into topics+sources; build src/features/summarising/topic_editor.py with the 10 tools (4 read + 6 decision), all 4 dispatcher invariants including v6 collision-override path, canonicalizer + alias resolution, idempotency, rejection logging; pure render_topic publisher with trace embed posting to #daily-updates; concurrent-run lease; checkpoint mirror logic per locked decision #6; wire as primary in the runner and disable the legacy editor; one sanity replay with publishing OFF; flip publishing ON in prod. Old live_update_* tables stay in place as zero-cost rollback. No shadow mode, no decision gates, no formal validation window \u2014 fix what breaks in prod after the flip. Hard scope guards: do not modify src/features/summarising/live_update_editor.py or live_update_prompts.py except to disable invocation; the existing tests for the legacy editor must remain passing or be marked legacy.",
+    "significant_flags": 11,
+    "unresolved_flags": [
+      {
+        "id": "FLAG-001",
+        "concern": "Live-update cutover ops: Sprint and runbook cutover requirements conflict; the plan references the runbook but only requires one publishing-off replay, while the runbook still requires a formal Phase 1 soak/gate and 20+ replay windows.",
+        "category": "completeness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "FLAG-002",
+        "concern": "Topic editor run lifecycle: Plan does not choose a single run table model, alternating between `topic_editor_runs` and shared `live_update_editor_runs.metadata.editor`, which affects runbook verification, health checks, and transition/run linkage.",
+        "category": "correctness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "FLAG-003",
+        "concern": "Operational visibility: Admin chat and health checks remain scoped to legacy `live_update_*` tables and are not included in the cutover plan, so operators may lose accurate status after topics become primary.",
+        "category": "completeness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "FLAG-004",
+        "concern": "Storage integration: New topic helpers are planned only for `storage_handler.py`, but the editor is wired through `db_handler`, so missing synchronous wrapper methods would cause runtime AttributeErrors or force the new editor to bypass established DB access patterns.",
+        "category": "correctness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "FLAG-005",
+        "concern": "Concurrent lease schema: A generic uniqueness constraint on `(environment, guild_id, live_channel_id)` for run rows is underspecified and can block all future runs after the first completed run unless scoped to active leases.",
+        "category": "correctness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "issue_hints",
+        "concern": "Did the work fully address the issue hints, user notes, and approved plan requirements?: Checked `docs/live-update-editor-sprint-plan.md` against `docs/live-update-editor-phase-2-runbook.md`. The plan correctly picks up the six locked sprint decisions, especially the run-source discriminator TODO that is now present in the runbook, but it leaves an unresolved tension: the sprint explicitly says no shadow mode/formal validation window while the runbook still requires a Phase 1 soak, 20+ replay windows, and a phase-gate signoff before cutover. Step 15 only calls for one publishing-off replay, so an executor following the runbook reference literally would hit contradictory cutover requirements.",
+        "category": "completeness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "correctness-1",
+        "concern": "Are the proposed changes technically correct?: Checked the current runtime wiring in `src/features/summarising/summariser_cog.py` and storage methods in `src/common/storage_handler.py`. The plan alternates between a new `topic_editor_runs` table for runs/leases and a `live_update_editor_runs.metadata.editor` discriminator for run-source verification; those are different operational models. If the new editor writes only `topic_editor_runs`, the existing health/admin/runbook queries over `live_update_editor_runs` will not see new runs; if it writes the shared table, the migration and lease design need to say that explicitly.",
+        "category": "correctness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "correctness-2",
+        "concern": "Are the proposed changes technically correct?: Checked the sprint requirement for a concurrent-run lease on `(environment, guild_id, live_channel_id)`. The plan says to add 'any lease uniqueness' on that tuple in `topic_editor_runs`, but a plain unique constraint would also block the second legitimate hourly run after the first completed. The schema needs a partial unique index over active/running rows, a separate lease table, or expiry/release columns; otherwise the lease either fails to protect concurrency or prevents future runs.",
+        "category": "correctness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "scope",
+        "concern": "Search for related code that handles the same concept. Is the reported issue a symptom of something broader?: Searched for live-update operational surfaces beyond the editor and found `src/features/admin_chat/tools.py`, `src/features/admin_chat/agent.py`, `src/features/health/health_check_cog.py`, and `tests/test_live_admin_health.py` still centered on legacy `live_update_*` tables. The plan migrates publishing state into `topics` and `topic_transitions` but does not include admin/health tooling updates, so after cutover operator status commands could report stale legacy feed/watchlist/candidate state while the new editor is operating elsewhere.",
+        "category": "completeness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "all_locations",
+        "concern": "Does the change touch all locations AND supporting infrastructure?: Checked how `LiveUpdateEditor` is instantiated: `SummarizerCog` receives a synchronous `db_handler` and the legacy editor calls methods like `db.get_live_update_checkpoint`, `db.search_live_update_feed_items`, and `db.insert_live_update_watchlist`. The plan adds topic helpers only to `src/common/storage_handler.py`; it does not explicitly add corresponding `src/common/db_handler.py` wrappers, so a `TopicEditor` using the same dependency shape would not be able to call the new storage methods through the object it is actually passed.",
+        "category": "completeness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "callers",
+        "concern": "Find the callers of the changed function. What arguments do they actually pass? Does the fix handle all of them?: Checked legacy tests and fakes in `tests/test_live_runtime_wiring.py`; they inject a `live_update_editor` fake and assert the three trigger strings above. The plan says to update runtime wiring tests to call `TopicEditor` by default, but it should preserve the constructor injection seam or rename it deliberately, otherwise existing test and dependency-injection call sites will break even if production wiring works.",
+        "category": "correctness",
+        "severity": "significant",
+        "status": "open"
+      }
+    ],
+    "resolved_flags": [],
+    "weighted_score": 16.5,
+    "weighted_history": [],
+    "plan_delta_from_previous": null,
+    "recurring_critiques": [],
+    "scope_creep_flags": [],
+    "loop_summary": "Iteration 1. Weighted score trajectory: 16.5. Plan deltas: n/a. Recurring critiques: 0. Resolved flags: 0. Open significant flags: 11.",
+    "debt_overlaps": [],
+    "escalated_debt_subsystems": []
+  },
+  "warnings": [],
+  "criteria_check": {
+    "count": 14,
+    "items": [
+      {
+        "criterion": "The Phase-1 schema migration creates `topics`, `topic_sources`, `topic_aliases`, `topic_transitions`, `editorial_observations`, and the chosen run/checkpoint lease support with required uniqueness and indexes.",
+        "priority": "must",
+        "requires": [
+          "read_files",
+          "run_shell"
+        ]
+      },
+      {
+        "criterion": "Backfill is idempotent and produces topic counts where posted topics are at least legacy `live_update_feed_items` count and watching topics are at least legacy `live_update_watchlist` count for the target environment, allowing only explained post-backfill deltas.",
+        "priority": "must",
+        "requires": [
+          "run_shell",
+          "observe_runtime_logs"
+        ]
+      },
+      {
+        "criterion": "`TopicEditor.run_once()` can execute with publishing disabled, consume archived messages from the new checkpoint, write accepted topic state to new tables, and avoid Discord publishing calls.",
+        "priority": "must",
+        "requires": [
+          "run_tests",
+          "observe_runtime_logs"
+        ]
+      },
+      {
+        "criterion": "All four dispatcher invariants are covered by tests: simple-post structural rejection, collision rejection/override, `(run_id, tool_call_id)` idempotency, and `(topic_id, message_id)` source uniqueness.",
+        "priority": "must",
+        "requires": [
+          "run_tests",
+          "parse_diff"
+        ]
+      },
+      {
+        "criterion": "Every dispatcher rejection path writes a `topic_transitions` row with the locked `rejected_*` action shape and enough payload to identify the failed tool call and reason.",
+        "priority": "must",
+        "requires": [
+          "run_tests",
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "`render_topic()` is pure and has tests for simple, sectioned, story-update, and partial-publish failure/update behavior.",
+        "priority": "must",
+        "requires": [
+          "run_tests",
+          "parse_diff"
+        ]
+      },
+      {
+        "criterion": "Scheduled runs, startup `--summary-now`, and owner `summarynow` route to the new topic editor by default, while explicitly named legacy/backfill routes remain available for rollback.",
+        "priority": "must",
+        "requires": [
+          "run_tests",
+          "parse_diff"
+        ]
+      },
+      {
+        "criterion": "Legacy `live_update_editor.py` and `live_update_prompts.py` are not materially modified except for invocation suppression or explicit legacy compatibility marking.",
+        "priority": "must",
+        "requires": [
+          "parse_diff",
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Existing legacy live-update tests either pass unchanged or are clearly marked/updated as legacy compatibility tests without deleting rollback coverage.",
+        "priority": "must",
+        "requires": [
+          "run_tests",
+          "parse_diff"
+        ]
+      },
+      {
+        "criterion": "A publishing-off sanity replay over the latest prod source-message window completes and produces a trace showing source count, tool calls, outcomes, rejections/overrides, latency, and would-publish messages.",
+        "priority": "must",
+        "requires": [
+          "run_shell",
+          "observe_runtime_logs"
+        ]
+      },
+      {
+        "criterion": "Publishing flip has a documented rollback that mirrors the new checkpoint back to `live_update_checkpoints.last_message_id` before re-enabling legacy invocation.",
+        "priority": "must",
+        "requires": [
+          "read_files",
+          "parse_diff"
+        ]
+      },
+      {
+        "criterion": "The new editor code remains organized around deterministic helpers for canonicalization, dispatch, and rendering rather than burying those behaviors in the LLM prompt.",
+        "priority": "should",
+        "requires": [
+          "read_files",
+          "subjective_judgment"
+        ]
+      },
+      {
+        "criterion": "Cost/latency metadata is recorded per run so post-flip regressions are visible without log scraping.",
+        "priority": "should",
+        "requires": [
+          "read_files",
+          "observe_runtime_logs"
+        ]
+      },
+      {
+        "criterion": "Operator-only runbook values are filled before prod cutover: toggle name, suppression mechanism, bot identities, trace channel, and run-source discriminator.",
+        "priority": "info",
+        "requires": [
+          "verify_physical_device"
+        ]
+      }
+    ]
+  },
+  "preflight_results": {
+    "project_dir_exists": true,
+    "project_dir_writable": true,
+    "success_criteria_present": true,
+    "claude_available": true,
+    "codex_available": true
+  },
+  "unresolved_flags": [
+    {
+      "id": "FLAG-001",
+      "concern": "Live-update cutover ops: Sprint and runbook cutover requirements conflict; the plan references the runbook but only requires one publishing-off replay, while the runbook still requires a formal Phase 1 soak/gate and 20+ replay windows.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "`docs/live-update-editor-sprint-plan.md` says no shadow mode/decision gates; `docs/live-update-editor-phase-2-runbook.md` sections 3-4 still require Phase 1 soak signoff and 20+ replay-divergence windows.",
+      "raised_in": "critique_v1.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "FLAG-002",
+      "concern": "Topic editor run lifecycle: Plan does not choose a single run table model, alternating between `topic_editor_runs` and shared `live_update_editor_runs.metadata.editor`, which affects runbook verification, health checks, and transition/run linkage.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "Sprint plan asks for `topic_editor_runs`; implementation plan Step 10 proposes `metadata.editor` in `live_update_editor_runs`; current `storage_handler.create_live_update_run` only writes the legacy shared table shape.",
+      "raised_in": "critique_v1.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "FLAG-003",
+      "concern": "Operational visibility: Admin chat and health checks remain scoped to legacy `live_update_*` tables and are not included in the cutover plan, so operators may lose accurate status after topics become primary.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "`src/features/admin_chat/tools.py` `QUERYABLE_TABLES` and `execute_get_live_update_status` read `live_update_candidates`, `live_update_decisions`, `live_update_feed_items`, `live_update_watchlist`, and duplicate/memory tables; `src/features/health/health_check_cog.py` checks `live_update_editor_runs`.",
+      "raised_in": "critique_v1.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "FLAG-004",
+      "concern": "Storage integration: New topic helpers are planned only for `storage_handler.py`, but the editor is wired through `db_handler`, so missing synchronous wrapper methods would cause runtime AttributeErrors or force the new editor to bypass established DB access patterns.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "`SummarizerCog.__init__` passes `db_handler` into the editor; `LiveUpdateEditor` calls `self.db.*` sync wrapper methods. `src/common/db_handler.py` wraps every current live-update storage method, but the plan only names `src/common/storage_handler.py` for new topic helpers.",
+      "raised_in": "critique_v1.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "FLAG-005",
+      "concern": "Concurrent lease schema: A generic uniqueness constraint on `(environment, guild_id, live_channel_id)` for run rows is underspecified and can block all future runs after the first completed run unless scoped to active leases.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "Implementation plan Step 2 asks for 'any lease uniqueness' on the tuple and Step 4 asks lease helpers keyed by that tuple; neither mentions partial uniqueness on running rows, lease expiration, or a separate released lease row.",
+      "raised_in": "critique_v1.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "issue_hints",
+      "concern": "Did the work fully address the issue hints, user notes, and approved plan requirements?: Checked `docs/live-update-editor-sprint-plan.md` against `docs/live-update-editor-phase-2-runbook.md`. The plan correctly picks up the six locked sprint decisions, especially the run-source discriminator TODO that is now present in the runbook, but it leaves an unresolved tension: the sprint explicitly says no shadow mode/formal validation window while the runbook still requires a Phase 1 soak, 20+ replay windows, and a phase-gate signoff before cutover. Step 15 only calls for one publishing-off replay, so an executor following the runbook reference literally would hit contradictory cutover requirements.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "Checked `docs/live-update-editor-sprint-plan.md` against `docs/live-update-editor-phase-2-runbook.md`. The plan correctly picks up the six locked sprint decisions, especially the run-source discriminator TODO that is now present in the runbook, but it leaves an unresolved tension: the sprint explicitly says no shadow mode/formal validation window while the runbook still requires a Phase 1 soak, 20+ replay windows, and a phase-gate signoff before cutover. Step 15 only calls for one publishing-off replay, so an executor following the runbook reference literally would hit contradictory cutover requirements.",
+      "raised_in": "critique_v1.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "correctness-1",
+      "concern": "Are the proposed changes technically correct?: Checked the current runtime wiring in `src/features/summarising/summariser_cog.py` and storage methods in `src/common/storage_handler.py`. The plan alternates between a new `topic_editor_runs` table for runs/leases and a `live_update_editor_runs.metadata.editor` discriminator for run-source verification; those are different operational models. If the new editor writes only `topic_editor_runs`, the existing health/admin/runbook queries over `live_update_editor_runs` will not see new runs; if it writes the shared table, the migration and lease design need to say that explicitly.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "Checked the current runtime wiring in `src/features/summarising/summariser_cog.py` and storage methods in `src/common/storage_handler.py`. The plan alternates between a new `topic_editor_runs` table for runs/leases and a `live_update_editor_runs.metadata.editor` discriminator for run-source verification; those are different operational models. If the new editor writes only `topic_editor_runs`, the existing health/admin/runbook queries over `live_update_editor_runs` will not see new runs; if it writes the shared table, the migration and lease design need to say that explicitly.",
+      "raised_in": "critique_v1.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "correctness-2",
+      "concern": "Are the proposed changes technically correct?: Checked the sprint requirement for a concurrent-run lease on `(environment, guild_id, live_channel_id)`. The plan says to add 'any lease uniqueness' on that tuple in `topic_editor_runs`, but a plain unique constraint would also block the second legitimate hourly run after the first completed. The schema needs a partial unique index over active/running rows, a separate lease table, or expiry/release columns; otherwise the lease either fails to protect concurrency or prevents future runs.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "Checked the sprint requirement for a concurrent-run lease on `(environment, guild_id, live_channel_id)`. The plan says to add 'any lease uniqueness' on that tuple in `topic_editor_runs`, but a plain unique constraint would also block the second legitimate hourly run after the first completed. The schema needs a partial unique index over active/running rows, a separate lease table, or expiry/release columns; otherwise the lease either fails to protect concurrency or prevents future runs.",
+      "raised_in": "critique_v1.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "scope",
+      "concern": "Search for related code that handles the same concept. Is the reported issue a symptom of something broader?: Searched for live-update operational surfaces beyond the editor and found `src/features/admin_chat/tools.py`, `src/features/admin_chat/agent.py`, `src/features/health/health_check_cog.py`, and `tests/test_live_admin_health.py` still centered on legacy `live_update_*` tables. The plan migrates publishing state into `topics` and `topic_transitions` but does not include admin/health tooling updates, so after cutover operator status commands could report stale legacy feed/watchlist/candidate state while the new editor is operating elsewhere.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "Searched for live-update operational surfaces beyond the editor and found `src/features/admin_chat/tools.py`, `src/features/admin_chat/agent.py`, `src/features/health/health_check_cog.py`, and `tests/test_live_admin_health.py` still centered on legacy `live_update_*` tables. The plan migrates publishing state into `topics` and `topic_transitions` but does not include admin/health tooling updates, so after cutover operator status commands could report stale legacy feed/watchlist/candidate state while the new editor is operating elsewhere.",
+      "raised_in": "critique_v1.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "all_locations",
+      "concern": "Does the change touch all locations AND supporting infrastructure?: Checked how `LiveUpdateEditor` is instantiated: `SummarizerCog` receives a synchronous `db_handler` and the legacy editor calls methods like `db.get_live_update_checkpoint`, `db.search_live_update_feed_items`, and `db.insert_live_update_watchlist`. The plan adds topic helpers only to `src/common/storage_handler.py`; it does not explicitly add corresponding `src/common/db_handler.py` wrappers, so a `TopicEditor` using the same dependency shape would not be able to call the new storage methods through the object it is actually passed.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "Checked how `LiveUpdateEditor` is instantiated: `SummarizerCog` receives a synchronous `db_handler` and the legacy editor calls methods like `db.get_live_update_checkpoint`, `db.search_live_update_feed_items`, and `db.insert_live_update_watchlist`. The plan adds topic helpers only to `src/common/storage_handler.py`; it does not explicitly add corresponding `src/common/db_handler.py` wrappers, so a `TopicEditor` using the same dependency shape would not be able to call the new storage methods through the object it is actually passed.",
+      "raised_in": "critique_v1.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "callers",
+      "concern": "Find the callers of the changed function. What arguments do they actually pass? Does the fix handle all of them?: Checked legacy tests and fakes in `tests/test_live_runtime_wiring.py`; they inject a `live_update_editor` fake and assert the three trigger strings above. The plan says to update runtime wiring tests to call `TopicEditor` by default, but it should preserve the constructor injection seam or rename it deliberately, otherwise existing test and dependency-injection call sites will break even if production wiring works.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "Checked legacy tests and fakes in `tests/test_live_runtime_wiring.py`; they inject a `live_update_editor` fake and assert the three trigger strings above. The plan says to update runtime wiring tests to call `TopicEditor` by default, but it should preserve the constructor injection seam or rename it deliberately, otherwise existing test and dependency-injection call sites will break even if production wiring works.",
+      "raised_in": "critique_v1.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false
+    }
+  ]
+}

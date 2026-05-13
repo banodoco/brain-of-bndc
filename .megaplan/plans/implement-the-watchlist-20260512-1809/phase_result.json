@@ -1,0 +1,18 @@
+{
+  "phase": "execute",
+  "invocation_id": "54597ba6df7b4aec",
+  "exit_kind": "blocked_by_prereq",
+  "blocked_tasks": [
+    {
+      "task_id": "T13",
+      "reason": "blocked_by_prereq",
+      "notes": ""
+    }
+  ],
+  "deviations": [],
+  "artifacts_written": [
+    "finalize.json",
+    "final.md"
+  ],
+  "cli_provenance": {}
+}

@@ -1,0 +1,517 @@
+{
+  "name": "produce-the-phase-2-prod-20260513-1822",
+  "idea": "Produce the Phase 2 prod cutover runbook at docs/live-update-editor-phase-2-runbook.md for the live-update editor redesign (per the linked v6 redesign doc). Phase 1 will deliver the new editor in dev with publishing OFF; Phase 2 enables publishing, runs new + old editors side-by-side in prod for 24-48h, monitors for partial-publish failures via topics.publication_status='partial', renames old tables to _legacy_*, and schedules deletion in 2-4 weeks. The runbook must specify: exact publishing-flag-flip procedure with pre-flip preconditions, partial-publish detection SQL (the queries oncall would run), rollback procedure (how to flip the runner back to the legacy editor without rewriting state), the comparison-with-shadow-mode rubric (what specific signals from the Phase-1 shadow-mode logs mean cutover is safe versus 'go back and tune'), the table-rename migration SQL with correct ordering and constraint handling, and a decision tree for the 24-48h watch period \u2014 what observable symptom triggers what action (abort, hot-fix, accept). Assume Phase 1 lands per spec; deviations get a 'consult the doc' escape hatch, not detailed branching. The runbook is the operator's source of truth during cutover.",
+  "current_state": "done",
+  "iteration": 3,
+  "created_at": "2026-05-13T16:22:50Z",
+  "config": {
+    "project_dir": "/Users/peteromalley/Documents/banodoco-workspace/brain-of-bndc",
+    "auto_approve": true,
+    "robustness": "standard",
+    "mode": "doc",
+    "strict_notes": true,
+    "agent": "",
+    "profile": "all-codex",
+    "with_prep": true,
+    "output_path": "docs/live-update-editor-phase-2-runbook.md",
+    "from_doc": "docs/live-update-editor-redesign.md",
+    "phase_model": [
+      "plan=claude",
+      "prep=claude",
+      "critique=claude",
+      "revise=claude",
+      "gate=claude",
+      "finalize=claude",
+      "execute=claude",
+      "loop_plan=claude",
+      "loop_execute=claude",
+      "review=claude",
+      "tiebreaker_researcher=claude",
+      "tiebreaker_challenger=claude",
+      "feedback=claude:low"
+    ]
+  },
+  "sessions": {
+    "claude_prep": {
+      "id": "b0a17564-1970-40dc-8b45-22462bf0c035",
+      "mode": "persistent",
+      "created_at": "2026-05-13T16:26:41Z",
+      "last_used_at": "2026-05-13T16:26:41Z",
+      "refreshed": false
+    },
+    "claude_planner": {
+      "id": "b8a607ee-3aa5-4bf6-9ec3-51ecb06c26bf",
+      "mode": "persistent",
+      "created_at": "2026-05-13T16:32:11Z",
+      "last_used_at": "2026-05-13T16:46:41Z",
+      "refreshed": false
+    },
+    "claude_critic": {
+      "id": "263dbc0c-7edf-44b9-afae-f26b71196d1c",
+      "mode": "persistent",
+      "created_at": "2026-05-13T16:36:45Z",
+      "last_used_at": "2026-05-13T16:48:27Z",
+      "refreshed": false
+    },
+    "claude_gatekeeper": {
+      "id": "3b87cace-0610-4d07-bd00-f0526750030d",
+      "mode": "persistent",
+      "created_at": "2026-05-13T16:37:46Z",
+      "last_used_at": "2026-05-13T16:50:41Z",
+      "refreshed": false
+    },
+    "claude_finalizer": {
+      "id": "3cf0743d-e09c-4303-868c-e11c65b754ea",
+      "mode": "persistent",
+      "created_at": "2026-05-13T16:52:36Z",
+      "last_used_at": "2026-05-13T16:52:36Z",
+      "refreshed": false
+    },
+    "claude_executor": {
+      "id": "70c332f8-ebaa-43fb-b215-7c2abc107206",
+      "mode": "persistent",
+      "created_at": "2026-05-13T16:53:20Z",
+      "last_used_at": "2026-05-13T16:59:14Z",
+      "refreshed": false
+    },
+    "claude_reviewer": {
+      "id": "dec3a1d2-3205-434f-8074-8e127f95631b",
+      "mode": "persistent",
+      "created_at": "2026-05-13T17:00:40Z",
+      "last_used_at": "2026-05-13T17:00:40Z",
+      "refreshed": true
+    }
+  },
+  "plan_versions": [
+    {
+      "version": 1,
+      "file": "plan_v1.md",
+      "hash": "sha256:ed7211cab87a95c33b98d4232847a14cf7ef7f79f9ab18840e97482c4d7100d9",
+      "timestamp": "2026-05-13T16:32:11Z"
+    },
+    {
+      "version": 2,
+      "file": "plan_v2.md",
+      "hash": "sha256:8f4d7a4c75af29a4c54d697ef4bac7511e73cabbf47328b004c73bcf5d1a1a11",
+      "timestamp": "2026-05-13T16:40:38Z"
+    },
+    {
+      "version": 3,
+      "file": "plan_v3.md",
+      "hash": "sha256:900ec069f81209758e9d0117e31d8dca40f8a03f7b10f0e6b5c94f1fc64b2dc9",
+      "timestamp": "2026-05-13T16:46:41Z"
+    }
+  ],
+  "history": [
+    {
+      "step": "init",
+      "timestamp": "2026-05-13T16:22:50Z",
+      "duration_ms": 0,
+      "cost_usd": 0.0,
+      "result": "success",
+      "environment": {
+        "claude": true,
+        "codex": true
+      }
+    },
+    {
+      "step": "prep",
+      "timestamp": "2026-05-13T16:26:41Z",
+      "duration_ms": 224257,
+      "cost_usd": 1.48325325,
+      "result": "success",
+      "prompt_tokens": 1089680,
+      "completion_tokens": 17618,
+      "total_tokens": 1107298,
+      "session_mode": "persistent",
+      "session_id": "b0a17564-1970-40dc-8b45-22462bf0c035",
+      "agent": "claude",
+      "output_file": "prep.json",
+      "artifact_hash": "sha256:221f17b44855bba972b5430a067fa110af29bc5868e4bf2dcfe272d0ed3c9523"
+    },
+    {
+      "step": "plan",
+      "timestamp": "2026-05-13T16:29:14Z",
+      "duration_ms": 150747,
+      "cost_usd": 0.0,
+      "result": "error",
+      "raw_output_file": "plan_v1_raw.txt",
+      "message": "Plan output failed structural validation: Plan must include at least one step section (`## Step N:` or `### Step N:` under a phase)."
+    },
+    {
+      "step": "plan",
+      "timestamp": "2026-05-13T16:32:11Z",
+      "duration_ms": 175352,
+      "cost_usd": 0.6877362499999999,
+      "result": "success",
+      "prompt_tokens": 152984,
+      "completion_tokens": 18500,
+      "total_tokens": 171484,
+      "session_mode": "persistent",
+      "session_id": "b8a607ee-3aa5-4bf6-9ec3-51ecb06c26bf",
+      "agent": "claude",
+      "output_file": "plan_v1.md",
+      "artifact_hash": "sha256:ed7211cab87a95c33b98d4232847a14cf7ef7f79f9ab18840e97482c4d7100d9"
+    },
+    {
+      "step": "critique",
+      "timestamp": "2026-05-13T16:36:45Z",
+      "duration_ms": 273145,
+      "cost_usd": 1.9301837499999996,
+      "result": "success",
+      "prompt_tokens": 1447768,
+      "completion_tokens": 23890,
+      "total_tokens": 1471658,
+      "session_mode": "persistent",
+      "session_id": "263dbc0c-7edf-44b9-afae-f26b71196d1c",
+      "agent": "claude",
+      "output_file": "critique_v1.json",
+      "artifact_hash": "sha256:5fe8e5e8862315164cc6a73ac43529de9e89bc3432f1eed04a81db31cd514a3e",
+      "flags_count": 15
+    },
+    {
+      "step": "gate",
+      "timestamp": "2026-05-13T16:37:46Z",
+      "duration_ms": 59345,
+      "cost_usd": 0.6359815,
+      "result": "success",
+      "prompt_tokens": 204079,
+      "completion_tokens": 4300,
+      "total_tokens": 208379,
+      "session_mode": "persistent",
+      "session_id": "3b87cace-0610-4d07-bd00-f0526750030d",
+      "agent": "claude",
+      "output_file": "gate.json",
+      "artifact_hash": "sha256:ed2f79fd3b68b134c10c3e5fbd5dc4797c0129e88278168c5733ed92f7748e00",
+      "recommendation": "ITERATE"
+    },
+    {
+      "step": "revise",
+      "timestamp": "2026-05-13T16:40:38Z",
+      "duration_ms": 169848,
+      "cost_usd": 1.3333234999999999,
+      "result": "success",
+      "prompt_tokens": 424614,
+      "completion_tokens": 17297,
+      "total_tokens": 441911,
+      "session_mode": "persistent",
+      "session_id": "b8a607ee-3aa5-4bf6-9ec3-51ecb06c26bf",
+      "agent": "claude",
+      "output_file": "plan_v2.md",
+      "artifact_hash": "sha256:8f4d7a4c75af29a4c54d697ef4bac7511e73cabbf47328b004c73bcf5d1a1a11",
+      "flags_addressed": [
+        {
+          "id": "FLAG-001",
+          "resolution": "addressed",
+          "reason": "\u00a75 verification now targets Discord-send suppression \u2014 Branch A checks for absence of a legacy live_update_editor_runs row (scheduler-tick gate); Branch B checks legacy run row carries the suppression marker and no live-channel posts attributed to the legacy bot identity. The 'zero new live_update_feed_items rows' check is removed; \u00a71 Important guardrails calls out per :651 that both editors keep writing to their own tables during the watch."
+        },
+        {
+          "id": "issue_hints",
+          "resolution": "addressed",
+          "reason": "\u00a79 step 6 (formerly Step 10.5) now cross-checks against docs/live-update-editor-redesign.md:212-223 and src/common/storage_handler.py:652-1968 as the authoritative legacy-table set, and explicitly notes that docs/live-update-editor-legacy-boundaries.md's 'Legacy Storage And Helpers' is about daily_summaries and is NOT the right target."
+        },
+        {
+          "id": "correctness-1",
+          "resolution": "addressed",
+          "reason": "Same as FLAG-001 \u2014 \u00a75 verification reframed to Discord-send activity with Branch A/B handling for the Phase-1 suppression mechanism."
+        },
+        {
+          "id": "correctness-2",
+          "resolution": "addressed",
+          "reason": "\u00a77 partial-publish trip-wire reworded to '2 cumulative across Phase 1 shadow + Phase 2 watch' with explicit :600 citation. \u00a76 adds a cross-window tally query that sums partials in both dev (Phase 1 shadow) and prod (Phase 2 watch) since the soak start date. Trip-wire language is also re-stated in \u00a71 Important guardrails and \u00a711 footer."
+        },
+        {
+          "id": "correctness-3",
+          "resolution": "addressed",
+          "reason": "\u00a75 step 4 explicitly anchors verification on the next observed live_update_editor_runs row (status='completed' after the flip timestamp), not a fixed 15-minute window. Cadence rationale per :633 noted inline."
+        },
+        {
+          "id": "scope-1",
+          "resolution": "addressed",
+          "reason": "\u00a75 now branches the verification shape on the suppression mechanism: Branch A (scheduler-tick gate, legacy editor never runs) checks for no new legacy run rows; Branch B (publish-call gate at _publish_accepted_candidates / _select_publishable_candidates) checks the suppression marker on existing legacy run rows plus absence of legacy-bot live-channel posts. Operator selects the branch based on what Phase 1 actually shipped."
+        },
+        {
+          "id": "scope-2",
+          "resolution": "addressed",
+          "reason": "\u00a77 'lease contention' row split into three distinct symptoms with distinct actions: new-editor self-contention (HOT-FIX release lease + verify next tick), legacy writing to new tables (ABORT \u2014 isolation broke), and new+legacy run rows overlapping in same lease key (ABORT \u2014 lease misconfigured). Each row references the relevant lease key per :684."
+        },
+        {
+          "id": "all_locations",
+          "resolution": "addressed",
+          "reason": "\u00a79 step 1 names a default migration-runner path: a new timestamped file in .migrations_staging/ (e.g. 2026MMDDHHMMSS_live_update_legacy_rename.sql), matching the existing repo convention confirmed by ls .migrations_staging/. A TODO(phase-1) covers alternates (Supabase dashboard SQL editor, psql-direct) if Phase 1 elects a different path; the SQL body is identical regardless."
+        },
+        {
+          "id": "callers",
+          "resolution": "addressed",
+          "reason": "\u00a71 step 2 now carries an explicit 'Provisional until Phase 1 lands' banner under the H1 that enumerates the four TODO(phase-1) markers (toggle name+location, suppression mechanism, prod trace channel, migration-runner path) and tells the operator not to execute the procedure until those are resolved. \u00a73 preconditions checklist adds 'Phase-1 TODOs resolved' as an explicit gate."
+        }
+      ]
+    },
+    {
+      "step": "critique",
+      "timestamp": "2026-05-13T16:43:01Z",
+      "duration_ms": 141694,
+      "cost_usd": 1.24586825,
+      "result": "success",
+      "prompt_tokens": 1322432,
+      "completion_tokens": 10283,
+      "total_tokens": 1332715,
+      "session_mode": "persistent",
+      "session_id": "263dbc0c-7edf-44b9-afae-f26b71196d1c",
+      "agent": "claude",
+      "output_file": "critique_v2.json",
+      "artifact_hash": "sha256:ebc2244f2e074937da5a0758d07cce19f352084e205e3109642c7825ced28fa1",
+      "flags_count": 10
+    },
+    {
+      "step": "gate",
+      "timestamp": "2026-05-13T16:43:56Z",
+      "duration_ms": 53412,
+      "cost_usd": 0.5301975,
+      "result": "success",
+      "prompt_tokens": 239664,
+      "completion_tokens": 4377,
+      "total_tokens": 244041,
+      "session_mode": "persistent",
+      "session_id": "3b87cace-0610-4d07-bd00-f0526750030d",
+      "agent": "claude",
+      "output_file": "gate.json",
+      "artifact_hash": "sha256:1af7e72129087d8377c77b0b1b9188da5a094c857064958e2b1dc9a262abc37e",
+      "recommendation": "ITERATE"
+    },
+    {
+      "step": "revise",
+      "timestamp": "2026-05-13T16:46:41Z",
+      "duration_ms": 163267,
+      "cost_usd": 1.2064130000000002,
+      "result": "success",
+      "prompt_tokens": 702371,
+      "completion_tokens": 17745,
+      "total_tokens": 720116,
+      "session_mode": "persistent",
+      "session_id": "b8a607ee-3aa5-4bf6-9ec3-51ecb06c26bf",
+      "agent": "claude",
+      "output_file": "plan_v3.md",
+      "artifact_hash": "sha256:900ec069f81209758e9d0117e31d8dca40f8a03f7b10f0e6b5c94f1fc64b2dc9",
+      "flags_addressed": [
+        {
+          "id": "issue_hints",
+          "resolution": "addressed",
+          "reason": "\u00a79 step 1 now names the full hand-off chain explicitly: author in .migrations_staging/ \u2192 copy VERBATIM (filename unchanged) into /Users/peteromalley/Documents/banodoco-workspace/supabase/migrations/ per .migrations_staging/README.md \u2192 apply via `supabase db push` \u2192 verify the row recorded in supabase_migrations.schema_migrations before treating as applied. \u00a710 step 2 uses the same chain for the DROP TABLE block. Operator cannot write SQL into staging and assume it ran."
+        },
+        {
+          "id": "correctness-1",
+          "resolution": "addressed",
+          "reason": "Replaced the v2 `topics GROUP BY environment` cross-window tally (which would return 0 dev rows by design and mislead the operator) with a prod-only SQL count plus an explicit instruction in \u00a76 to add the Phase-1 shadow-attempted-publish partial count from Phase-1 shadow-mode telemetry (trace embed + shadow logs per :611-644), citing :611/:627/:633 (Phase 1 publishing OFF) for why dev `topics` has no `partial` rows. Trip-wire is now sum-of-two-sources. The Fast Triage `-- swap to 'dev'` annotation in \u00a72/\u00a73/\u00a74 also notes the dev rows are diagnostic only."
+        },
+        {
+          "id": "correctness-2",
+          "resolution": "addressed",
+          "reason": "\u00a75 Branch B verification now names the Discord-side count (operator scrolls the live channel since the flip timestamp for posts attributed to the legacy bot identity) as the PRIMARY signal. The SQL suppression marker is demoted to a nice-to-have secondary check that is acceptable to skip if Phase 1 doesn't write one. A fifth TODO(phase-1) is added to the \u00a71 banner for the new-editor / legacy bot identity distinction so the Discord-side count has a concrete anchor."
+        },
+        {
+          "id": "all_locations",
+          "resolution": "addressed",
+          "reason": "Same fix as issue_hints \u2014 \u00a79 names the full chain (`.migrations_staging/` author \u2192 `supabase/migrations/` apply destination \u2192 `supabase db push` \u2192 verify in `supabase_migrations.schema_migrations`). \u00a710 uses the same chain. The destination path is given as an absolute path per `.migrations_staging/README.md`."
+        },
+        {
+          "id": "scope",
+          "resolution": "addressed",
+          "reason": "\u00a71 provisional banner now includes an explicit out-of-scope clause: 'if Phase 1 ships any mechanism other than Branch A or Branch B (hybrid, per-guild config branch, per-channel rollout, partial guild rollout), ABORT to the consult-the-doc escape hatch and do not improvise.' \u00a73 preconditions adds 'Phase 1 shipped Branch A or Branch B (not a third mechanism)' as a gate. \u00a77 decision tree adds a row: 'Phase 1 turns out to be a third mechanism \u2192 ABORT immediately; the runbook does not cover it.'"
+        },
+        {
+          "id": "correctness-3",
+          "resolution": "addressed",
+          "reason": "Already addressed in v2 (verification anchors on next observed `live_update_editor_runs` row with `status='completed'`, not a fixed window). v3 self-review pass re-verifies this in Step 13.9; no further change needed."
+        },
+        {
+          "id": "scope-1",
+          "resolution": "addressed",
+          "reason": "Already addressed in v2 via Branch A / Branch B branching. v3 reinforces by demoting SQL marker to nice-to-have under Branch B and naming Discord-side count as primary; no scope expansion."
+        },
+        {
+          "id": "scope-2",
+          "resolution": "addressed",
+          "reason": "Already addressed in v2 (lease symptoms split into three distinct rows: new-editor self-contention HOT-FIX, legacy writing to new tables ABORT, lease-key overlap ABORT). v3 self-review pass re-verifies in Step 13.11; no further change needed."
+        },
+        {
+          "id": "callers",
+          "resolution": "addressed",
+          "reason": "Already addressed in v2 via the provisional banner. v3 strengthens by listing five TODO(phase-1) items (adding bot identity), explicit third-mechanism abort clause, and the corresponding precondition gate and decision-tree row."
+        }
+      ]
+    },
+    {
+      "step": "critique",
+      "timestamp": "2026-05-13T16:48:27Z",
+      "duration_ms": 104473,
+      "cost_usd": 1.0057152500000002,
+      "result": "success",
+      "prompt_tokens": 1016456,
+      "completion_tokens": 8305,
+      "total_tokens": 1024761,
+      "session_mode": "persistent",
+      "session_id": "263dbc0c-7edf-44b9-afae-f26b71196d1c",
+      "agent": "claude",
+      "output_file": "critique_v3.json",
+      "artifact_hash": "sha256:21989d19fd278d8e924e64065e79b504718f50d6597a85a2e36b7587ea698033",
+      "flags_count": 5
+    },
+    {
+      "step": "gate",
+      "timestamp": "2026-05-13T16:50:41Z",
+      "duration_ms": 131779,
+      "cost_usd": 1.4450465000000001,
+      "result": "success",
+      "prompt_tokens": 854782,
+      "completion_tokens": 11818,
+      "total_tokens": 866600,
+      "session_mode": "persistent",
+      "session_id": "3b87cace-0610-4d07-bd00-f0526750030d",
+      "agent": "claude",
+      "output_file": "gate.json",
+      "artifact_hash": "sha256:3f323c91cf6d87db6adf81e94f3651b96b2f0a6359bed9a19f2f2a4a26e8ee7d",
+      "recommendation": "PROCEED"
+    },
+    {
+      "step": "finalize",
+      "timestamp": "2026-05-13T16:52:36Z",
+      "duration_ms": 113618,
+      "cost_usd": 1.1314662500000001,
+      "result": "success",
+      "prompt_tokens": 215903,
+      "completion_tokens": 12632,
+      "total_tokens": 228535,
+      "session_mode": "persistent",
+      "session_id": "3cf0743d-e09c-4303-868c-e11c65b754ea",
+      "agent": "claude",
+      "output_file": "finalize.json",
+      "artifact_hash": "sha256:38f750e354037eb68f7e723c4cbb3a614dca7c0c688f8ca4d6c7e3b5a37c9400"
+    },
+    {
+      "step": "execute",
+      "timestamp": "2026-05-13T16:59:14Z",
+      "duration_ms": 396808,
+      "cost_usd": 5.1367365000000005,
+      "result": "success",
+      "session_mode": "persistent",
+      "session_id": "70c332f8-ebaa-43fb-b215-7c2abc107206",
+      "agent": "claude",
+      "output_file": "execution.json",
+      "artifact_hash": "sha256:534f3c565a521d44f1f1d90c5fd3332ef75a8d8522a98388b01897b7781969ee",
+      "finalize_hash": "sha256:7680dc8677c9d8790d093f194233835e05a055adf3bb4945bfef7dc88f604107",
+      "approval_mode": "auto_approve"
+    },
+    {
+      "step": "review",
+      "timestamp": "2026-05-13T17:00:40Z",
+      "duration_ms": 84567,
+      "cost_usd": 1.3625874999999998,
+      "result": "success",
+      "prompt_tokens": 544325,
+      "completion_tokens": 7886,
+      "total_tokens": 552211,
+      "session_mode": "persistent",
+      "session_id": "dec3a1d2-3205-434f-8074-8e127f95631b",
+      "agent": "claude",
+      "output_file": "review.json",
+      "artifact_hash": "sha256:e53b0a6448f7f1491b562292feeee39ccd746eb17f97b9e2a9944698d90dbc74",
+      "finalize_hash": "sha256:4c7956239b09c99d0f71a550cf989861b2ae498a7f51f84bd96fe54d384089ee"
+    }
+  ],
+  "meta": {
+    "significant_counts": [
+      9,
+      9,
+      10
+    ],
+    "weighted_scores": [
+      10.5,
+      11.5,
+      13.5
+    ],
+    "plan_deltas": [
+      56.07,
+      48.14
+    ],
+    "recurring_critiques": [
+      [],
+      [],
+      []
+    ],
+    "total_cost_usd": 19.134507,
+    "overrides": [],
+    "notes": [
+      {
+        "timestamp": "2026-05-13T16:22:50Z",
+        "note": "strict-notes auto-enabled for metaplan/doc mode",
+        "source": "driver"
+      }
+    ],
+    "imported_decisions": [],
+    "current_invocation_id": "e5ba957d697141bf",
+    "user_approved_gate": true
+  },
+  "last_gate": {
+    "recommendation": "PROCEED",
+    "rationale": "Seven of the ten blocking flags are flagged \"addressed\" by the critique itself and are disputed below with citations to the specific plan revisions that resolved them. The remaining three open flags (`callers`, `scope`, `correctness`) are the same observation under three category labels: the runbook references a \"legacy run-source\" discriminator on `live_update_editor_runs` that doesn't exist in the schema today \u2014 a sixth Phase-1 dependency. These are accept_tradeoff per the brief's explicit \"consult the doc\" escape-hatch authorization; the plan's structural containment (provisional banner, 'Phase-1 TODOs resolved' precondition, 'third mechanism \u2192 ABORT' decision-tree row, default-ABORT footer) already traps the case before any flip, and the executor will add a sixth TODO(phase-1) inline at write time. Iteration Pressure shows zero addressed-then-reopened across all groups; the loop is finding sharper sub-framings, not bouncing fixes back. Time to execute.",
+    "reprompted": true,
+    "signals_assessment": "Iteration 3, weighted score 10.5 \u2192 11.5 \u2192 13.5 (rising as the critic enumerates one more Phase-1 dependency per round: TODO count went 4 \u2192 5 \u2192 6). 10 flags resolved across iterations 1-3 with plan deltas 56.1% / 48.1% \u2014 the planner is responsive and the runbook's structural shape (Discord-side flip verification, next-tick anchoring, cross-window trip-wire sourced from Phase-1 telemetry, split lease symptoms, full migration hand-off chain, third-mechanism abort clause) is sound. Three open flags are the same observation (run-source discriminator gap) under three labels. Iteration Pressure shows FG-002 / FG-003 / FG-012 at iters=3 with addressed-then-reopened=0 \u2014 sharper sub-framings, not stuck churn. Preflight green; no overlap with escalated debt subsystems. Further iteration will yield TODO #7 without changing the doc's structural shape.",
+    "warnings": [
+      "Executor should add a sixth TODO(phase-1) entry to the \u00a71 provisional banner for the legacy/new run-source discriminator on `live_update_editor_runs` (column, metadata JSON key, or trigger-prefix convention \u2014 whichever Phase 1 chooses). The \u00a73 'Phase-1 TODOs resolved' precondition then traps the case where Phase 1 forgets it.",
+      "Executor should add a one-line note alongside the \u00a75 Branch-A verification: 'requires Phase-1-provided run-source discriminator (sixth TODO); if absent at flip time, treat as third-mechanism case and ABORT.'",
+      "Sentence-level edits only at write time. Do NOT add net-new sections \u2014 length budget ~400 lines."
+    ],
+    "settled_decisions": [
+      {
+        "id": "SD-1",
+        "decision": "Runbook is doc-only at docs/live-update-editor-phase-2-runbook.md; no code or tests change.",
+        "rationale": "Brief scope; preserved across iterations 1-3."
+      },
+      {
+        "id": "SD-2",
+        "decision": "Rename runs only AFTER the 24-48h watch; pre-rename rollback is a single toggle flip leaving topics rows intact (per redesign.md:596).",
+        "rationale": "Load-bearing invariant for cheap rollback."
+      },
+      {
+        "id": "SD-3",
+        "decision": "Phase-1-dependent unknowns remain as labeled TODO(phase-1) placeholders. The \u00a71 banner enumerates at least six at execute time: toggle name + location, suppression mechanism (Branch A or Branch B), Branch-B suppression marker, new-editor / legacy bot identity, prod trace-embed channel, and legacy/new run-source discriminator on live_update_editor_runs.",
+        "rationale": "Brief authorizes 'consult the doc' escape hatch for Phase-1 deviations; enumerating each known dependency traps missed cases without exhaustively branching."
+      },
+      {
+        "id": "SD-4",
+        "decision": "\u00a75 verification targets Discord-send activity (Branch A: legacy run absent / Branch B: legacy run present + no legacy-bot posts in live channel) and anchors on the next observed live_update_editor_runs row, not a fixed time window.",
+        "rationale": "Resolves FLAG-001 / correctness-3 against redesign.md:651 / :633."
+      },
+      {
+        "id": "SD-5",
+        "decision": "Partial-publish trip-wire is two-sourced: Phase-1 shadow partials from shadow-mode telemetry (trace embed + shadow logs per :611-644), Phase-2 prod partials from `topics WHERE environment='prod'`. Cumulative \u22652 \u2192 ABORT + restore topic_publications. `topics WHERE environment='dev'` is NOT queried (vacuous per :611/:627/:633).",
+        "rationale": "Resolves correctness-1 from iteration 2."
+      },
+      {
+        "id": "SD-6",
+        "decision": "\u00a79 names the full migration chain: author in `.migrations_staging/` (timestamped filename) \u2192 copy verbatim to `/Users/peteromalley/Documents/banodoco-workspace/supabase/migrations/` per `.migrations_staging/README.md` \u2192 apply via `supabase db push` (or Phase-1 alternate) \u2192 verify in `supabase_migrations.schema_migrations`. \u00a710 DROP uses the same chain.",
+        "rationale": "Resolves issue_hints / all_locations from iteration 2."
+      },
+      {
+        "id": "SD-7",
+        "decision": "\u00a79 cross-references docs/live-update-editor-redesign.md:212-223 and src/common/storage_handler.py:652-1968 for the six legacy tables; docs/live-update-editor-legacy-boundaries.md is NOT the cross-reference target.",
+        "rationale": "Resolves issue_hints from iteration 1."
+      },
+      {
+        "id": "SD-8",
+        "decision": "If Phase 1 ships any third mechanism (hybrid, per-guild config, per-channel rollout, partial guild rollout, or missing run-source discriminator), the runbook directs ABORT \u2014 it does not branch into coverage for those shapes.",
+        "rationale": "Brief authorizes the consult-the-doc escape hatch over detailed branching."
+      }
+    ],
+    "passed": true,
+    "preflight_results": {
+      "project_dir_exists": true,
+      "project_dir_writable": true,
+      "success_criteria_present": true,
+      "claude_available": true,
+      "codex_available": true
+    },
+    "orchestrator_guidance": "Plan passed gate and preflight. Proceed to finalize. Verify unresolved flags against the plan and project code before accepting."
+  }
+}

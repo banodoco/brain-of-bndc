@@ -1,0 +1,20 @@
+{
+  "phase": "execute",
+  "invocation_id": "b807abd77ccd432f",
+  "exit_kind": "blocked_by_prereq",
+  "blocked_tasks": [
+    {
+      "task_id": "T16",
+      "reason": "blocked_by_prereq",
+      "notes": "Both before_execute user_actions verified incomplete via shell commands (not just reading user_actions.md). U1: defer-audit number not delivered \u2014 no artifact in plan dir, docs/live-update-editor-phase1-locked-decisions.md does not exist. Blocks T1, T2, T7 per user_actions.md. U2: tests/fixtures/ directory does not exist; similarity_pairs.json and historical_headlines.json absent everywhere in repo. Blocks T3 per user_actions.md. Both require human-only inputs (live Supabase + Postgres-with-pg_trgm). Execution stopped per T16 instructions; no work done on T1\u2013T15."
+    }
+  ],
+  "deviations": [],
+  "artifacts_written": [
+    "execution.json",
+    "execution_audit.json",
+    "finalize.json",
+    "final.md"
+  ],
+  "cli_provenance": {}
+}

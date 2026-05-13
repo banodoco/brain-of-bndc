@@ -1,0 +1,32 @@
+{
+  "output": "Authored \u00a711 (consult-the-doc escape hatch footer with 14 named redesign anchors and three trip-wire signals from :599-604) and completed self-review polish pass. Doc final length 676 lines, 26 TODO(phase-1) markers labeled, no SQL queries against topics WHERE environment='dev' for trip-wire purposes (the three matches are warning text). All 14 self-review check items verified.",
+  "commands_run": [
+    "wc -l docs/live-update-editor-phase-2-runbook.md",
+    "grep -c TODO\\(phase-1\\) docs/live-update-editor-phase-2-runbook.md",
+    "grep -n \"environment='dev'\" docs/live-update-editor-phase-2-runbook.md"
+  ],
+  "deviations": [],
+  "task_updates": [
+    {
+      "task_id": "T7",
+      "status": "done",
+      "executor_notes": "\u00a711 footer authored. Opens 'Every section that could fork on a Phase-1 deviation defaults to ABORT to \u00a78 rollback and consult docs/live-update-editor-redesign.md.' Cross-references \u00a71 out-of-scope, \u00a73 final two preconditions, \u00a75 Branch-A note, \u00a77 last row. Lists all 14 named redesign anchors: :117-123, :188-191, :212-223, :223, :596, :599-604, :600-601, :611, :627, :633, :642-644, :646-653, :651, :684. Re-lists three trip-wire signals from :599-604: (1) partial-publish \u00d72 cross-window (Phase-1 telemetry + Phase-2 topics) \u2192 ABORT + restore topic_publications; (2) collision-override rate >10% \u2192 TUNE per :603/:670/:673; (3) record_observation <1/run sustained \u2192 drop tool (post-cutover concern per :602). Closes 'When in doubt, ABORT to \u00a78 and re-read the redesign doc.' Self-review polish pass complete: (1) all pass_to_pass expectations map to sections; (2) \u00a76 trip-wire tally uses prod-only count + Phase-1 telemetry sum \u2014 NO query against topics WHERE environment='dev' (verified by grep: the three 'environment=dev' matches are all warning text saying NOT to query this); (3) \u00a75 Branch B names Discord-side count as PRIMARY and SQL marker as nice-to-have secondary; (4) \u00a71 banner lists SIX TODO(phase-1) items (a)-(f) including run-source discriminator and explicit out-of-scope clause for third mechanism; (5) \u00a73 preconditions includes 'Phase 1 shipped Branch A or Branch B (not a third mechanism)' AND 'Run-source discriminator present' as separate gates; (6) \u00a77 decision tree includes third-mechanism row that explicitly covers run-source-discriminator-absent; (7) \u00a79 step 1 names full migration hand-off chain (.migrations_staging/ \u2192 supabase/migrations/ \u2192 supabase db push \u2192 verify in supabase_migrations.schema_migrations); (8) \u00a710 DROP block uses same hand-off chain; (9) \u00a75 verification anchors on next observed live_update_editor_runs row not fixed window; (10) \u00a77 partial-publish threshold is '(Phase-1 telemetry) + (Phase-2 prod) cumulative \u2265 2' with :600-601 citation; (11) \u00a77 lease symptoms split into three distinct rows; (12) \u00a79 cross-checks against :212-223 + src/common/storage_handler.py:652-1968 NOT docs/live-update-editor-legacy-boundaries.md; (13) SQL is environment='prod' with `-- swap to 'dev'` comments and 'dev has no partials' annotation; (14) length 676 lines (within 200-700 acceptable), schema referenced via anchors not duplicated, _legacy_* deletion date is operator-filled blank, 26 TODO(phase-1) markers visibly labeled across the doc. Anchor references resolve to real lines in source files (verified in T1 audit).",
+      "sections_written": [
+        "\u00a711-consult-the-doc-footer",
+        "self-review-polish-pass"
+      ],
+      "stance": null,
+      "stop_signal": null
+    }
+  ],
+  "sense_check_acknowledgments": [
+    {
+      "sense_check_id": "SC7",
+      "executor_note": "Confirmed. \u00a711 footer points back to docs/live-update-editor-redesign.md anchors with all 14 named anchors re-listed: :117-123, :188-191, :212-223, :223, :596, :599-604, :600-601, :611, :627, :633, :642-644, :646-653, :651, :684. Three trip-wire signals from :599-604 re-listed verbatim: (1) partial-publish \u00d72 cross-window (Phase-1 telemetry + Phase-2 topics) \u2192 ABORT + restore topic_publications; (2) collision-override rate >10% \u2192 TUNE (citing :603/:670/:673); (3) record_observation <1/run sustained \u2192 drop tool (post-cutover concern per :602). Self-review confirms: length 676 lines (within 200-700 acceptable range, ~70% above ~400 target but appropriate given six runbook-required SQL queries + 12-row precondition table + 15-row decision tree + migration body); schema referenced via redesign anchors throughout, not duplicated; six TODO(phase-1) markers a-f visibly labeled with 26 total occurrences across the doc; _legacy_* deletion date is operator-filled blank ('__________' with 'Do not hardcode a date' instruction); tone is terse imperative SQL-first matching docs/runbook-payments.md (Fast Triage section title, decision tables, copy-paste SQL blocks, no narrative prose)."
+    }
+  ],
+  "sections_written": [
+    "\u00a711-consult-the-doc-footer",
+    "self-review-polish-pass"
+  ]
+}

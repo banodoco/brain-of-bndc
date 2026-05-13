@@ -1,0 +1,163 @@
+{
+  "checks": [
+    {
+      "id": "issue_hints",
+      "question": "Did the work fully address the issue hints, user notes, and approved plan requirements?",
+      "findings": [
+        {
+          "detail": "Walked the eight pass_to_pass criteria against the plan sections: pre-flip preconditions (\u00a73, Step 4), shadow-mode\u2192cutover rubric (\u00a74, Step 5), flip procedure (\u00a75, Step 6), partial-publish SQL with four queries (\u00a76, Step 7), 24-48h decision tree with the 2\u00d7 partial-publish ABORT trip-wire citing :600-601 (\u00a77, Step 8), rollback runner-pointer flip leaving topics rows untouched + pre/post-rename distinction (\u00a78, Step 9), table-rename SQL with ordering after watch + constraint-preservation note + dry-run + row-count parity (\u00a79, Step 10), deletion schedule + close-out with operator-filled blank date (\u00a710, Step 11), and consult-the-doc footer (\u00a711, Step 12). All eight expectations have at least one mapped section.",
+          "flagged": false
+        },
+        {
+          "detail": "Plan honors the 'assume Phase 1 lands per spec; deviations get a consult-the-doc escape hatch' constraint \u2014 every section ending defers to the redesign doc rather than improvising. Toggle name is left as `<LIVE_EDITOR_PUBLISH_TOGGLE>` with `TODO(phase-1)` because Phase 1 has not landed (verified: no `LIVE_UPDATE_PUBLISH*`/`LIVE_EDITOR_PUBLISH*`/`publish_enabled` symbol anywhere in src/). Matches user note 'strict-notes auto-enabled for metaplan/doc mode'.",
+          "flagged": false
+        },
+        {
+          "detail": "Plan Step 10.5 instructs the executor to 'cross-check the six tables here against the current set in docs/live-update-editor-legacy-boundaries.md's Legacy Storage And Helpers'. I read that section: it enumerates `daily_summaries` helpers (get_summary_for_date, store_daily_summary_to_supabase, etc.) \u2014 not the six `live_update_*` tables. The authoritative list lives in docs/live-update-editor-redesign.md:212-223 (and confirmed against src/common/storage_handler.py:654-1968, where live_update_editor_runs, live_update_candidates, live_update_decisions, live_update_feed_items, live_update_duplicate_state, live_update_editorial_memory, live_update_watchlist all appear). The cross-reference target is wrong; the executor will either skip the check or be confused.",
+          "flagged": true
+        },
+        {
+          "detail": "Brief asks for an explicit citation of the 'two partial-publish incidents \u2192 restore separate topic_publications \u2192 ABORT' trip-wire from :600-601. Plan \u00a77 (Step 8.1) cites it. Plan \u00a711 (Step 12.2) re-lists it. Coverage looks correct.",
+          "flagged": false
+        }
+      ]
+    },
+    {
+      "id": "correctness",
+      "question": "Are the proposed changes technically correct?",
+      "findings": [
+        {
+          "detail": "Plan Step 6.4 (publishing-flag-flip verification) says to verify '\u22651 publication_status=\"sent\" row in topics AND zero new rows in legacy live_update_feed_items for the same window.' This contradicts docs/live-update-editor-redesign.md:651: 'Both write to their own tables. Only new editor publishes to Discord; old editor's posts are suppressed.' During Phase 2 side-by-side, the legacy editor SHOULD still create live_update_feed_items rows; only its Discord send is suppressed. The verification as written will false-fail (or push the operator to chase a problem that does not exist). The correct verification is on Discord-send activity (legacy run rows showing published_count=0, or absence of new live-channel posts attributed to the legacy bot identity) rather than legacy table row counts.",
+          "flagged": true
+        },
+        {
+          "detail": "Plan \u00a77 decision tree narrows the partial-publish trip-wire to '\u22652 in 24h \u2192 ABORT'. The redesign at :600 reads 'if partial-publish incidents happen twice during shadow-mode or prod' \u2014 i.e., across the entire cutover window (Phase 1 shadow plus the 24-48h side-by-side), not a rolling 24h. A Phase-1 shadow partial plus one prod partial inside the watch window would not trip the plan's rule, but does satisfy the redesign's intent. Should align or explicitly justify the operational scoping.",
+          "flagged": true
+        },
+        {
+          "detail": "Plan Step 6.5/6.6 verifies via a 15-minute SQL window after toggle flip. Per :633, dev cadence is hourly; Phase 2 likely keeps hourly. If the toggle is flipped between hourly ticks, the 15-minute window may show zero rows for entirely benign reasons (no run fired yet), making 'zero partial' trivially true and giving false confidence. Procedure should sequence verification around the next observed tick rather than a fixed 15-minute window.",
+          "flagged": true
+        },
+        {
+          "detail": "Plan \u00a79 rename SQL targets the six legacy tables. I confirmed all six exist as table names referenced in src/common/storage_handler.py (live_update_feed_items, live_update_watchlist, live_update_duplicate_state, live_update_editorial_memory, live_update_candidates, live_update_decisions). The 'live_update_candidates row doesn't exist' line in docs/live-update-editor-redesign.md:218 is a new-model mapping note, not a statement about today's prod schema \u2014 the table is real today and correctly included in the rename list.",
+          "flagged": false
+        },
+        {
+          "detail": "Plan Step 9.2 notes Postgres preserves indexes, sequences, FK constraints, and RLS across RENAME TO and flags dependent views as a hazard. Views actually track dependencies by OID (renames propagate at execution), and pg_views.definition reflects the new name post-rename. The real hazards are functions/triggers/stored procs that reference the table by string literal. The recommended view check is a reasonable proxy and unlikely to break in this codebase, though a thorough note would extend the search to pg_proc.prosrc.",
+          "flagged": false
+        }
+      ]
+    },
+    {
+      "id": "scope",
+      "question": "Search for related code that handles the same concept. Is the reported issue a symptom of something broader?",
+      "findings": [
+        {
+          "detail": "Verified topics.environment column exists (docs/live-update-editor-redesign.md:107: `environment text NOT NULL -- prod | dev`), so every `WHERE environment='prod'` SQL block is valid \u2014 addressing planning question Q5. Plan's `-- swap to 'dev'` annotation pattern works for pre-flip verification.",
+          "flagged": false
+        },
+        {
+          "detail": "Plan does not describe how the legacy editor's Discord suppression actually flips \u2014 it points at `_publish_accepted_candidates` (src/features/summarising/live_update_editor.py:84-107) and `_select_publishable_candidates` (:261-346) as 'the gated legacy code path' but leaves the gating mechanism as `TODO(phase-1)`. Acceptable per the brief's escape-hatch rule, BUT verification Step 6.4 depends on knowing that mechanism \u2014 if Phase 1 actually suppresses at scheduler-tick level (legacy editor never runs), then `_select_publishable_candidates` is never reached and the SQL verification on legacy run rows needs a different shape.",
+          "flagged": true
+        },
+        {
+          "detail": "Plan \u00a77 decision tree includes 'Lease contention (both editors writing topics)' as a symptom. Per :651 'Both write to their own tables' \u2014 only the new editor writes to `topics`, the legacy editor writes to `live_update_feed_items`. They should not contend over the same row writes. If they share a single `(environment, guild_id, live_channel_id)` lease per :684, they cannot run concurrently at all. As written, the symptom row conflates several distinct failure modes (new-editor self-contention from a stuck run; legacy writing to new tables; lease-key collisions) and gives no clear handle.",
+          "flagged": true
+        },
+        {
+          "detail": "Plan does not address the deferred-to-v2 `defer` outlet and `pending_review` state (docs/live-update-editor-redesign.md:658, 678). That is correct scope \u2014 runbook is operational, not design.",
+          "flagged": false
+        }
+      ]
+    },
+    {
+      "id": "all_locations",
+      "question": "Does the change touch all locations AND supporting infrastructure?",
+      "findings": [
+        {
+          "detail": "This is a doc-only change. The output is a single new file at `docs/live-update-editor-phase-2-runbook.md`. Confirmed the path does not currently exist. No code edits, no test changes, no migration files, no schema changes \u2014 those are Phase 1 deliverables. Plan scope is appropriately tight.",
+          "flagged": false
+        },
+        {
+          "detail": "The runbook references but does not duplicate the schema in docs/live-update-editor-redesign.md. Anchors used in the plan (:117-123, :188-191, :212-223, :596, :600-604, :611-644, :646-653, :684) all resolve to real content I verified by reading the redesign doc. No broken anchors detected.",
+          "flagged": false
+        },
+        {
+          "detail": "Plan does not specify *which* tool the operator runs the rename SQL with \u2014 psql against prod, the supabase migrations folder, the Supabase dashboard SQL editor, or something else. Planning question Q4 raised this but the plan body itself does not pick one. For a runbook this matters: 'BEGIN; ALTER TABLE RENAME; COMMIT;' is psql-friendly, but Supabase migrations enforce ordered .sql files. Should at least name a chosen path or carry a TODO(phase-1) marker.",
+          "flagged": true
+        },
+        {
+          "detail": "Step 4.1 lists gates including 'named indexes present (topics_state_idx, topics_revisit_idx, topics_headline_trgm, transitions_*)'. Verified against docs/live-update-editor-redesign.md:130-132 and :189-191. Index names match; using `transitions_*` as a wildcard for the three transitions_topic_idx / transitions_run_idx / transitions_action_idx indexes is acceptable for a runbook.",
+          "flagged": false
+        }
+      ]
+    },
+    {
+      "id": "callers",
+      "question": "Find the callers of the changed function. What arguments do they actually pass? Does the fix handle all of them?",
+      "findings": [
+        {
+          "detail": "No functions are being changed. The deliverable is a doc; caller analysis does not apply at the code-change level. The dependency direction is reversed \u2014 the runbook references src/features/summarising/live_update_editor.py:60, :84-107, :261-346 as the legacy fallback path the runner-pointer rollback re-enables. I verified those line ranges contain (60) `DEFAULT_MAX_PUBLISH_PER_RUN`, (84-107) the `__init__` block with `max_publish_per_run` env-var handling, and (261-346) `_select_publishable_candidates` + `_publish_accepted_candidates` invocation. Citations are accurate.",
+          "flagged": false
+        },
+        {
+          "detail": "The runbook depends on Phase 1 having actually wired a publish toggle and a suppression mechanism on the legacy editor. Neither exists in src/ today (grep for LIVE_UPDATE_PUBLISH*/publish_enabled returned nothing). If Phase 1 lands with a different shape than the plan's TODO placeholders assume \u2014 e.g., the toggle is a per-guild config row rather than an env var, or suppression happens at the scheduler tick rather than `_publish_accepted_candidates` \u2014 then \u00a75 procedure and \u00a78 rollback need re-fitting. Plan flags this via TODO(phase-1) markers but the operator should see in \u00a71 that the runbook is provisional until Phase 1 fills them in.",
+          "flagged": true
+        }
+      ]
+    }
+  ],
+  "flags": [
+    {
+      "id": "FLAG-001",
+      "concern": "Publishing-flag-flip verification incorrectly checks for 'zero new rows in legacy live_update_feed_items' after flipping the toggle, but per docs/live-update-editor-redesign.md:651 both editors continue to write to their own tables during the 24-48h side-by-side \u2014 only the legacy editor's Discord send is suppressed. As written, the verification will false-fail every hour and mislead the operator into thinking the flip didn't take. Verification should target Discord-side suppression (legacy run row showing published_count=0, or absence of new live-channel posts attributed to the legacy bot identity) rather than legacy table writes.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "Plan Step 6.4 (\u00a75 verification) vs. docs/live-update-editor-redesign.md:651"
+    },
+    {
+      "id": "FLAG-002",
+      "concern": "Plan \u00a77 decision tree narrows the redesign's partial-publish trip-wire ('twice during shadow-mode or prod', :600-601) to '\u22652 in 24h'. A Phase-1 shadow partial + one prod partial inside the watch window would not trip the plan's rule but satisfies the redesign's intent. Either match the redesign's wider scope or explicitly justify the operational decision to scope to a rolling 24h window.",
+      "category": "correctness",
+      "severity_hint": "likely-minor",
+      "evidence": "Plan Step 8.1 first row of decision tree vs. docs/live-update-editor-redesign.md:600-601"
+    },
+    {
+      "id": "FLAG-003",
+      "concern": "Plan Step 10.5 instructs the executor to cross-check the six-table rename list against docs/live-update-editor-legacy-boundaries.md's 'Legacy Storage And Helpers' section, but that section enumerates daily_summaries helpers, not the six legacy live_update_* tables. The authoritative current-schema list is docs/live-update-editor-redesign.md:212-223 + the storage_handler.py call sites. Repointing this cross-check is a one-line fix.",
+      "category": "maintainability",
+      "severity_hint": "likely-minor",
+      "evidence": "Plan Step 10.5 vs. actual contents of docs/live-update-editor-legacy-boundaries.md:50-65"
+    },
+    {
+      "id": "FLAG-004",
+      "concern": "Post-flip verification uses a fixed 15-minute SQL window. If the editor runs hourly (per :633) and the toggle is flipped between ticks, 'zero partial in last 15 min' is trivially true with no run having fired \u2014 false confidence. Procedure should sequence verification around the next observed hourly tick (e.g., 'wait until the next row appears in live_update_editor_runs, then run the SQL').",
+      "category": "correctness",
+      "severity_hint": "likely-minor",
+      "evidence": "Plan Step 6.5 + docs/live-update-editor-redesign.md:633"
+    },
+    {
+      "id": "FLAG-005",
+      "concern": "Plan \u00a77 lists 'Lease contention (both editors writing topics) \u2192 ABORT' but per :651 the legacy editor writes to live_update_feed_items, not topics. The symptom row conflates new-editor self-contention, legacy-writing-to-new-tables (a Phase-1 bug), and lease-key collisions. Sharper articulation needed so the operator knows which to investigate.",
+      "category": "completeness",
+      "severity_hint": "likely-minor",
+      "evidence": "Plan Step 8.1 lease-contention row vs. docs/live-update-editor-redesign.md:651, :684"
+    },
+    {
+      "id": "FLAG-006",
+      "concern": "Plan does not pick a migration-runner path (raw psql vs. supabase migrations folder vs. dashboard SQL editor) for the \u00a79 rename. Planning question Q4 flagged this; the plan body should either name a chosen runner or carry an explicit TODO(phase-1) marker so the operator does not improvise mid-cutover.",
+      "category": "completeness",
+      "severity_hint": "likely-minor",
+      "evidence": "Plan Step 10 vs. planning metadata Q4"
+    },
+    {
+      "id": "verifiability-0",
+      "concern": "Criterion 14: requires human verification (subjective_judgment).",
+      "category": "verifiability",
+      "severity_hint": "likely-minor",
+      "status": "open"
+    }
+  ],
+  "verified_flag_ids": [],
+  "disputed_flag_ids": []
+}

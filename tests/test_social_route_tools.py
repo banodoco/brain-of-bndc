@@ -875,5 +875,7 @@ def test_admin_tool_registration_and_identity_injection_sets():
         "hold_payment",
         "retry_payment",
         "release_payment",
+        "mute_speaker",
+        "unmute_speaker",
     }
     assert "initiate_batch_payment" in admin_agent._CHANNEL_POSTING_TOOLS

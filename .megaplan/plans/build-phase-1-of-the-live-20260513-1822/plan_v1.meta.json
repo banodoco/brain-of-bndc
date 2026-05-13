@@ -1,0 +1,121 @@
+{
+  "version": 1,
+  "timestamp": "2026-05-13T16:34:43Z",
+  "hash": "sha256:4136ab72994213ce8c72645287a85436856ca116cdf6ff2128ec7f0a5b04ca6b",
+  "questions": [
+    "Trace channel resolution: introduce a new env var `DEV_SHADOW_TRACE_CHANNEL_ID` pointed at `#main_test` (current draft), or reuse the existing `DEV_LIVE_UPDATE_CHANNEL_ID` and have ops point it at `#main_test` for the shadow run? New var avoids colliding with the existing reasoning-embed pipeline.",
+    "Defer audit result: if the 30-day query of live `live_update_candidates` shows \u22655/week acted-upon `defer` decisions, do you want `state='pending_review'` + `request_review_topic` tool shipped in the Day-1 migration, or deferred to v2 regardless (default in current draft: defer to v2 unless audit forces it in)?",
+    "Run-provenance table: does the new editor reuse the existing `live_update_editor_runs` table for `run_id` provenance (read-only of existing schema, write a row keyed differently) or get its own `topic_editor_runs` table in the new migration? Current draft proposes reuse-if-fits, otherwise add a new table \u2014 both stay inside Phase 1 scope.",
+    "Backfill scope: backfill all ~18 prod `live_update_feed_items` rows into `topics` (state='posted') and optionally the dev watchlist? Or limit backfill to a smaller window so search_topics priming reflects only recent prod state?"
+  ],
+  "success_criteria": [
+    {
+      "criterion": "`docs/live-update-editor-phase1-locked-decisions.md` exists and resolves all five locked decisions (canonicalizer rule + 50-headline fuzz fixture, editorial_observations retention, collision threshold + override semantics, single-table rejected logging on topic_transitions, defer-audit-driven decision on pending_review).",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "New migration in `.migrations_staging/` creates exactly the 5 tables (topics, topic_sources, topic_aliases, topic_transitions, editorial_observations) with v6 corrections: topic_transitions has environment + guild_id columns and nullable topic_id; topic_sources UNIQUE is (topic_id, message_id); topics has publication_status/publication_error/discord_message_ids/publication_attempts/last_published_at; trigram extension + topics_headline_trgm GIN index present.",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "No modifications to `src/features/summarising/live_update_editor.py`, `src/features/summarising/live_update_prompts.py`, `src/common/llm/claude_client.py:generate_chat_completion`, or any existing `live_update_*` table or DB accessor.",
+      "priority": "must",
+      "requires": [
+        "parse_diff",
+        "run_shell"
+      ]
+    },
+    {
+      "criterion": "All 10 native Anthropic tool definitions (4 read + 6 decision) match the v6 spec: write tools (`post_simple_topic`, `post_sectioned_topic`, `watch_topic`) accept `override_collisions: list[{topic_id, reason}]`.",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Dispatcher enforces all 4 invariants: structural rejection of post_simple_topic at authors>=2 OR sources>=3; write-time canonicalization + collision scan with override-accept path; idempotency on Anthropic `tool_use_id`; topic_sources (topic_id, message_id) UNIQUE accepts multiple topics per message but rejects duplicate add. Every rejection writes a topic_transitions row with topic_id=NULL for failed creates and action='rejected_*'; every override writes action='override' with reason in payload.",
+      "priority": "must",
+      "requires": [
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "Canonicalizer fuzz test passes on the 50-headline fixture: idempotence under whitespace/case/article variation, parent/child story headlines share a canonical_key prefix or trigger an alias hit.",
+      "priority": "must",
+      "requires": [
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "Pure `render_topic(topic)` produces correct output for simple, sectioned, story-update (prefix `Update:` + parent link), and partial-publish recovery; no DB calls and no Discord network calls invoked from the renderer.",
+      "priority": "must",
+      "requires": [
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "Shadow-mode replay smoke test: fixture window \u2192 new editor with publishing OFF \u2192 topic_transitions rows are written, no `channel.send` to the live feed channel is attempted, trace embed payload contains source-message count, tool-call counts by name, posted/watched/updated/discarded/observation tallies, tokens, latency, divergence-vs-today summary, override rate, and observation rate.",
+      "priority": "must",
+      "requires": [
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "Existing tests `tests/test_live_update_editor_lifecycle.py`, `tests/test_live_update_editor_publishing.py`, `tests/test_live_update_prompts.py` remain green without modification.",
+      "priority": "must",
+      "requires": [
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "`scripts/run_live_update_shadow.py` exists as a new entrypoint that does NOT route through `LiveUpdateEditor`; loads >=20 historical source-message windows from the prod archive; runs them through the new editor with publishing OFF; posts one trace embed per window plus an aggregate summary to the channel configured by `DEV_SHADOW_TRACE_CHANNEL_ID`.",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Trace embed surfaces the three trip-wires explicitly: override rate, record_observation rate, partial-publish incidents (per-run + rolling).",
+      "priority": "should",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Net new code stays within ~800-1000 LOC; alarm raised if it exceeds ~1500 LOC (Phase-1.5 creep indicator).",
+      "priority": "should",
+      "requires": [
+        "run_shell"
+      ]
+    },
+    {
+      "criterion": "Trace embeds across 20 replayed windows show divergences explainable as 'valid different call' rather than drift; POM judges new editor equivalent-or-better at the Week-1 decision gate.",
+      "priority": "info",
+      "requires": [
+        "subjective_judgment"
+      ]
+    },
+    {
+      "criterion": "Alias resolution verified by rolling the same window twice through different runs and confirming the second run resolves to the same topic_id via topic_aliases.",
+      "priority": "must",
+      "requires": [
+        "run_tests"
+      ]
+    }
+  ],
+  "assumptions": [
+    "New env var `DEV_SHADOW_TRACE_CHANNEL_ID` will be introduced (default unset \u2192 log-only; if set, post to that channel). Avoids colliding with `DEV_LIVE_UPDATE_CHANNEL_ID` and the existing reasoning embed pipeline.",
+    "Defer audit will most likely show low defer-acted volume \u2192 `pending_review` / `request_review_topic` deferred to v2. Plan accommodates either outcome but commits to v2-deferral as the default.",
+    "Existing `live_update_editor_runs` table is reusable for `run_id` provenance; if its schema is restrictive a new `topic_editor_runs` table is added in the same migration. Not a scope blocker either way.",
+    "Backfill is one-shot inside the new migration \u2014 backfills all 18 prod `feed_items` to `topics` (state='posted') with corresponding `topic_sources` rows. No dual-write from the new editor to legacy tables afterwards.",
+    "The five new tables, the canonicalizer, the tool-use client, the dispatcher, the editor, the renderer, the trace-embed builder, and the runner together fit in ~800\u20131000 LOC; the plan trips an alarm above 1500 LOC.",
+    "Phase 2 prod cutover, run-lease/checkpoint behavior, full partial-publish retry history, and any `_legacy_*` renames are explicitly out of scope for this plan."
+  ],
+  "structure_warnings": []
+}

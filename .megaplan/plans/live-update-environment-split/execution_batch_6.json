@@ -1,0 +1,53 @@
+{
+  "output": "Task T6 complete. Wired environment through both callers: (a) summariser_cog.py: replaced dry_run=self.dev_mode with environment='dev' if self.dev_mode else 'prod' for both LiveUpdateEditor and LiveTopCreations constructors; (b) scripts/run_live_update_dev.py: replaced dry_run=True with environment='dev' for both constructors, retained dry_run_lookback_hours. Both files pass syntax check. SC9 verified: zero non-test callers pass dry_run. Test failures are pre-existing from T4/T5 (max_posts removal, environment kwarg in test fakes) and belong to T7.",
+  "files_changed": [
+    "src/features/summarising/summariser_cog.py",
+    "scripts/run_live_update_dev.py",
+    ".megaplan/plans/live-update-environment-split/execution_batch_6.json"
+  ],
+  "commands_run": [
+    "python3 -c 'import ast; ast.parse(open(\"src/features/summarising/summariser_cog.py\").read()); ast.parse(open(\"scripts/run_live_update_dev.py\").read()); print(\"syntax OK\")'",
+    "grep -rn 'dry_run\\s*=\\s*True\\|dry_run\\s*=\\s*False\\|dry_run=self.' src/ scripts/ --include='*.py' (zero results)",
+    "search_files for LiveUpdateEditor(/LiveTopCreations( across repo (confirmed only cog + dev script + tests)",
+    "pytest tests/test_live_storage_wrappers.py tests/test_live_top_creations.py tests/test_live_update_editor_publishing.py tests/test_live_update_editor_lifecycle.py tests/test_live_runtime_wiring.py -x -q --no-header (failures pre-existing from T4/T5)"
+  ],
+  "deviations": [
+    "Advisory quality: src/features/summarising/summariser_cog.py has similar functions before_run_live_update_editor and before_run_live_top_creations (100% similarity).",
+    "Advisory quality: code changes lacked test updates: scripts/run_live_update_dev.py, src/features/summarising/summariser_cog.py.",
+    "Advisory observation mismatch: executor claimed files not observed in git status/content hash delta: .megaplan/plans/live-update-environment-split/execution_batch_6.json",
+    "Advisory audit finding: Executor claimed changed files not present in git status: .migrations_staging/20260511110349_live_update_environment_split.sql",
+    "Advisory audit finding: Git status shows changed files not claimed by any task: .megaplan/briefs/, .megaplan/plans/live-update-environment-split/, .megaplan/schemas/directors_notes.json, .megaplan/schemas/execution_doc.json, .megaplan/schemas/finalize.json, .megaplan/schemas/review.json, .megaplan/schemas/revise.json, docs/debug-utility-validation.md, docs/live-update-editor-legacy-boundaries.md, main.py, scripts/backfill_guild_ids.py, scripts/debug.py, scripts/discord_tools.py, scripts/send_social_picks.py, src/features/admin_chat/agent.py, src/features/admin_chat/tools.py, src/features/archive/archive_cog.py, src/features/gating/intro_embed.py, src/features/health/health_check_cog.py, src/features/summarising/live_update_prompts.py, src/features/summarising/summariser.py, structure.md, tests/test_live_admin_health.py, tests/test_live_runtime_wiring.py, tests/test_live_storage_wrappers.py, tests/test_live_top_creations.py, tests/test_live_update_editor_lifecycle.py, tests/test_live_update_editor_publishing.py, tests/test_live_update_prompts.py, tests/test_social_route_tools.py",
+    "Advisory audit finding: Sense check SC10 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC11 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC12 is missing an executor acknowledgment.",
+    "Advisory audit finding: Tasks left pending after execute (executor never started them): T7, T8, T9"
+  ],
+  "task_updates": [
+    {
+      "id": "T6",
+      "status": "done",
+      "executor_notes": "Wired environment through both callers. (a) summariser_cog.py L61-73: replaced dry_run=self.dev_mode with environment='dev' if self.dev_mode else 'prod' for both LiveUpdateEditor and LiveTopCreations. No top_gens_channel_id/live_channel_id args were present (already cleaned by T5). (b) scripts/run_live_update_dev.py L129-140: replaced dry_run=True with environment='dev' for both constructors. dry_run_lookback_hours retained. Both files parse successfully. No remaining dry_run=True/False/self. in non-test source (grep confirmed). SC9 verified: only non-test callers are summariser_cog.py and run_live_update_dev.py, both now pass environment= and zero dry_run=. Test failures (max_posts, environment kwarg in fakes) are pre-existing from T4/T5 and belong to T7.",
+      "files_changed": [
+        "src/features/summarising/summariser_cog.py",
+        "scripts/run_live_update_dev.py"
+      ],
+      "commands_run": [
+        "python3 ast.parse both files - syntax OK",
+        "grep -rn 'dry_run=True|dry_run=False|dry_run=self.' src/ scripts/ -- zero results",
+        "grep for LiveUpdateEditor(/LiveTopCreations( across repo - confirmed only cog + dev script + tests",
+        "pytest tests/test_live_* - confirmed test failures are pre-existing T4/T5 artifacts"
+      ],
+      "task_id": "T6"
+    }
+  ],
+  "sense_check_acknowledgments": [
+    {
+      "id": "SC9",
+      "task_id": "T6",
+      "verdict": "pass",
+      "evidence": "grep -rn 'LiveUpdateEditor(|LiveTopCreations(' across the entire repo shows only: summariser_cog.py (L61, L68), scripts/run_live_update_dev.py (L129, L135), and test files. The two non-test callers now pass environment= instead of dry_run=. grep -rn 'dry_run\\s*=\\s*True\\|dry_run\\s*=\\s*False\\|dry_run=self.' in src/ and scripts/ returns ZERO results. No caller still passes dry_run.",
+      "sense_check_id": "SC9",
+      "executor_note": "(not provided)"
+    }
+  ]
+}

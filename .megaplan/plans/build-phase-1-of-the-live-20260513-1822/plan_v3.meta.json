@@ -1,0 +1,219 @@
+{
+  "version": 3,
+  "timestamp": "2026-05-13T16:55:01Z",
+  "hash": "sha256:e63daf8613630931b5b343907f0059d94b4998b7c7113847d677d08769b34bc6",
+  "changes_summary": "Added a thin `get_message_author_ids` accessor used by both the dispatcher hot path and the backfill (replaces the heavy `get_live_update_context_for_message_ids` call). Replaced the `difflib` similarity stand-in with a pinned `similarity_pairs.json` oracle generated from real `pg_trgm` for threshold-tuning tests. Filtered the backfill to `status='posted' AND len(discord_message_ids) > 0`. Clarified env-scoping invariant applies to new topic_* tables ONLY; existing `live_update_*` accessors are not modified. Explicitly marked the shadow runner's read of `live_update_candidates` / `live_update_feed_items` as telemetry-only (never feeds dispatcher state). Rescoped the fake store from Small to Medium with explicit seam (DatabaseHandler), stateful semantics, and a mandatory caller-map docstring. Added `topic_transitions.run_id REFERENCES topic_editor_runs(run_id)` FK to the migration. Surfaced the 6-vs-5-table count as a deliberate scope expansion in the Overview. Added an explicit defer-audit conditional branch so `state='pending_review'` + `request_review_topic` can be appended to Steps 2/7 before SQL freeze. Shadow runner now takes two named env knobs (`--archive-env`, `--topic-env`).",
+  "flags_addressed": [
+    {
+      "id": "correctness-1",
+      "resolution": "addressed",
+      "reason": "Step 6.1 adds new lean `get_message_author_ids` accessor; Step 7.2 dispatcher uses it on the hot path. Heavy context accessor stays for prompt assembly only."
+    },
+    {
+      "id": "correctness-2",
+      "resolution": "addressed",
+      "reason": "Step 1.2 + Step 3.4 introduce `tests/fixtures/similarity_pairs.json` pinned-oracle generated from real pg_trgm; threshold tuning asserts against the oracle, not difflib."
+    },
+    {
+      "id": "correctness-3",
+      "resolution": "addressed",
+      "reason": "Step 4.1 filters backfill to `status='posted' AND len(discord_message_ids) > 0`."
+    },
+    {
+      "id": "scope-1",
+      "resolution": "addressed",
+      "reason": "Step 6.3 + Overview explicitly limit the env-scoping invariant to new topic_* tables; existing live_update_* accessors are not modified."
+    },
+    {
+      "id": "scope-2",
+      "resolution": "addressed",
+      "reason": "Step 12.3 explicitly marks the live_update_* read as telemetry-only that never feeds dispatcher state."
+    },
+    {
+      "id": "all_locations-1",
+      "resolution": "addressed",
+      "reason": "Step 11 rescoped to Medium; stateful in-memory shim with UNIQUE enforcement, alias indexes, idempotency keys, transitions log \u2014 no longer framed as aligned with the stateless conftest stub idiom."
+    },
+    {
+      "id": "all_locations-2",
+      "resolution": "addressed",
+      "reason": "Step 2.3 declares `topic_transitions.run_id REFERENCES topic_editor_runs(run_id) ON DELETE RESTRICT` so orphan run_ids cannot enter the audit log."
+    },
+    {
+      "id": "all_locations-3",
+      "resolution": "addressed",
+      "reason": "Step 11.1 specifies the fake intercepts at the `DatabaseHandler` seam (production parity), not the StorageHandler lower layer."
+    },
+    {
+      "id": "callers-1",
+      "resolution": "addressed",
+      "reason": "Step 6.1 introduces `get_message_author_ids`; Step 4.2 + Step 7.2 both use it instead of the heavy context accessor, decoupling them from prompt-assembly contract changes."
+    },
+    {
+      "id": "callers-2",
+      "resolution": "addressed",
+      "reason": "Step 12.2 mandates two named env knobs `--archive-env prod` and `--topic-env dev` with explicit roles and trace-embed header surfacing."
+    },
+    {
+      "id": "callers-3",
+      "resolution": "addressed",
+      "reason": "Step 11.2 makes a caller-map docstring mandatory in `tests/fakes/topic_store.py`: every fake method \u2194 production DatabaseHandler accessor, with signature + return shape."
+    },
+    {
+      "id": "issue_hints-1",
+      "resolution": "addressed",
+      "reason": "Overview now explicitly flags the 6-vs-5-table count as a deliberate scope expansion required by the writes-ONLY-to-new-tables constraint."
+    },
+    {
+      "id": "issue_hints-2",
+      "resolution": "addressed",
+      "reason": "Step 1.4 adds the explicit defer-audit conditional branch: if \u22655/week acted-upon defers, append `state='pending_review'` to Step 2 DDL and `request_review_topic` to Step 7 tools before SQL freeze; otherwise defer to v2."
+    }
+  ],
+  "questions": [
+    "pg_trgm fixture generation: OK to require a one-time local Postgres-with-pg_trgm run during Phase 0 to seed `tests/fixtures/similarity_pairs.json`, or do you prefer an alternative oracle generator (e.g. a Supabase RPC call against dev)? Either keeps CI hermetic afterward.",
+    "Pending_review conditional: if the defer-audit shows borderline volume (e.g. 3-5/week acted-upon), do you want the conditional branch in Step 1.4 to trigger or hold off until v2?"
+  ],
+  "success_criteria": [
+    {
+      "criterion": "`docs/live-update-editor-phase1-locked-decisions.md` exists and resolves all five locked decisions; the defer-audit outcome is recorded with a clear ship-Day-1-or-v2 decision for `pending_review`.",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Migration creates 6 tables (5 spec + `topic_editor_runs`) with v6 schema corrections, the `pg_trgm` extension + `topics_headline_trgm` GIN index, and a `topic_transitions.run_id REFERENCES topic_editor_runs(run_id) ON DELETE RESTRICT` FK. If the audit forced it, `state='pending_review'` is reflected in app code and migration comment.",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "No modifications to `src/features/summarising/live_update_editor.py`, `src/features/summarising/live_update_prompts.py`, `src/common/llm/claude_client.py:generate_chat_completion`, or any existing `live_update_*` table or DB accessor. The new editor never writes to `live_update_editor_runs` or any other legacy table.",
+      "priority": "must",
+      "requires": [
+        "parse_diff",
+        "run_shell"
+      ]
+    },
+    {
+      "criterion": "All 10 (or 11 if Step 1.4 fired) Anthropic tool definitions match the v6 spec; write tools accept `override_collisions: list[{topic_id, reason}]`; `search_topics` is env-scoped at the dispatcher.",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Dispatcher enforces all 4 invariants with author resolution coming from the new lean `get_message_author_ids` accessor (not the heavy context call). Every rejection writes a topic_transitions row (`topic_id=NULL` for failed creates, `action='rejected_*'`); every override writes `action='override'` with reason in `payload`.",
+      "priority": "must",
+      "requires": [
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "Canonicalizer fuzz test passes on the 50-headline fixture; pinned-oracle similarity test passes on `similarity_pairs.json` at threshold 0.55.",
+      "priority": "must",
+      "requires": [
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "Pure `render_topic(topic)` produces correct output for simple, sectioned, story-update, and partial-publish recovery; no DB calls and no Discord network calls invoked from the renderer.",
+      "priority": "must",
+      "requires": [
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "Shadow-mode replay smoke test runs against the in-memory fake-store at the `DatabaseHandler` seam (no live DB): topic_transitions rows recorded, no `channel.send` invoked, trace-embed payload contains all required fields including override rate, observation rate, archive-env/topic-env header, and `lease: DEFERRED`.",
+      "priority": "must",
+      "requires": [
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "Existing tests `tests/test_live_update_editor_lifecycle.py`, `tests/test_live_update_editor_publishing.py`, `tests/test_live_update_prompts.py` remain green without modification.",
+      "priority": "must",
+      "requires": [
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "`scripts/run_live_update_shadow.py` exists with two mandatory env knobs (`--archive-env`, `--topic-env`), does NOT route through `LiveUpdateEditor`, never writes to legacy tables, loads >=20 historical source-message windows, posts one trace embed per window plus aggregate summary to `DEV_SHADOW_TRACE_CHANNEL_ID`, and reads `live_update_*` only for telemetry-only divergence comparison.",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Every new read accessor on the NEW topic_* tables filters by `(environment, guild_id)` mandatorily; `cross_env=False` is the only escape. Existing `live_update_*` accessors are NOT modified.",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "`scripts/backfill_topics_from_feed_items.py` exists as a one-shot post-migration Python script that filters source rows to `status='posted' AND len(discord_message_ids) > 0`, uses the lean `get_message_author_ids`, calls `topic_canonicalizer.canonicalize`, and inserts `topics` + `topic_sources` idempotently on `(environment, guild_id, canonical_key)`.",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Alias resolution verified by rolling the same window twice through different runs (in the fake store) and confirming the second run resolves to the same topic_id.",
+      "priority": "must",
+      "requires": [
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "Every new `db_handler.py` accessor has a matching `storage_handler.py` counterpart (DEBT-028 two-layer pattern); the list is enumerated in Step 6, including the new lean `get_message_author_ids`.",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "`tests/fakes/topic_store.py` intercepts at the `DatabaseHandler` seam and carries a mandatory caller-map docstring enumerating each fake method \u2194 production accessor with signature and return shape.",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Trace embed surfaces the three trip-wires explicitly: override rate (per-run + 7-day rolling via `get_topic_transition_rates`), record_observation rate (per-run + rolling), partial-publish incidents, plus a `lease: DEFERRED` indicator and the archive-env / topic-env header.",
+      "priority": "should",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Net new code stays within ~800-1000 LOC; alarm raised if it exceeds ~1500 LOC.",
+      "priority": "should",
+      "requires": [
+        "run_shell"
+      ]
+    },
+    {
+      "criterion": "Trace embeds across 20 replayed windows show divergences explainable as 'valid different call' rather than drift; POM judges new editor equivalent-or-better at the Week-1 decision gate.",
+      "priority": "info",
+      "requires": [
+        "subjective_judgment"
+      ]
+    }
+  ],
+  "assumptions": [
+    "A real Postgres with `pg_trgm` is reachable once (locally or via dev Supabase) to seed `tests/fixtures/similarity_pairs.json`; thereafter the oracle is static and CI does not need pg_trgm.",
+    "`get_message_author_ids(message_ids)` can be implemented as a single `SELECT message_id, author_id FROM discord_messages WHERE message_id = ANY($1)` against the existing `discord_messages` table; no schema change required.",
+    "The existing `discord_messages` table already stores `author_id` as a `bigint` column reachable by the lean accessor (consistent with `get_live_update_context_for_message_ids`'s join shape).",
+    "Fake store at the DatabaseHandler seam is sufficient \u2014 a separate StorageHandler-layer fake is not required for Phase 1 since the two-layer pattern's lower layer is pure Supabase payload building.",
+    "The `topic_transitions.run_id` FK to `topic_editor_runs` is acceptable even though the Anthropic SDK's `tool_use_id` is the idempotency key \u2014 the FK enforces audit-trail integrity at the run level, not at the tool-call level.",
+    "Defer-audit outcome will most likely be 'defer to v2'; the conditional branch exists so Day-0 finding doesn't force a mid-week migration rewrite if it goes the other way.",
+    "Two env knobs (`--archive-env`, `--topic-env`) on the shadow runner remain inside the LOC budget; this is a few extra argparse lines, not a structural change.",
+    "Phase 2 prod cutover, run-lease/checkpoint behavior, partial-publish retry history, and `_legacy_*` renames remain out of scope; concurrent-run lease deferred to Phase 1.5."
+  ],
+  "delta_from_previous_percent": 45.77,
+  "structure_warnings": []
+}

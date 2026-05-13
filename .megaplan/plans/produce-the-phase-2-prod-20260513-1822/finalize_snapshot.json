@@ -1,0 +1,284 @@
+{
+  "baseline_test_command": null,
+  "baseline_test_failures": null,
+  "baseline_test_note": "Test baseline not applicable in doc mode.",
+  "meta_commentary": "Single-file doc authoring at docs/live-update-editor-phase-2-runbook.md. Mirror docs/runbook-payments.md tone \u2014 terse, imperative, copy-paste SQL ready, minimal narrative prose. Length budget ~400 lines (acceptable range 200-700). All schema details reference docs/live-update-editor-redesign.md anchors rather than re-listing columns.\n\nCRITICAL EXECUTOR ADDITIONS from gate warnings (sentence-level, no new sections):\n1. Add a SIXTH TODO(phase-1) to the \u00a71 provisional banner: 'legacy/new run-source discriminator on live_update_editor_runs \u2014 column, metadata JSON key, or trigger-prefix convention; whichever Phase 1 chooses. live_update_editor_runs today (per src/common/storage_handler.py:652-682) has no run_source/editor_source/run_type column, so this is a Phase-1 add.'\n2. Add a one-line note alongside \u00a75 Branch-A verification: 'requires Phase-1-provided run-source discriminator (sixth TODO); if absent at flip time, treat as third-mechanism case and ABORT.'\n3. \u00a73 'all Phase-1 TODOs resolved' precondition must reference SIX TODOs (not five).\n4. \u00a77 third-mechanism decision-tree row should explicitly include 'or run-source discriminator absent' as a triggering condition.\n\nOTHER KEY POINTS:\n- \u00a72 Fast Triage: scope to environment='prod' with last-hour window per plan Step 3.1.\n- \u00a76 partial-publish trip-wire is two-sourced: prod-only SQL count + Phase-1 shadow telemetry count, summed. Do NOT query topics WHERE environment='dev' \u2014 vacuous by design per :611/:627/:633.\n- \u00a75 Branch B PRIMARY signal = Discord-side count (scroll the live channel for posts attributed to legacy bot identity since flip timestamp). SQL suppression marker is nice-to-have secondary.\n- \u00a75 verification anchors on the NEXT observed live_update_editor_runs row with status='completed', not a fixed 15-minute window.\n- \u00a75 verification does NOT check 'zero new rows in legacy live_update_feed_items' \u2014 legacy table writes continue during the watch per :651.\n- \u00a79 migration hand-off chain: author in .migrations_staging/ (timestamped filename matching 20260MMDDHHMMSS_* convention) \u2192 copy verbatim to /Users/peteromalley/Documents/banodoco-workspace/supabase/migrations/ per .migrations_staging/README.md \u2192 apply via `supabase db push` \u2192 verify recorded in supabase_migrations.schema_migrations. \u00a710 DROP uses same chain.\n- \u00a79 cross-checks against docs/live-update-editor-redesign.md:212-223 and src/common/storage_handler.py:652-1968 \u2014 NOT against docs/live-update-editor-legacy-boundaries.md (that section is about daily_summaries).\n- \u00a77 lease symptoms split into THREE rows (new-editor self-contention HOT-FIX; legacy writing to NEW tables ABORT; new+legacy run-row overlap on same lease key ABORT).\n- \u00a77 partial-publish row: '(Phase-1 telemetry shadow partials) + (Phase-2 prod partials from topics) cumulative \u2265 2 \u2192 ABORT + restore topic_publications' citing :600-601.\n- \u00a710 deletion date is operator-filled blank, NOT hardcoded.\n- Use <LIVE_EDITOR_PUBLISH_TOGGLE> as the placeholder name throughout.\n- Reference src/features/summarising/live_update_editor.py \u2014 specifically _publish_accepted_candidates (:84-107) and _select_publishable_candidates (:261-346) \u2014 as the legacy fallback path.\n\nSettled decisions SD-1..SD-8 preserved. Doc-only scope \u2014 no code edits anywhere else.",
+  "tasks": [
+    {
+      "id": "T1",
+      "description": "Verify output path is unused and re-confirm all source anchors before authoring. Check that docs/live-update-editor-phase-2-runbook.md does not already exist; re-read the named line ranges in docs/live-update-editor-redesign.md (117-123, 188-191, 212-223, 596, 599-604, 611, 627, 633, 642-644, 646-653, 651, 684), docs/runbook-payments.md (1-92, 286-407), src/common/storage_handler.py (652-682, 652-1968), src/features/summarising/live_update_editor.py (60, 84-107, 261-346), and .migrations_staging/README.md to confirm the hand-off destination path /Users/peteromalley/Documents/banodoco-workspace/supabase/migrations/. Note the absence of any run_source/editor_source/run_type column on live_update_editor_runs (this confirms the sixth TODO(phase-1) needs to be added).",
+      "depends_on": [],
+      "status": "pending",
+      "kind": "audit",
+      "executor_notes": "",
+      "files_changed": [],
+      "commands_run": [],
+      "auto_attributed_files": null,
+      "evidence_files": [],
+      "reviewer_verdict": "",
+      "stance": null,
+      "stop_signal": null
+    },
+    {
+      "id": "T2",
+      "description": "Author \u00a71 (header, audience, scope, provisional banner) and \u00a72 (Fast Triage SQL) of docs/live-update-editor-phase-2-runbook.md. \u00a71: H1 + 3-5 line preamble naming oncall as audience, after-Phase-1-gate as timing, what the doc covers/doesn't (point at redesign for Phase 1 design). Provisional banner enumerates SIX TODO(phase-1) items: (a) toggle name + location, (b) suppression mechanism Branch A scheduler-tick vs Branch B publish-call, (c) Branch-B run-row suppression marker (column/metadata key if any), (d) new-editor / legacy bot identity in the live Discord channel, (e) prod trace-embed channel, (f) legacy/new run-source discriminator on live_update_editor_runs (column, metadata JSON key, or trigger-prefix convention \u2014 table today per src/common/storage_handler.py:652-682 has no such column). Explicit out-of-scope clause: if Phase 1 ships any third mechanism (hybrid, per-guild config, per-channel rollout, partial guild rollout) OR omits the run-source discriminator \u2192 ABORT to consult-the-doc escape hatch; do not improvise. Primary tools bullet list (<LIVE_EDITOR_PUBLISH_TOGGLE> placeholder, trace channel TODO(phase-1), SQL one-liners in this doc, legacy editor entrypoint at src/features/summarising/live_update_editor.py:60 + publish wiring :84-107/:261-346, migration hand-off path). Guardrails (rename only after watch; cross-window trip-wire; both editors keep writing their own tables; default ABORT). \u00a72: Fast Triage SQL block scoped environment='prod' grouping by publication_status over last hour, with `-- swap to 'dev' for pre-flip verification (note: dev rows are diagnostic only; no 'partial' can appear in dev during Phase 1 per :611/:627/:633)`. 'Then classify' bullet list per status with jump-to pointers. State-summary one-liner (`select state, count(*) from topics where environment='prod' group by state;`). 'Recent runs' one-liner against live_update_editor_runs with note that Branch-B suppression marker AND run-source discriminator appear here \u2014 both TODO(phase-1).",
+      "depends_on": [
+        "T1"
+      ],
+      "status": "pending",
+      "kind": "docs",
+      "executor_notes": "",
+      "files_changed": [],
+      "commands_run": [],
+      "auto_attributed_files": null,
+      "evidence_files": [],
+      "reviewer_verdict": "",
+      "stance": null,
+      "stop_signal": null
+    },
+    {
+      "id": "T3",
+      "description": "Author \u00a73 (pre-flip preconditions checklist) and \u00a74 (shadow-mode \u2192 cutover GO/TUNE/ABORT rubric). \u00a73: GATE \u2014 verification \u2014 pass-criterion lines for: Phase 1 soak passed (:642-644); 5-table schema migration applied; named indexes present (topics_state_idx, topics_revisit_idx, topics_headline_trgm, transitions_* per :188-191); backfill row-count parity (live_update_feed_items vs topics WHERE state='posted'; live_update_watchlist vs state='watching'); runner lease key in place (:684); trace embed wired in prod monitoring channel (:611-644); legacy editor still running (latest live_update_editor_runs row under legacy run-source within last hour); operator paged-in window booked; ALL SIX Phase-1 TODOs resolved (toggle, suppression mechanism, Branch-B marker, bot identity, trace channel, run-source discriminator); Phase 1 actually shipped Branch A or Branch B (not a third mechanism \u2014 if third mechanism OR run-source discriminator absent, abort cutover). End: 'If any gate is RED, do not flip. Consult docs/live-update-editor-redesign.md and reschedule.' \u00a74: GO/TUNE/ABORT table keyed on Phase-1 signals from :611-644 and :599-604 \u2014 replay-divergence explainability; collision-override rate (<10% GO / 10-25% TUNE / >25% ABORT per :603); record_observation rate (1-3/run GO / <1/run TUNE per :602); Phase-1 shadow-attempted-publish partials from shadow telemetry (0 GO / 1 TUNE \u2014 counts toward cross-window trip-wire); schema-rejection rate from topic_transitions WHERE action LIKE 'rejected_%' (<10%/10-50%/>50%); cost/run; latency/run. Annotation on partial-publish row: 'Sourced from Phase-1 shadow telemetry (trace embed in Phase-1 monitoring channel + shadow logs per :611-644), NOT from topics WHERE environment='dev' \u2014 Phase 1 runs with publishing OFF per :611/:627/:633.' Define TUNE = delay flip + consult redesign; ABORT = walk away from Phase 2 this week.",
+      "depends_on": [
+        "T2"
+      ],
+      "status": "pending",
+      "kind": "docs",
+      "executor_notes": "",
+      "files_changed": [],
+      "commands_run": [],
+      "auto_attributed_files": null,
+      "evidence_files": [],
+      "reviewer_verdict": "",
+      "stance": null,
+      "stop_signal": null
+    },
+    {
+      "id": "T4",
+      "description": "Author \u00a75 (publishing-flag-flip procedure) and \u00a76 (partial-publish detection SQL). \u00a75: Branch A (scheduler-tick gate) verification \u2014 primary signal = no new live_update_editor_runs rows under the legacy run-source after the flip timestamp; new editor's run row appears on the next tick. ADD ONE-LINE NOTE: 'requires Phase-1-provided run-source discriminator (sixth TODO); if absent at flip time, treat as third-mechanism case and ABORT.' Branch B (publish-call gate at _publish_accepted_candidates :84-107 / _select_publishable_candidates :261-346) verification \u2014 PRIMARY signal = Discord-side count: operator scrolls the live Discord channel since the flip timestamp and confirms zero posts attributed to the legacy bot identity. SECONDARY, nice-to-have: if Phase 1 writes a suppression marker on the legacy live_update_editor_runs row, an SQL check on that column/metadata key (TODO(phase-1)). If no marker shipped, Discord-side count is the only signal \u2014 acceptable. Procedure body (8 steps): re-run \u00a73 checklist; set <LIVE_EDITOR_PUBLISH_TOGGLE> to Phase-1-chosen suppression value; record flip timestamp (watch start); ANCHOR VERIFICATION ON NEXT OBSERVED RUN (not fixed window \u2014 cadence hourly per :633) \u2014 poll `select run_id, status, completed_at from live_update_editor_runs where environment='prod' and created_at > '<flip timestamp>' order by created_at asc;` until a NEW row appears with status='completed'; verification SQL one-liner against topics scoped environment='prod' with last_published_at > flip timestamp grouped by publication_status; confirm \u22651 'sent', zero 'partial', zero unexpected 'failed'; confirm branch-appropriate signal from step 1; if any check fails, jump to \u00a78. EXPLICITLY DO NOT check for 'zero new rows in legacy live_update_feed_items'. \u00a76: four query blocks scoped environment='prod' with `-- swap to 'dev' for pre-flip verification (note: dev has no partials during Phase 1)` annotations \u2014 (a) windowed counts: last_hour/last_24h/since_cutover for publication_status='partial'; (b) per-row deep-dive selecting id, canonical_key, headline, state, publication_status, publication_error, publication_attempts, last_published_at, discord_message_ids ordered by last_published_at desc limit 50; (c) still-pending-too-long: publication_status='pending' AND (last_published_at IS NULL OR last_published_at < now() - interval '90 minutes'); (d) rejection-rate against topic_transitions WHERE action LIKE 'rejected_%' last 1h grouped by action. Two-source trip-wire tally: prod-only SQL count `select count(*) as prod_partials_since_cutover from topics where environment='prod' and publication_status='partial' and last_published_at >= '<cutover-flip-timestamp>';` followed by explicit instruction: 'Add the Phase-1 shadow-attempted-publish partial count from shadow-mode telemetry (trace embed + shadow logs per :611-644) \u2014 NOT from topics. Record both numbers inline: Phase-1 shadow partials (from telemetry): ____ ; Phase-2 prod partials (from query above): ____ ; Trip-wire fires when sum \u2265 2 per :600-601: ABORT + restore topic_publications.' Annotation: 'See :117-123, :223 for column shapes.'",
+      "depends_on": [
+        "T3"
+      ],
+      "status": "pending",
+      "kind": "docs",
+      "executor_notes": "",
+      "files_changed": [],
+      "commands_run": [],
+      "auto_attributed_files": null,
+      "evidence_files": [],
+      "reviewer_verdict": "",
+      "stance": null,
+      "stop_signal": null
+    },
+    {
+      "id": "T5",
+      "description": "Author \u00a77 (24-48h watch decision tree) and \u00a78 (rollback procedure \u2014 runner-pointer flip). \u00a77: SYMPTOM | THRESHOLD | ACTION | POINTER markdown table. Rows: publication_status='partial' \u2014 1 in cutover window \u2192 INVESTIGATE; (Phase-1 telemetry shadow partials + Phase-2 prod partials from \u00a76) cumulative \u2265 2 per :600-601 \u2192 ABORT + restore topic_publications + \u00a78. Rejection rate >50%/hr from \u00a76(d) \u2192 TUNE/ABORT consult redesign. Collision-override rate >10% \u2192 TUNE per :603. Duplicate posts to live channel: 1 isolated \u2192 HOT-FIX (check _publish_accepted_candidates idempotency / topic_sources uniqueness per :625); recurring \u2192 ABORT. Legacy editor accidentally publishes to live channel \u2192 HOT-FIX: re-verify toggle + branch-A/B signal from \u00a75. Discord 429s/auth errors from new editor \u2192 HOT-FIX routing. THREE SEPARATE LEASE ROWS per :684: new-editor self-contention \u2192 HOT-FIX release lease for (environment, guild_id, live_channel_id) + verify next tick; legacy editor writing to NEW tables (topics, topic_*) \u2192 ABORT (isolation broke); new + legacy run rows overlapping in same lease key \u2192 ABORT (lease misconfigured). Shape divergence vs Phase 1 baseline: explainable \u2192 ACCEPT; unexplained \u2192 TUNE/ABORT. record_observation <1/run sustained \u2192 INFO (post-cutover concern per :602). Phase 1 turns out to be a third mechanism (not A or B) OR run-source discriminator absent \u2192 ABORT immediately; runbook does not cover. End: 'If symptom not listed, ABORT to rollback and consult docs/live-update-editor-redesign.md.' \u00a78: Pre-rename rollback (common case during watch): (1) Flip <LIVE_EDITOR_PUBLISH_TOGGLE> to legacy value; (2) Drain new-editor in-flight run OR force lease release for (environment, guild_id, live_channel_id) per :684; (3) Wait for next scheduler tick; confirm legacy editor publishes via _publish_accepted_candidates (src/features/summarising/live_update_editor.py:84-107) \u2014 Branch A: new legacy live_update_editor_runs row appears under legacy run-source; Branch B: existing legacy run rows now show suppression marker CLEARED (if Phase 1 writes one) AND new live-channel post attributed to legacy bot identity (primary Discord-side signal); (4) Verify new row in live_update_feed_items for prod run AND corresponding Discord post; (5) Leave topics rows alone \u2014 do not truncate or rewrite. Cite :596. Post-rename rollback variant (rare): same toggle flip + reverse-rename SQL (mirror of \u00a79, six tables back to original names), then re-run pre-rename verification. Explicit statement: 'Run \u00a79 rename only after the 24-48h watch passes. This keeps rollback to a single toggle flip during the watch window.'",
+      "depends_on": [
+        "T4"
+      ],
+      "status": "pending",
+      "kind": "docs",
+      "executor_notes": "",
+      "files_changed": [],
+      "commands_run": [],
+      "auto_attributed_files": null,
+      "evidence_files": [],
+      "reviewer_verdict": "",
+      "stance": null,
+      "stop_signal": null
+    },
+    {
+      "id": "T6",
+      "description": "Author \u00a79 (table-rename migration SQL \u2014 post-watch) and \u00a710 (deletion schedule + close-out). \u00a79: Migration-runner path explicitly: author migration as new timestamped file in .migrations_staging/ (e.g. 2026MMDDHHMMSS_live_update_legacy_rename.sql, matching convention of 20260511110349_live_update_environment_split.sql and 20260512185328_live_update_watchlist_lifecycle.sql); hand off per .migrations_staging/README.md \u2014 copy file VERBATIM (filename unchanged so ordering preserved) into /Users/peteromalley/Documents/banodoco-workspace/supabase/migrations/; apply via `supabase db push` from workspace repo (TODO(phase-1) if Phase 1 chose a different applier such as Supabase dashboard SQL editor or psql-direct against prod; SQL body identical regardless); verify migration recorded in supabase_migrations.schema_migrations before treating rename as applied. Ordered ALTER TABLE ... RENAME TO block in a begin; ... commit; transaction for six legacy tables per docs/live-update-editor-redesign.md:212-223 (cross-checked against src/common/storage_handler.py:652-1968 \u2014 NOT docs/live-update-editor-legacy-boundaries.md which is about daily_summaries): live_update_feed_items, live_update_watchlist, live_update_duplicate_state, live_update_editorial_memory, live_update_candidates, live_update_decisions \u2192 _legacy_<name>. Inline comment: live_update_editor_runs stays (:223, :562); swapping commit; for rollback; gives dry-run preview. Constraint-preservation note: Postgres preserves indexes, sequences, FK constraints, RLS across RENAME TO \u2014 do not recreate. Dependent views NOT auto-updated \u2014 pre-check `select schemaname, viewname from pg_views where definition ilike '%live_update_%';` and recreate or drop explicitly. Row-count parity SELECT before AND after (union all over six tables); counts must match exactly. Record _legacy_* deletion date inline: __________ (operator picks 2-4 weeks from today per :653). Do NOT hardcode date. \u00a710: 'Before deletion date fires' checklist (no recent reads from _legacy_*, no open incidents referencing legacy data, POM explicit sign-off). DROP TABLE _legacy_<name>; block for all six tables in single transaction, authored via same .migrations_staging/ \u2192 supabase/migrations/ \u2192 supabase db push hand-off as \u00a79. Bring-forward circumstances (storage pressure, schema-drift complications, audit done early); push-out circumstances (active forensics, regulator request, ongoing post-cutover partial-publish investigation). Close-out checklist: legacy dropped, runbook archived, redesign doc updated to note Phase 2 done.",
+      "depends_on": [
+        "T5"
+      ],
+      "status": "pending",
+      "kind": "docs",
+      "executor_notes": "",
+      "files_changed": [],
+      "commands_run": [],
+      "auto_attributed_files": null,
+      "evidence_files": [],
+      "reviewer_verdict": "",
+      "stance": null,
+      "stop_signal": null
+    },
+    {
+      "id": "T7",
+      "description": "Author \u00a711 (consult-the-doc escape hatch footer) and complete a self-review polish pass over the assembled document. \u00a711: Short footer \u2014 every section that could fork on Phase-1 deviation defaults to ABORT-to-rollback. Re-list named redesign anchors (:117-123, :188-191, :212-223, :223, :596, :599-604, :600-601, :611, :627, :633, :642-644, :646-653, :651, :684). Re-list three trip-wire signals from :599-604: partial-publish \u00d72 cross-window (Phase-1 telemetry + Phase-2 topics) \u2192 ABORT + restore topic_publications; override rate >10% \u2192 TUNE; record_observation <1/run \u2192 drop tool (post-cutover concern). Self-review polish pass \u2014 verify: (1) all eight pass_to_pass expectations map to a section; (2) \u00a76 trip-wire tally does NOT query topics WHERE environment='dev'; (3) \u00a75 Branch B names Discord-side count as PRIMARY signal and SQL marker as nice-to-have; (4) \u00a71 banner lists SIX TODO(phase-1) items including run-source discriminator and explicit out-of-scope clause for third mechanism; (5) \u00a73 preconditions includes 'Phase 1 shipped Branch A or Branch B (not a third mechanism)' AND 'run-source discriminator present' as gates (all six TODOs resolved); (6) \u00a77 decision tree includes third-mechanism row that also covers run-source-discriminator-absent; (7) \u00a79 step 1 names full migration hand-off chain (.migrations_staging/ \u2192 supabase/migrations/ \u2192 supabase db push \u2192 verify in supabase_migrations.schema_migrations); (8) \u00a710 step 2 uses same hand-off chain for DROP TABLE; (9) \u00a75 verification anchors on next observed live_update_editor_runs row not fixed window; (10) \u00a77 partial-publish threshold is '(Phase-1 telemetry) + (Phase-2 prod) cumulative \u2265 2' with :600-601 citation; (11) \u00a77 lease symptoms split into three distinct rows; (12) \u00a79 cross-checks against :212-223 and src/common/storage_handler.py:652-1968 NOT docs/live-update-editor-legacy-boundaries.md; (13) SQL is environment='prod' with `-- swap to 'dev'` comments and 'dev has no partials' annotation where it would mislead; (14) length ~400 lines (200-700 acceptable), schema referenced not duplicated, _legacy_* deletion date blank, every TODO(phase-1) visibly labeled. Verify anchor references in the doc resolve to real lines in source files.",
+      "depends_on": [
+        "T6"
+      ],
+      "status": "pending",
+      "kind": "docs",
+      "executor_notes": "",
+      "files_changed": [],
+      "commands_run": [],
+      "auto_attributed_files": null,
+      "evidence_files": [],
+      "reviewer_verdict": "",
+      "stance": null,
+      "stop_signal": null
+    }
+  ],
+  "watch_items": [
+    "MUST add a SIXTH TODO(phase-1) for the run-source discriminator on live_update_editor_runs \u2014 table today (per src/common/storage_handler.py:652-682) has no run_source/editor_source/run_type column. \u00a71 banner, \u00a73 precondition list, \u00a75 Branch A note, and \u00a77 third-mechanism row all need this enumerated explicitly (gate warnings #1, #2, #3).",
+    "Output path is exactly docs/live-update-editor-phase-2-runbook.md \u2014 verify the file does not exist before writing.",
+    "Tone: terse, imperative, copy-paste SQL ready \u2014 match docs/runbook-payments.md, NOT general prose. Length budget ~400 lines (200-700 acceptable).",
+    "All SQL scoped to environment='prod' with `-- swap to 'dev' for pre-flip verification` comments; dev annotation must note 'dev has no partials during Phase 1 per :611/:627/:633' where the operator might misread '0 dev rows' as 'dev clean.'",
+    "\u00a75 Branch B PRIMARY verification signal is Discord-side count (scroll live channel for posts attributed to legacy bot identity since flip timestamp). SQL suppression marker is demoted to nice-to-have. Do NOT promote SQL marker over Discord count.",
+    "\u00a75 verification anchors on the NEXT observed live_update_editor_runs row (poll until new completed row appears) \u2014 NOT a fixed 15-minute window (cadence is hourly per :633).",
+    "\u00a75 verification does NOT check 'zero new rows in legacy live_update_feed_items' \u2014 legacy table writes continue during the watch per :651. Only Discord-send is suppressed.",
+    "\u00a76 partial-publish trip-wire is TWO-SOURCED: prod-only SQL count from topics + Phase-1 shadow telemetry count from trace embed + shadow logs. Sum \u2265 2 \u2192 ABORT. Do NOT query topics WHERE environment='dev' (vacuous by design).",
+    "\u00a77 partial-publish row threshold is '(Phase-1 telemetry shadow partials) + (Phase-2 prod partials from topics) cumulative \u2265 2 \u2192 ABORT + restore topic_publications' citing :600-601. Phrase exactly.",
+    "\u00a77 lease symptoms must split into THREE distinct rows: new-editor self-contention HOT-FIX; legacy writing to NEW tables ABORT; new+legacy run-row overlap on same lease key ABORT.",
+    "\u00a77 must include a row for 'Phase 1 turns out to be a third mechanism (not Branch A or B) OR run-source discriminator absent \u2192 ABORT immediately.'",
+    "\u00a79 migration hand-off chain MUST be named in full: author in .migrations_staging/ (timestamped filename matching convention) \u2192 copy verbatim to /Users/peteromalley/Documents/banodoco-workspace/supabase/migrations/ \u2192 apply via `supabase db push` \u2192 verify in supabase_migrations.schema_migrations. \u00a710 DROP block uses same chain.",
+    "\u00a79 six-table cross-reference is docs/live-update-editor-redesign.md:212-223 AND src/common/storage_handler.py:652-1968 \u2014 NOT docs/live-update-editor-legacy-boundaries.md (that section is about daily_summaries, not the live_update_* tables).",
+    "\u00a79/\u00a710: live_update_editor_runs stays (NOT renamed, NOT dropped) per :223 and :562.",
+    "Rename runs ONLY after the 24-48h watch passes \u2014 so rollback during the watch is a single toggle flip. State this explicitly.",
+    "\u00a710 _legacy_* deletion date is an operator-filled blank, NOT hardcoded.",
+    "Use <LIVE_EDITOR_PUBLISH_TOGGLE> as the placeholder name throughout. Reference _publish_accepted_candidates (src/features/summarising/live_update_editor.py:84-107) and _select_publishable_candidates (:261-346) as the legacy fallback path.",
+    "Reference docs/live-update-editor-redesign.md anchors for schema shape \u2014 do NOT re-list column definitions in the runbook.",
+    "Doc-only scope. Make NO code edits, NO test changes, NO file changes outside docs/live-update-editor-phase-2-runbook.md.",
+    "Avoid scope creep: sentence-level adherence to the plan. Do not invent additional sections beyond the 11 specified."
+  ],
+  "sense_checks": [
+    {
+      "id": "SC1",
+      "task_id": "T1",
+      "question": "Did the executor verify the output path is unused and re-read all named source anchors (especially confirming live_update_editor_runs lacks any run_source/editor_source/run_type column today)?",
+      "executor_note": "",
+      "verdict": ""
+    },
+    {
+      "id": "SC2",
+      "task_id": "T2",
+      "question": "Does \u00a71's provisional banner enumerate SIX TODO(phase-1) items including the run-source discriminator, with explicit out-of-scope clause for any third mechanism? Does \u00a72 Fast Triage SQL group by publication_status scoped to environment='prod' with the dev-swap-comment + 'no partials in dev' annotation?",
+      "executor_note": "",
+      "verdict": ""
+    },
+    {
+      "id": "SC3",
+      "task_id": "T3",
+      "question": "Does \u00a73 preconditions include both 'Phase 1 shipped Branch A or Branch B (not a third mechanism)' AND the run-source-discriminator gate (i.e. all SIX TODOs resolved)? Does \u00a74 GO/TUNE/ABORT rubric source Phase-1 shadow partials from Phase-1 telemetry (NOT from topics WHERE environment='dev')?",
+      "executor_note": "",
+      "verdict": ""
+    },
+    {
+      "id": "SC4",
+      "task_id": "T4",
+      "question": "Does \u00a75 Branch B name Discord-side count as PRIMARY (with SQL marker as nice-to-have secondary), anchor verification on the next observed live_update_editor_runs row not a fixed window, and avoid checking 'zero new rows in legacy live_update_feed_items'? Does \u00a76 use a prod-only trip-wire SQL count plus explicit instruction to add the Phase-1 telemetry shadow partial count for the sum-of-two-sources trip-wire?",
+      "executor_note": "",
+      "verdict": ""
+    },
+    {
+      "id": "SC5",
+      "task_id": "T5",
+      "question": "Does \u00a77 split lease symptoms into three distinct rows, frame the partial-publish trip-wire as '(Phase-1 telemetry) + (Phase-2 prod) cumulative \u2265 2 \u2192 ABORT + restore topic_publications' citing :600-601, and include a third-mechanism row covering the run-source-discriminator-absent case? Does \u00a78 leave topics rows untouched, distinguish pre-rename rollback (toggle flip) from post-rename rollback (reverse rename), cite :596, and cover both Branch-A and Branch-B legacy-publish-resumption verification?",
+      "executor_note": "",
+      "verdict": ""
+    },
+    {
+      "id": "SC6",
+      "task_id": "T6",
+      "question": "Does \u00a79 name the full migration hand-off chain (author in .migrations_staging/ \u2192 copy verbatim to /Users/peteromalley/Documents/banodoco-workspace/supabase/migrations/ \u2192 supabase db push \u2192 verify in supabase_migrations.schema_migrations), rename all six legacy tables to _legacy_<name>, retain live_update_editor_runs, run inside BEGIN/COMMIT with dry-run rollback note, include row-count parity before/after, and explicitly cross-check the six-table set against :212-223 + src/common/storage_handler.py:652-1968 (NOT docs/live-update-editor-legacy-boundaries.md)? Does \u00a710 use the same hand-off chain for DROP TABLE and leave the deletion date as an operator-filled blank?",
+      "executor_note": "",
+      "verdict": ""
+    },
+    {
+      "id": "SC7",
+      "task_id": "T7",
+      "question": "Does \u00a711 footer point back to docs/live-update-editor-redesign.md anchors and re-list the three trip-wire signals from :599-604? Did the self-review confirm length ~400 lines, schema referenced not duplicated, all six TODO(phase-1) markers visibly labeled, and tone matches docs/runbook-payments.md?",
+      "executor_note": "",
+      "verdict": ""
+    }
+  ],
+  "user_actions": [],
+  "validation": {
+    "plan_steps_covered": [
+      {
+        "plan_step_summary": "Step 1: Confirm output path, reference anchors, and ground facts",
+        "finalize_item_ids": [
+          "T1"
+        ]
+      },
+      {
+        "plan_step_summary": "Step 2: Draft \u00a71 header, audience, scope, provisional banner",
+        "finalize_item_ids": [
+          "T2"
+        ]
+      },
+      {
+        "plan_step_summary": "Step 3: Draft \u00a72 Fast Triage SQL",
+        "finalize_item_ids": [
+          "T2"
+        ]
+      },
+      {
+        "plan_step_summary": "Step 4: Draft \u00a73 pre-flip preconditions checklist",
+        "finalize_item_ids": [
+          "T3"
+        ]
+      },
+      {
+        "plan_step_summary": "Step 5: Draft \u00a74 shadow-mode \u2192 cutover comparison rubric",
+        "finalize_item_ids": [
+          "T3"
+        ]
+      },
+      {
+        "plan_step_summary": "Step 6: Draft \u00a75 publishing-flag-flip procedure",
+        "finalize_item_ids": [
+          "T4"
+        ]
+      },
+      {
+        "plan_step_summary": "Step 7: Draft \u00a76 partial-publish detection SQL",
+        "finalize_item_ids": [
+          "T4"
+        ]
+      },
+      {
+        "plan_step_summary": "Step 8: Draft \u00a77 24-48h watch decision tree",
+        "finalize_item_ids": [
+          "T5"
+        ]
+      },
+      {
+        "plan_step_summary": "Step 9: Draft \u00a78 rollback procedure (runner-pointer flip)",
+        "finalize_item_ids": [
+          "T5"
+        ]
+      },
+      {
+        "plan_step_summary": "Step 10: Draft \u00a79 table-rename migration SQL (post-watch)",
+        "finalize_item_ids": [
+          "T6"
+        ]
+      },
+      {
+        "plan_step_summary": "Step 11: Draft \u00a710 deletion schedule + close-out",
+        "finalize_item_ids": [
+          "T6"
+        ]
+      },
+      {
+        "plan_step_summary": "Step 12: Draft \u00a711 consult-the-doc escape hatch footer",
+        "finalize_item_ids": [
+          "T7"
+        ]
+      },
+      {
+        "plan_step_summary": "Step 13: Self-review pass against test expectations and v3 critique flags",
+        "finalize_item_ids": [
+          "T7"
+        ]
+      }
+    ],
+    "orphan_tasks": [],
+    "completeness_notes": "All 13 plan steps mapped to 7 finalize tasks. Tasks grouped by execution order from the plan (header+triage \u2192 preconditions+rubric \u2192 flip+detection \u2192 decision-tree+rollback \u2192 migration+deletion \u2192 footer+polish). The \u00a71 banner has been expanded from five to SIX TODO(phase-1) items per the gate's three warnings to address the open run-source-discriminator concern (FLAG-011 / callers / scope / correctness). Doc-only scope; no code or test tasks needed.",
+    "coverage_complete": true
+  }
+}

@@ -1,0 +1,316 @@
+{
+  "robustness": "standard",
+  "signals": {
+    "iteration": 1,
+    "idea": "Produce the Phase 2 prod cutover runbook at docs/live-update-editor-phase-2-runbook.md for the live-update editor redesign (per the linked v6 redesign doc). Phase 1 will deliver the new editor in dev with publishing OFF; Phase 2 enables publishing, runs new + old editors side-by-side in prod for 24-48h, monitors for partial-publish failures via topics.publication_status='partial', renames old tables to _legacy_*, and schedules deletion in 2-4 weeks. The runbook must specify: exact publishing-flag-flip procedure with pre-flip preconditions, partial-publish detection SQL (the queries oncall would run), rollback procedure (how to flip the runner back to the legacy editor without rewriting state), the comparison-with-shadow-mode rubric (what specific signals from the Phase-1 shadow-mode logs mean cutover is safe versus 'go back and tune'), the table-rename migration SQL with correct ordering and constraint handling, and a decision tree for the 24-48h watch period \u2014 what observable symptom triggers what action (abort, hot-fix, accept). Assume Phase 1 lands per spec; deviations get a 'consult the doc' escape hatch, not detailed branching. The runbook is the operator's source of truth during cutover.",
+    "significant_flags": 9,
+    "unresolved_flags": [
+      {
+        "id": "FLAG-001",
+        "concern": "Publishing-flag-flip verification incorrectly checks for 'zero new rows in legacy live_update_feed_items' after flipping the toggle, but per docs/live-update-editor-redesign.md:651 both editors continue to write to their own tables during the 24-48h side-by-side \u2014 only the legacy editor's Discord send is suppressed. As written, the verification will false-fail every hour and mislead the operator into thinking the flip didn't take. Verification should target Discord-side suppression (legacy run row showing published_count=0, or absence of new live-channel posts attributed to the legacy bot identity) rather than legacy table writes.",
+        "category": "correctness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "issue_hints",
+        "concern": "Did the work fully address the issue hints, user notes, and approved plan requirements?: Plan Step 10.5 instructs the executor to 'cross-check the six tables here against the current set in docs/live-update-editor-legacy-boundaries.md's Legacy Storage And Helpers'. I read that section: it enumerates `daily_summaries` helpers (get_summary_for_date, store_daily_summary_to_supabase, etc.) \u2014 not the six `live_update_*` tables. The authoritative list lives in docs/live-update-editor-redesign.md:212-223 (and confirmed against src/common/storage_handler.py:654-1968, where live_update_editor_runs, live_update_candidates, live_update_decisions, live_update_feed_items, live_update_duplicate_state, live_update_editorial_memory, live_update_watchlist all appear). The cross-reference target is wrong; the executor will either skip the check or be confused.",
+        "category": "completeness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "correctness-1",
+        "concern": "Are the proposed changes technically correct?: Plan Step 6.4 (publishing-flag-flip verification) says to verify '\u22651 publication_status=\"sent\" row in topics AND zero new rows in legacy live_update_feed_items for the same window.' This contradicts docs/live-update-editor-redesign.md:651: 'Both write to their own tables. Only new editor publishes to Discord; old editor's posts are suppressed.' During Phase 2 side-by-side, the legacy editor SHOULD still create live_update_feed_items rows; only its Discord send is suppressed. The verification as written will false-fail (or push the operator to chase a problem that does not exist). The correct verification is on Discord-send activity (legacy run rows showing published_count=0, or absence of new live-channel posts attributed to the legacy bot identity) rather than legacy table row counts.",
+        "category": "correctness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "correctness-2",
+        "concern": "Are the proposed changes technically correct?: Plan \u00a77 decision tree narrows the partial-publish trip-wire to '\u22652 in 24h \u2192 ABORT'. The redesign at :600 reads 'if partial-publish incidents happen twice during shadow-mode or prod' \u2014 i.e., across the entire cutover window (Phase 1 shadow plus the 24-48h side-by-side), not a rolling 24h. A Phase-1 shadow partial plus one prod partial inside the watch window would not trip the plan's rule, but does satisfy the redesign's intent. Should align or explicitly justify the operational scoping.",
+        "category": "correctness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "correctness-3",
+        "concern": "Are the proposed changes technically correct?: Plan Step 6.5/6.6 verifies via a 15-minute SQL window after toggle flip. Per :633, dev cadence is hourly; Phase 2 likely keeps hourly. If the toggle is flipped between hourly ticks, the 15-minute window may show zero rows for entirely benign reasons (no run fired yet), making 'zero partial' trivially true and giving false confidence. Procedure should sequence verification around the next observed tick rather than a fixed 15-minute window.",
+        "category": "correctness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "scope-1",
+        "concern": "Search for related code that handles the same concept. Is the reported issue a symptom of something broader?: Plan does not describe how the legacy editor's Discord suppression actually flips \u2014 it points at `_publish_accepted_candidates` (src/features/summarising/live_update_editor.py:84-107) and `_select_publishable_candidates` (:261-346) as 'the gated legacy code path' but leaves the gating mechanism as `TODO(phase-1)`. Acceptable per the brief's escape-hatch rule, BUT verification Step 6.4 depends on knowing that mechanism \u2014 if Phase 1 actually suppresses at scheduler-tick level (legacy editor never runs), then `_select_publishable_candidates` is never reached and the SQL verification on legacy run rows needs a different shape.",
+        "category": "completeness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "scope-2",
+        "concern": "Search for related code that handles the same concept. Is the reported issue a symptom of something broader?: Plan \u00a77 decision tree includes 'Lease contention (both editors writing topics)' as a symptom. Per :651 'Both write to their own tables' \u2014 only the new editor writes to `topics`, the legacy editor writes to `live_update_feed_items`. They should not contend over the same row writes. If they share a single `(environment, guild_id, live_channel_id)` lease per :684, they cannot run concurrently at all. As written, the symptom row conflates several distinct failure modes (new-editor self-contention from a stuck run; legacy writing to new tables; lease-key collisions) and gives no clear handle.",
+        "category": "completeness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "all_locations",
+        "concern": "Does the change touch all locations AND supporting infrastructure?: Plan does not specify *which* tool the operator runs the rename SQL with \u2014 psql against prod, the supabase migrations folder, the Supabase dashboard SQL editor, or something else. Planning question Q4 raised this but the plan body itself does not pick one. For a runbook this matters: 'BEGIN; ALTER TABLE RENAME; COMMIT;' is psql-friendly, but Supabase migrations enforce ordered .sql files. Should at least name a chosen path or carry a TODO(phase-1) marker.",
+        "category": "completeness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "callers",
+        "concern": "Find the callers of the changed function. What arguments do they actually pass? Does the fix handle all of them?: The runbook depends on Phase 1 having actually wired a publish toggle and a suppression mechanism on the legacy editor. Neither exists in src/ today (grep for LIVE_UPDATE_PUBLISH*/publish_enabled returned nothing). If Phase 1 lands with a different shape than the plan's TODO placeholders assume \u2014 e.g., the toggle is a per-guild config row rather than an env var, or suppression happens at the scheduler tick rather than `_publish_accepted_candidates` \u2014 then \u00a75 procedure and \u00a78 rollback need re-fitting. Plan flags this via TODO(phase-1) markers but the operator should see in \u00a71 that the runbook is provisional until Phase 1 fills them in.",
+        "category": "correctness",
+        "severity": "significant",
+        "status": "open"
+      }
+    ],
+    "resolved_flags": [],
+    "weighted_score": 10.5,
+    "weighted_history": [],
+    "plan_delta_from_previous": null,
+    "recurring_critiques": [],
+    "scope_creep_flags": [],
+    "loop_summary": "Iteration 1. Weighted score trajectory: 10.5. Plan deltas: n/a. Recurring critiques: 0. Resolved flags: 0. Open significant flags: 9.",
+    "debt_overlaps": [],
+    "escalated_debt_subsystems": []
+  },
+  "warnings": [],
+  "criteria_check": {
+    "count": 17,
+    "items": [
+      {
+        "criterion": "File `docs/live-update-editor-phase-2-runbook.md` exists at exactly that path with non-empty content.",
+        "priority": "must",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Document contains a Fast Triage SQL section (matching `docs/runbook-payments.md` Fast Triage pattern) querying `topics` grouped by `publication_status` scoped to `environment='prod'`.",
+        "priority": "must",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Document includes a Pre-flip preconditions checklist with at least one verifiable command per gate (Phase 1 soak, schema migration applied, indexes present, backfill parity, lease in place, trace embed wired, legacy editor still running, paged-in window).",
+        "priority": "must",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Document includes a GO / TUNE / ABORT shadow-mode-to-cutover comparison rubric keyed on at least: replay-divergence explainability, collision-override rate, `record_observation` rate, partial-publish in dev, schema-rejection rate, cost/latency.",
+        "priority": "must",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Document includes a Publishing-flag-flip procedure with ordered steps and a `<LIVE_EDITOR_PUBLISH_TOGGLE>` placeholder (or the Phase-1-chosen toggle name) plus the post-flip verification SQL one-liner.",
+        "priority": "must",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Document includes four partial-publish detection SQL queries: windowed counts, per-row deep-dive (selecting `publication_status`, `publication_error`, `publication_attempts`, `last_published_at`, `discord_message_ids`), still-pending-too-long, and rejection-rate against `topic_transitions WHERE action LIKE 'rejected_%'`, all scoped to `environment='prod'` with a `-- swap to 'dev'` annotation.",
+        "priority": "must",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Document includes a 24-48h watch decision-tree table (SYMPTOM | THRESHOLD | ACTION | POINTER) that explicitly maps `publication_status='partial'` count \u22652 to ABORT + restore `topic_publications`, citing `docs/live-update-editor-redesign.md:600-601`.",
+        "priority": "must",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Document includes a Rollback procedure (runner-pointer flip) that explicitly leaves `topics` rows untouched and distinguishes pre-rename rollback (trivial \u2014 toggle flip) from post-rename rollback (reverse rename SQL), citing `docs/live-update-editor-redesign.md:596`.",
+        "priority": "must",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Document includes an ordered table-rename migration SQL block that renames all six legacy tables (`live_update_feed_items`, `live_update_watchlist`, `live_update_duplicate_state`, `live_update_editorial_memory`, `live_update_candidates`, `live_update_decisions`) to `_legacy_<name>`, retains `live_update_editor_runs`, runs inside `BEGIN; ... COMMIT;` with a dry-run rollback note, includes row-count parity SELECT before AND after, and a constraint-preservation note for Postgres.",
+        "priority": "must",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Document explicitly states that the table rename runs only AFTER the 24-48h watch passes, so rollback during the watch remains a single toggle flip.",
+        "priority": "must",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Document includes a deletion-schedule section that records the `_legacy_*` deletion 2-4 weeks post-rename as an operator-filled blank (does not hardcode a date), plus a final `DROP TABLE _legacy_*` block, and named bring-forward / push-out circumstances.",
+        "priority": "must",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Document references `docs/live-update-editor-redesign.md` for schema shape rather than re-listing column definitions, and points back to it as the ABORT-to-rollback escape hatch in a footer.",
+        "priority": "must",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Document references `src/features/summarising/live_update_editor.py` (specifically `_publish_accepted_candidates` / `_select_publishable_candidates`) as the legacy fallback path the runner-pointer rollback re-enables.",
+        "priority": "must",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Document length is roughly comparable to `docs/runbook-payments.md` (~400 lines, give or take 100); not under 200 and not over 700.",
+        "priority": "should",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Tone matches `docs/runbook-payments.md` \u2014 terse, imperative, copy-paste SQL ready, minimal narrative prose.",
+        "priority": "should",
+        "requires": [
+          "subjective_judgment"
+        ]
+      },
+      {
+        "criterion": "Every `TODO(phase-1)` placeholder in the doc is clearly labeled so the operator can spot Phase-1-dependent gaps.",
+        "priority": "should",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "No code edits outside `docs/live-update-editor-phase-2-runbook.md`; existing tests still pass (unchanged).",
+        "priority": "must",
+        "requires": [
+          "run_shell",
+          "parse_diff"
+        ]
+      }
+    ]
+  },
+  "preflight_results": {
+    "project_dir_exists": true,
+    "project_dir_writable": true,
+    "success_criteria_present": true,
+    "claude_available": true,
+    "codex_available": true
+  },
+  "unresolved_flags": [
+    {
+      "id": "FLAG-001",
+      "concern": "Publishing-flag-flip verification incorrectly checks for 'zero new rows in legacy live_update_feed_items' after flipping the toggle, but per docs/live-update-editor-redesign.md:651 both editors continue to write to their own tables during the 24-48h side-by-side \u2014 only the legacy editor's Discord send is suppressed. As written, the verification will false-fail every hour and mislead the operator into thinking the flip didn't take. Verification should target Discord-side suppression (legacy run row showing published_count=0, or absence of new live-channel posts attributed to the legacy bot identity) rather than legacy table writes.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "Plan Step 6.4 (\u00a75 verification) vs. docs/live-update-editor-redesign.md:651",
+      "raised_in": "critique_v1.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "issue_hints",
+      "concern": "Did the work fully address the issue hints, user notes, and approved plan requirements?: Plan Step 10.5 instructs the executor to 'cross-check the six tables here against the current set in docs/live-update-editor-legacy-boundaries.md's Legacy Storage And Helpers'. I read that section: it enumerates `daily_summaries` helpers (get_summary_for_date, store_daily_summary_to_supabase, etc.) \u2014 not the six `live_update_*` tables. The authoritative list lives in docs/live-update-editor-redesign.md:212-223 (and confirmed against src/common/storage_handler.py:654-1968, where live_update_editor_runs, live_update_candidates, live_update_decisions, live_update_feed_items, live_update_duplicate_state, live_update_editorial_memory, live_update_watchlist all appear). The cross-reference target is wrong; the executor will either skip the check or be confused.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "Plan Step 10.5 instructs the executor to 'cross-check the six tables here against the current set in docs/live-update-editor-legacy-boundaries.md's Legacy Storage And Helpers'. I read that section: it enumerates `daily_summaries` helpers (get_summary_for_date, store_daily_summary_to_supabase, etc.) \u2014 not the six `live_update_*` tables. The authoritative list lives in docs/live-update-editor-redesign.md:212-223 (and confirmed against src/common/storage_handler.py:654-1968, where live_update_editor_runs, live_update_candidates, live_update_decisions, live_update_feed_items, live_update_duplicate_state, live_update_editorial_memory, live_update_watchlist all appear). The cross-reference target is wrong; the executor will either skip the check or be confused.",
+      "raised_in": "critique_v1.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "correctness-1",
+      "concern": "Are the proposed changes technically correct?: Plan Step 6.4 (publishing-flag-flip verification) says to verify '\u22651 publication_status=\"sent\" row in topics AND zero new rows in legacy live_update_feed_items for the same window.' This contradicts docs/live-update-editor-redesign.md:651: 'Both write to their own tables. Only new editor publishes to Discord; old editor's posts are suppressed.' During Phase 2 side-by-side, the legacy editor SHOULD still create live_update_feed_items rows; only its Discord send is suppressed. The verification as written will false-fail (or push the operator to chase a problem that does not exist). The correct verification is on Discord-send activity (legacy run rows showing published_count=0, or absence of new live-channel posts attributed to the legacy bot identity) rather than legacy table row counts.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "Plan Step 6.4 (publishing-flag-flip verification) says to verify '\u22651 publication_status=\"sent\" row in topics AND zero new rows in legacy live_update_feed_items for the same window.' This contradicts docs/live-update-editor-redesign.md:651: 'Both write to their own tables. Only new editor publishes to Discord; old editor's posts are suppressed.' During Phase 2 side-by-side, the legacy editor SHOULD still create live_update_feed_items rows; only its Discord send is suppressed. The verification as written will false-fail (or push the operator to chase a problem that does not exist). The correct verification is on Discord-send activity (legacy run rows showing published_count=0, or absence of new live-channel posts attributed to the legacy bot identity) rather than legacy table row counts.",
+      "raised_in": "critique_v1.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "correctness-2",
+      "concern": "Are the proposed changes technically correct?: Plan \u00a77 decision tree narrows the partial-publish trip-wire to '\u22652 in 24h \u2192 ABORT'. The redesign at :600 reads 'if partial-publish incidents happen twice during shadow-mode or prod' \u2014 i.e., across the entire cutover window (Phase 1 shadow plus the 24-48h side-by-side), not a rolling 24h. A Phase-1 shadow partial plus one prod partial inside the watch window would not trip the plan's rule, but does satisfy the redesign's intent. Should align or explicitly justify the operational scoping.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "Plan \u00a77 decision tree narrows the partial-publish trip-wire to '\u22652 in 24h \u2192 ABORT'. The redesign at :600 reads 'if partial-publish incidents happen twice during shadow-mode or prod' \u2014 i.e., across the entire cutover window (Phase 1 shadow plus the 24-48h side-by-side), not a rolling 24h. A Phase-1 shadow partial plus one prod partial inside the watch window would not trip the plan's rule, but does satisfy the redesign's intent. Should align or explicitly justify the operational scoping.",
+      "raised_in": "critique_v1.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "correctness-3",
+      "concern": "Are the proposed changes technically correct?: Plan Step 6.5/6.6 verifies via a 15-minute SQL window after toggle flip. Per :633, dev cadence is hourly; Phase 2 likely keeps hourly. If the toggle is flipped between hourly ticks, the 15-minute window may show zero rows for entirely benign reasons (no run fired yet), making 'zero partial' trivially true and giving false confidence. Procedure should sequence verification around the next observed tick rather than a fixed 15-minute window.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "Plan Step 6.5/6.6 verifies via a 15-minute SQL window after toggle flip. Per :633, dev cadence is hourly; Phase 2 likely keeps hourly. If the toggle is flipped between hourly ticks, the 15-minute window may show zero rows for entirely benign reasons (no run fired yet), making 'zero partial' trivially true and giving false confidence. Procedure should sequence verification around the next observed tick rather than a fixed 15-minute window.",
+      "raised_in": "critique_v1.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "scope-1",
+      "concern": "Search for related code that handles the same concept. Is the reported issue a symptom of something broader?: Plan does not describe how the legacy editor's Discord suppression actually flips \u2014 it points at `_publish_accepted_candidates` (src/features/summarising/live_update_editor.py:84-107) and `_select_publishable_candidates` (:261-346) as 'the gated legacy code path' but leaves the gating mechanism as `TODO(phase-1)`. Acceptable per the brief's escape-hatch rule, BUT verification Step 6.4 depends on knowing that mechanism \u2014 if Phase 1 actually suppresses at scheduler-tick level (legacy editor never runs), then `_select_publishable_candidates` is never reached and the SQL verification on legacy run rows needs a different shape.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "Plan does not describe how the legacy editor's Discord suppression actually flips \u2014 it points at `_publish_accepted_candidates` (src/features/summarising/live_update_editor.py:84-107) and `_select_publishable_candidates` (:261-346) as 'the gated legacy code path' but leaves the gating mechanism as `TODO(phase-1)`. Acceptable per the brief's escape-hatch rule, BUT verification Step 6.4 depends on knowing that mechanism \u2014 if Phase 1 actually suppresses at scheduler-tick level (legacy editor never runs), then `_select_publishable_candidates` is never reached and the SQL verification on legacy run rows needs a different shape.",
+      "raised_in": "critique_v1.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "scope-2",
+      "concern": "Search for related code that handles the same concept. Is the reported issue a symptom of something broader?: Plan \u00a77 decision tree includes 'Lease contention (both editors writing topics)' as a symptom. Per :651 'Both write to their own tables' \u2014 only the new editor writes to `topics`, the legacy editor writes to `live_update_feed_items`. They should not contend over the same row writes. If they share a single `(environment, guild_id, live_channel_id)` lease per :684, they cannot run concurrently at all. As written, the symptom row conflates several distinct failure modes (new-editor self-contention from a stuck run; legacy writing to new tables; lease-key collisions) and gives no clear handle.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "Plan \u00a77 decision tree includes 'Lease contention (both editors writing topics)' as a symptom. Per :651 'Both write to their own tables' \u2014 only the new editor writes to `topics`, the legacy editor writes to `live_update_feed_items`. They should not contend over the same row writes. If they share a single `(environment, guild_id, live_channel_id)` lease per :684, they cannot run concurrently at all. As written, the symptom row conflates several distinct failure modes (new-editor self-contention from a stuck run; legacy writing to new tables; lease-key collisions) and gives no clear handle.",
+      "raised_in": "critique_v1.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "all_locations",
+      "concern": "Does the change touch all locations AND supporting infrastructure?: Plan does not specify *which* tool the operator runs the rename SQL with \u2014 psql against prod, the supabase migrations folder, the Supabase dashboard SQL editor, or something else. Planning question Q4 raised this but the plan body itself does not pick one. For a runbook this matters: 'BEGIN; ALTER TABLE RENAME; COMMIT;' is psql-friendly, but Supabase migrations enforce ordered .sql files. Should at least name a chosen path or carry a TODO(phase-1) marker.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "Plan does not specify *which* tool the operator runs the rename SQL with \u2014 psql against prod, the supabase migrations folder, the Supabase dashboard SQL editor, or something else. Planning question Q4 raised this but the plan body itself does not pick one. For a runbook this matters: 'BEGIN; ALTER TABLE RENAME; COMMIT;' is psql-friendly, but Supabase migrations enforce ordered .sql files. Should at least name a chosen path or carry a TODO(phase-1) marker.",
+      "raised_in": "critique_v1.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "callers",
+      "concern": "Find the callers of the changed function. What arguments do they actually pass? Does the fix handle all of them?: The runbook depends on Phase 1 having actually wired a publish toggle and a suppression mechanism on the legacy editor. Neither exists in src/ today (grep for LIVE_UPDATE_PUBLISH*/publish_enabled returned nothing). If Phase 1 lands with a different shape than the plan's TODO placeholders assume \u2014 e.g., the toggle is a per-guild config row rather than an env var, or suppression happens at the scheduler tick rather than `_publish_accepted_candidates` \u2014 then \u00a75 procedure and \u00a78 rollback need re-fitting. Plan flags this via TODO(phase-1) markers but the operator should see in \u00a71 that the runbook is provisional until Phase 1 fills them in.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "The runbook depends on Phase 1 having actually wired a publish toggle and a suppression mechanism on the legacy editor. Neither exists in src/ today (grep for LIVE_UPDATE_PUBLISH*/publish_enabled returned nothing). If Phase 1 lands with a different shape than the plan's TODO placeholders assume \u2014 e.g., the toggle is a per-guild config row rather than an env var, or suppression happens at the scheduler tick rather than `_publish_accepted_candidates` \u2014 then \u00a75 procedure and \u00a78 rollback need re-fitting. Plan flags this via TODO(phase-1) markers but the operator should see in \u00a71 that the runbook is provisional until Phase 1 fills them in.",
+      "raised_in": "critique_v1.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false
+    }
+  ]
+}

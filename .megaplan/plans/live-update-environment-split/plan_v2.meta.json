@@ -1,0 +1,170 @@
+{
+  "version": 2,
+  "timestamp": "2026-05-11T10:05:16Z",
+  "hash": "sha256:ab2611a61de832e54be5fccc91693759b37daffa60b4d56cf97791b63c8e97b9",
+  "changes_summary": "Addressed FLAGS 2-5 by (a) mandating append-only `environment` kwarg placement on every signature so `send_social_picks.py:116` and similar keyword callers stay intact, (b) rewriting all remaining `self.dry_run` references in `live_top_creations.py:326,404,434` and `live_update_editor.py:1347` to `self.environment == \"dev\"` with a final-grep gate, (c) changing the migration to drop and recreate composite unique constraints `(environment, checkpoint_key)` and `(environment, duplicate_key)` so upserts no longer collide across environments, and (d) requiring the manual pre-insert `(natural_key, guild_id)` lookups in `store_live_top_creation_post`, `upsert_live_update_editorial_memory`, and `upsert_live_update_watchlist` to also filter by `environment`. FLAG-001 was rejected after re-verification \u2014 `.migrations_staging/` exists with 4 SQL files; the reviewer's repo scan was wrong. Added a runtime-grep audit step alongside the existing storage-grep audit to catch any missed `self.dry_run` references.",
+  "flags_addressed": [
+    {
+      "id": "FLAG-001",
+      "resolution": "rejected",
+      "reason": "Re-verified: `.migrations_staging/` exists with existing `.sql` files (`20260411220000_backfill_payments.sql` etc.). The reviewer's scan was incorrect. Plan unchanged on this point."
+    },
+    {
+      "id": "FLAG-002",
+      "resolution": "addressed",
+      "reason": "Plan now mandates appending `environment` as the final kwarg on every signature change in both storage_handler and db_handler, preserving compatibility with `send_social_picks.py:116`'s keyword call."
+    },
+    {
+      "id": "FLAG-003",
+      "resolution": "addressed",
+      "reason": "Step 4.4 and Step 5.4 explicitly enumerate the remaining `self.dry_run` sites (editor:1347, top:326/404/434) and require rewrite to `self.environment == \"dev\"`; Step 9.2 adds a runtime grep gate."
+    },
+    {
+      "id": "FLAG-004",
+      "resolution": "addressed",
+      "reason": "Step 1.2 drops and recreates the affected unique constraints as composite `(environment, <key>)`; Step 2.2 updates the `on_conflict` arguments in storage_handler to match."
+    },
+    {
+      "id": "FLAG-005",
+      "resolution": "addressed",
+      "reason": "Step 2.3 requires the manual pre-insert lookups in `store_live_top_creation_post`, `upsert_live_update_editorial_memory`, and `upsert_live_update_watchlist` to add `.eq(\"environment\", environment)` so update-vs-insert decisions don't cross environments."
+    }
+  ],
+  "questions": [],
+  "success_criteria": [
+    {
+      "criterion": "Migration adds `environment text not null default 'prod'` to every listed table AND replaces single-column unique constraints with composite `(environment, <key>)` versions on checkpoints and duplicate-state tables, plus the partial unique index on `live_top_creation_posts (environment, duplicate_key) where status='posted'`",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Every read in `storage_handler.py` that touches a live-update or live-top-creation table filters by `environment` (grep audit yields zero unfiltered selects)",
+      "priority": "must",
+      "requires": [
+        "run_shell",
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Every write in `storage_handler.py` that touches a live-update or live-top-creation table includes `environment` in the payload, update filter, or `on_conflict` key; manual pre-insert lookups (post/memory/watchlist) also filter by environment",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "`environment` kwarg is appended at the end of every modified signature (never inserted mid-list), preserving existing keyword callers such as `scripts/send_social_picks.py:116`",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "`db_handler.py` wrappers accept and forward `environment` for every method touched",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "`LiveUpdateEditor.run_once` no longer branches on `dry_run`; dev checkpoint seeding folded into the main path",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Zero `self.dry_run` references remain in `live_update_editor.py` or `live_top_creations.py` (grep gate)",
+      "priority": "must",
+      "requires": [
+        "run_shell"
+      ]
+    },
+    {
+      "criterion": "`LiveTopCreations._publish_candidate` calls `get_live_top_creation_post_by_duplicate_key` before sending and skips if a posted row exists",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "`LiveTopCreations` routes only to the summary channel; no reads of `DEV_TOP_GENS_CHANNEL_ID` or server `top_gens_channel_id` remain",
+      "priority": "must",
+      "requires": [
+        "run_shell",
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "`max_posts` per-pass cap is removed (replaced with documented `MAX_POSTS_SAFETY_BELT = 50`)",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Cog and dev script pass `environment` explicitly; `LiveUpdateEditor`/`LiveTopCreations` no longer accept `dry_run`",
+      "priority": "must",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "New test asserts running top-creations twice over the same archived message produces exactly one post row and one Discord send",
+      "priority": "must",
+      "requires": [
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "New test asserts dev-environment rows are invisible to prod reads (feed items, watchlist, editorial memory, top-creation dedupe lookup)",
+      "priority": "must",
+      "requires": [
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "All existing `tests/test_live_*` tests pass after being flipped from dry-run-skips-persistence to dev-persists-with-environment",
+      "priority": "must",
+      "requires": [
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "Full `pytest` suite passes",
+      "priority": "must",
+      "requires": [
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "`_run_dry_once` and `_publish_dry_run_debug_report` deleted from `live_update_editor.py` and equivalent dry-run helper deleted from `live_top_creations.py`",
+      "priority": "should",
+      "requires": [
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Running `scripts/run_live_update_dev.py --once` against a real Supabase writes rows tagged `environment='dev'`; a subsequent prod pass does not surface them",
+      "priority": "info",
+      "requires": [
+        "observe_runtime_logs",
+        "subjective_judgment"
+      ]
+    }
+  ],
+  "assumptions": [
+    "`.migrations_staging/` is the migration directory (verified by `ls`).",
+    "Existing unique constraint names on `live_update_checkpoints`, `live_update_duplicate_state`, and `live_top_creation_checkpoints` will be discovered by inspecting the current schema or prior migrations at execution time; the migration drops them by name before recreating composite versions.",
+    "`environment` is appended as the final kwarg on every method signature to keep keyword-only callers (e.g. `send_social_picks.py:116`) compatible.",
+    "`live_update_duplicate_state` is in scope (already assumed previously; reinforced because the new composite unique constraint applies to it).",
+    "`dry_run` constructor kwarg is deleted outright on both classes; every `self.dry_run` reference is rewritten to `self.environment == \"dev\"`.",
+    "`max_posts` cap is replaced with `MAX_POSTS_SAFETY_BELT = 50` as a runaway guardrail.",
+    "Partial unique index on `live_top_creation_posts (environment, duplicate_key) where status='posted'` is the right form (non-posted rows can coexist).",
+    "Test in-memory DB fakes will be extended to honor environment filtering and the new composite unique keys."
+  ],
+  "delta_from_previous_percent": 40.42,
+  "structure_warnings": []
+}

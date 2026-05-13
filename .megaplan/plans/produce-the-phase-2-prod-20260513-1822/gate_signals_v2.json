@@ -1,0 +1,392 @@
+{
+  "robustness": "standard",
+  "signals": {
+    "iteration": 2,
+    "idea": "Produce the Phase 2 prod cutover runbook at docs/live-update-editor-phase-2-runbook.md for the live-update editor redesign (per the linked v6 redesign doc). Phase 1 will deliver the new editor in dev with publishing OFF; Phase 2 enables publishing, runs new + old editors side-by-side in prod for 24-48h, monitors for partial-publish failures via topics.publication_status='partial', renames old tables to _legacy_*, and schedules deletion in 2-4 weeks. The runbook must specify: exact publishing-flag-flip procedure with pre-flip preconditions, partial-publish detection SQL (the queries oncall would run), rollback procedure (how to flip the runner back to the legacy editor without rewriting state), the comparison-with-shadow-mode rubric (what specific signals from the Phase-1 shadow-mode logs mean cutover is safe versus 'go back and tune'), the table-rename migration SQL with correct ordering and constraint handling, and a decision tree for the 24-48h watch period \u2014 what observable symptom triggers what action (abort, hot-fix, accept). Assume Phase 1 lands per spec; deviations get a 'consult the doc' escape hatch, not detailed branching. The runbook is the operator's source of truth during cutover.",
+    "significant_flags": 9,
+    "unresolved_flags": [
+      {
+        "id": "issue_hints",
+        "concern": "Did the work fully address the issue hints, user notes, and approved plan requirements?: Plan Step 10.1 names `.migrations_staging/` as the default migration-runner path 'matching the repo convention'. I read .migrations_staging/README.md: that folder is explicitly a HAND-OFF area whose contents must be copied into `/Users/peteromalley/Documents/banodoco-workspace/supabase/migrations/` before they actually run. Glob of the workspace migrations folder confirms it holds the real authoritative migration list. The plan's framing 'default is a new timestamped file in .migrations_staging/' is partially correct (the staging convention exists for live_update_* migrations, e.g. 20260511110349_live_update_environment_split.sql) but omits the hand-off step. An operator running the runbook would write SQL into the staging folder, then need to know the file must be moved to the workspace migrations folder and applied via `supabase db push` or similar before it takes effect. Minor wrinkle in the resolution of FLAG-006.",
+        "category": "completeness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "correctness-1",
+        "concern": "Are the proposed changes technically correct?: The new cross-window partial-publish tally in \u00a76 (Step 7.2) queries `topics WHERE publication_status='partial' GROUP BY environment` since the Phase-1 soak start. Verified against the redesign: Phase 1 explicitly runs with publishing OFF (docs/live-update-editor-redesign.md:611 'does not publish to Discord', :627 'no Discord sends', :633 'publishing OFF'). A partial-publish row cannot exist in dev because Phase 1 never attempts to publish. The cross-window query therefore returns at most 0 rows for environment='dev' by design \u2014 the dev arm of the trip-wire is operationally vacuous. The plan inherits this inconsistency from the redesign's loosely worded :600 ('shadow-mode or prod'), but it bears flagging because the operator running the query will see only prod partials and may wrongly think the dev side is 'clean' when it's actually unmeasurable.",
+        "category": "correctness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "correctness-2",
+        "concern": "Are the proposed changes technically correct?: Step 6 Branch B verification depends on a 'suppression marker' column or metadata key on `live_update_editor_runs` that is itself a TODO(phase-1). If Phase 1 ships a publish-call gate without writing any marker on the run row (perfectly plausible \u2014 an early-return at `_publish_accepted_candidates` doesn't need to record anything), the SQL-side verification has nothing concrete to check and the operator falls back to scrolling Discord for the legacy bot identity. The plan acknowledges this with TODO markers but the resulting verification is thin in that branch.",
+        "category": "correctness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "correctness-3",
+        "concern": "Are the proposed changes technically correct?: Plan Step 6.5/6.6 verifies via a 15-minute SQL window after toggle flip. Per :633, dev cadence is hourly; Phase 2 likely keeps hourly. If the toggle is flipped between hourly ticks, the 15-minute window may show zero rows for entirely benign reasons (no run fired yet), making 'zero partial' trivially true and giving false confidence. Procedure should sequence verification around the next observed tick rather than a fixed 15-minute window.",
+        "category": "correctness",
+        "severity": "significant",
+        "status": "addressed"
+      },
+      {
+        "id": "scope-1",
+        "concern": "Search for related code that handles the same concept. Is the reported issue a symptom of something broader?: Plan does not describe how the legacy editor's Discord suppression actually flips \u2014 it points at `_publish_accepted_candidates` (src/features/summarising/live_update_editor.py:84-107) and `_select_publishable_candidates` (:261-346) as 'the gated legacy code path' but leaves the gating mechanism as `TODO(phase-1)`. Acceptable per the brief's escape-hatch rule, BUT verification Step 6.4 depends on knowing that mechanism \u2014 if Phase 1 actually suppresses at scheduler-tick level (legacy editor never runs), then `_select_publishable_candidates` is never reached and the SQL verification on legacy run rows needs a different shape.",
+        "category": "completeness",
+        "severity": "significant",
+        "status": "addressed"
+      },
+      {
+        "id": "scope-2",
+        "concern": "Search for related code that handles the same concept. Is the reported issue a symptom of something broader?: Plan \u00a77 decision tree includes 'Lease contention (both editors writing topics)' as a symptom. Per :651 'Both write to their own tables' \u2014 only the new editor writes to `topics`, the legacy editor writes to `live_update_feed_items`. They should not contend over the same row writes. If they share a single `(environment, guild_id, live_channel_id)` lease per :684, they cannot run concurrently at all. As written, the symptom row conflates several distinct failure modes (new-editor self-contention from a stuck run; legacy writing to new tables; lease-key collisions) and gives no clear handle.",
+        "category": "completeness",
+        "severity": "significant",
+        "status": "addressed"
+      },
+      {
+        "id": "all_locations",
+        "concern": "Does the change touch all locations AND supporting infrastructure?: Verified FLAG-006 fix: \u00a79 step 1 names `.migrations_staging/<timestamp>_live_update_legacy_rename.sql` as the default with a TODO(phase-1) for alternates (Supabase dashboard SQL editor, psql-direct). Confirmed against existing repo files (.migrations_staging/20260511110349_live_update_environment_split.sql and 20260512185328_live_update_watchlist_lifecycle.sql) that this naming convention is in use for live_update_* migrations. As noted in the issue_hints check, the staging folder is a hand-off area for /Users/peteromalley/Documents/banodoco-workspace/supabase/migrations/ \u2014 the plan would benefit from naming that destination explicitly so the operator doesn't write SQL into the wrong place and assume it ran.",
+        "category": "completeness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "callers",
+        "concern": "Find the callers of the changed function. What arguments do they actually pass? Does the fix handle all of them?: The runbook depends on Phase 1 having actually wired a publish toggle and a suppression mechanism on the legacy editor. Neither exists in src/ today (grep for LIVE_UPDATE_PUBLISH*/publish_enabled returned nothing). If Phase 1 lands with a different shape than the plan's TODO placeholders assume \u2014 e.g., the toggle is a per-guild config row rather than an env var, or suppression happens at the scheduler tick rather than `_publish_accepted_candidates` \u2014 then \u00a75 procedure and \u00a78 rollback need re-fitting. Plan flags this via TODO(phase-1) markers but the operator should see in \u00a71 that the runbook is provisional until Phase 1 fills them in.",
+        "category": "correctness",
+        "severity": "significant",
+        "status": "addressed"
+      },
+      {
+        "id": "scope",
+        "concern": "Search for related code that handles the same concept. Is the reported issue a symptom of something broader?: The plan implicitly assumes Phase 1 ships exactly one of Branch A or Branch B, not a hybrid (e.g., scheduler-tick gate per guild config, with a publish-call fallback). If Phase 1 ships any third mechanism (config-driven branch in a different code path; rollout per channel rather than global; partial guild rollout), neither verification shape covers it cleanly. Acknowledged as TODO(phase-1) in \u00a72 banner; flag here only because the binary branching may be overconfident.",
+        "category": "completeness",
+        "severity": "significant",
+        "status": "open"
+      }
+    ],
+    "resolved_flags": [
+      {
+        "id": "FLAG-001",
+        "concern": "Publishing-flag-flip verification incorrectly checks for 'zero new rows in legacy live_update_feed_items' after flipping the toggle, but per docs/live-update-editor-redesign.md:651 both editors continue to write to their own tables during the 24-48h side-by-side \u2014 only the legacy editor's Discord send is suppressed. As written, the verification will false-fail every hour and mislead the operator into thinking the flip didn't take. Verification should target Discord-side suppression (legacy run row showing published_count=0, or absence of new live-channel posts attributed to the legacy bot identity) rather than legacy table writes.",
+        "resolution": "Addressed all nine open critique flags by (1) replacing \u00a75's incorrect \"zero new rows in legacy live_update_feed_items\" verification with Discord-send-targeted verification that branches on the Phase-1 suppression mechanism (Branch A scheduler-tick vs. Branch B publish-call); (2) re-anchoring \u00a75 verification on the next observed live_update_editor_runs row instead of a fixed 15-minute window (hourly cadence per :633); (3) reframing the \u00a77 partial-publish trip-wire as \"2 cumulative across Phase 1 shadow + Phase 2 watch\" per :600, with a corresponding cross-window tally query in \u00a76; (4) splitting \u00a77's \"lease contention\" row into three distinct symptom rows (new-editor self-contention, legacy writing to new tables, lease-key overlap); (5) correcting \u00a79's cross-reference target from docs/live-update-editor-legacy-boundaries.md (which is about daily_summaries) to docs/live-update-editor-redesign.md:212-223 plus src/common/storage_handler.py:652-1968 as the authoritative live runtime surface; (6) naming the default migration-runner path as a new timestamped file in .migrations_staging/ (matching repo convention) with a TODO(phase-1) for alternates; (7) adding a \"provisional until Phase 1 lands\" banner in \u00a71 enumerating the four TODO(phase-1) items so an operator does not run the procedure prematurely; (8) adding a \"Recent runs\" Fast Triage one-liner in \u00a72 to support the new verification shape. Preserved all original SD-1..SD-4 settled decisions and the doc-only scope."
+      },
+      {
+        "id": "FLAG-002",
+        "concern": "Plan \u00a77 decision tree narrows the redesign's partial-publish trip-wire ('twice during shadow-mode or prod', :600-601) to '\u22652 in 24h'. A Phase-1 shadow partial + one prod partial inside the watch window would not trip the plan's rule but satisfies the redesign's intent. Either match the redesign's wider scope or explicitly justify the operational decision to scope to a rolling 24h window.",
+        "resolution": "Plan Step 8.1 first row of decision tree vs. docs/live-update-editor-redesign.md:600-601"
+      },
+      {
+        "id": "FLAG-003",
+        "concern": "Plan Step 10.5 instructs the executor to cross-check the six-table rename list against docs/live-update-editor-legacy-boundaries.md's 'Legacy Storage And Helpers' section, but that section enumerates daily_summaries helpers, not the six legacy live_update_* tables. The authoritative current-schema list is docs/live-update-editor-redesign.md:212-223 + the storage_handler.py call sites. Repointing this cross-check is a one-line fix.",
+        "resolution": "Plan Step 10.5 vs. actual contents of docs/live-update-editor-legacy-boundaries.md:50-65"
+      },
+      {
+        "id": "FLAG-004",
+        "concern": "Post-flip verification uses a fixed 15-minute SQL window. If the editor runs hourly (per :633) and the toggle is flipped between ticks, 'zero partial in last 15 min' is trivially true with no run having fired \u2014 false confidence. Procedure should sequence verification around the next observed hourly tick (e.g., 'wait until the next row appears in live_update_editor_runs, then run the SQL').",
+        "resolution": "Plan Step 6.5 + docs/live-update-editor-redesign.md:633"
+      },
+      {
+        "id": "FLAG-005",
+        "concern": "Plan \u00a77 lists 'Lease contention (both editors writing topics) \u2192 ABORT' but per :651 the legacy editor writes to live_update_feed_items, not topics. The symptom row conflates new-editor self-contention, legacy-writing-to-new-tables (a Phase-1 bug), and lease-key collisions. Sharper articulation needed so the operator knows which to investigate.",
+        "resolution": "Plan Step 8.1 lease-contention row vs. docs/live-update-editor-redesign.md:651, :684"
+      },
+      {
+        "id": "FLAG-006",
+        "concern": "Plan does not pick a migration-runner path (raw psql vs. supabase migrations folder vs. dashboard SQL editor) for the \u00a79 rename. Planning question Q4 flagged this; the plan body should either name a chosen runner or carry an explicit TODO(phase-1) marker so the operator does not improvise mid-cutover.",
+        "resolution": "Plan Step 10 vs. planning metadata Q4"
+      }
+    ],
+    "weighted_score": 11.5,
+    "weighted_history": [
+      10.5
+    ],
+    "plan_delta_from_previous": 56.07,
+    "recurring_critiques": [],
+    "scope_creep_flags": [],
+    "loop_summary": "Iteration 2. Weighted score trajectory: 10.5 -> 11.5. Plan deltas: 56.1%. Recurring critiques: 0. Resolved flags: 6. Open significant flags: 9.",
+    "debt_overlaps": [],
+    "escalated_debt_subsystems": []
+  },
+  "warnings": [],
+  "criteria_check": {
+    "count": 22,
+    "items": [
+      {
+        "criterion": "File `docs/live-update-editor-phase-2-runbook.md` exists at exactly that path with non-empty content.",
+        "priority": "must",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Document contains a Fast Triage SQL section querying `topics` grouped by `publication_status` scoped to `environment='prod'`, matching the `docs/runbook-payments.md` Fast Triage pattern.",
+        "priority": "must",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Document includes a 'Provisional until Phase 1 lands' banner in \u00a71 that enumerates the four TODO(phase-1) items: toggle name + location, suppression mechanism, prod trace-embed channel, migration-runner path.",
+        "priority": "must",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Document includes a Pre-flip preconditions checklist with at least one verifiable command per gate (Phase 1 soak, schema migration applied, indexes present, backfill parity, lease in place, trace embed wired, legacy editor still running, paged-in window, Phase-1 TODOs resolved).",
+        "priority": "must",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Document includes a GO / TUNE / ABORT shadow-mode-to-cutover comparison rubric keyed on at least: replay-divergence explainability, collision-override rate, `record_observation` rate, partial-publish in dev, schema-rejection rate, cost/latency.",
+        "priority": "must",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Document includes a Publishing-flag-flip procedure with ordered steps, a `<LIVE_EDITOR_PUBLISH_TOGGLE>` placeholder, branch-A/branch-B verification shapes covering both scheduler-tick and publish-call suppression mechanisms, and explicit anchoring on the next observed `live_update_editor_runs` row (not a fixed 15-minute window).",
+        "priority": "must",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Document's flip-verification does NOT check for 'zero new rows in legacy live_update_feed_items'; instead it targets Discord-send suppression (legacy run absent for Branch A, or legacy run + suppression marker + no legacy-bot live-channel posts for Branch B).",
+        "priority": "must",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Document includes four partial-publish detection SQL queries: windowed counts, per-row deep-dive (selecting `publication_status`, `publication_error`, `publication_attempts`, `last_published_at`, `discord_message_ids`), still-pending-too-long, and rejection-rate against `topic_transitions WHERE action LIKE 'rejected_%'`, all scoped to `environment='prod'` with a `-- swap to 'dev'` annotation, plus a cross-window partial-publish tally for the trip-wire.",
+        "priority": "must",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Document includes a 24-48h watch decision-tree table (SYMPTOM | THRESHOLD | ACTION | POINTER) that maps the partial-publish trip-wire to '2 cumulative across Phase 1 shadow + Phase 2 watch \u2192 ABORT + restore topic_publications' citing `docs/live-update-editor-redesign.md:600-601`.",
+        "priority": "must",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Document's decision tree splits lease symptoms into three distinct rows with distinct actions: new-editor self-contention (HOT-FIX), legacy writing to new tables (ABORT), and new+legacy run-row overlap on same lease key (ABORT).",
+        "priority": "must",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Document includes a Rollback procedure (runner-pointer flip) that explicitly leaves `topics` rows untouched, distinguishes pre-rename rollback (trivial \u2014 toggle flip) from post-rename rollback (reverse rename SQL), citing `docs/live-update-editor-redesign.md:596`, and covers both Branch-A and Branch-B verification on legacy-publish resumption.",
+        "priority": "must",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Document includes an ordered table-rename migration SQL block that renames all six legacy tables (`live_update_feed_items`, `live_update_watchlist`, `live_update_duplicate_state`, `live_update_editorial_memory`, `live_update_candidates`, `live_update_decisions`) to `_legacy_<name>`, retains `live_update_editor_runs`, runs inside `BEGIN; ... COMMIT;` with a dry-run rollback note, includes row-count parity SELECT before AND after, and a constraint-preservation note for Postgres.",
+        "priority": "must",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Document names a default migration-runner path (a new timestamped file in `.migrations_staging/` matching repo convention) with a TODO(phase-1) for alternates (Supabase dashboard SQL editor, psql-direct).",
+        "priority": "must",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Document's \u00a79 cross-checks the six-table set against `docs/live-update-editor-redesign.md:212-223` and `src/common/storage_handler.py:652-1968` \u2014 NOT against `docs/live-update-editor-legacy-boundaries.md`'s 'Legacy Storage And Helpers' section.",
+        "priority": "must",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Document explicitly states that the table rename runs only AFTER the 24-48h watch passes, so rollback during the watch remains a single toggle flip.",
+        "priority": "must",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Document includes a deletion-schedule section that records the `_legacy_*` deletion 2-4 weeks post-rename as an operator-filled blank (no hardcoded date), plus a final `DROP TABLE _legacy_*` block, and named bring-forward / push-out circumstances.",
+        "priority": "must",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Document references `docs/live-update-editor-redesign.md` for schema shape rather than re-listing column definitions, and points back to it as the ABORT-to-rollback escape hatch in a footer.",
+        "priority": "must",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Document references `src/features/summarising/live_update_editor.py` (specifically `_publish_accepted_candidates` / `_select_publishable_candidates`) as the legacy fallback path the runner-pointer rollback re-enables.",
+        "priority": "must",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Document length is roughly comparable to `docs/runbook-payments.md` (~400 lines, give or take 100); not under 200 and not over 700.",
+        "priority": "should",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Tone matches `docs/runbook-payments.md` \u2014 terse, imperative, copy-paste SQL ready, minimal narrative prose.",
+        "priority": "should",
+        "requires": [
+          "subjective_judgment"
+        ]
+      },
+      {
+        "criterion": "Every `TODO(phase-1)` placeholder in the doc is clearly labeled so the operator can spot Phase-1-dependent gaps.",
+        "priority": "should",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "No code edits outside `docs/live-update-editor-phase-2-runbook.md`; existing tests still pass (unchanged).",
+        "priority": "must",
+        "requires": [
+          "run_shell",
+          "parse_diff"
+        ]
+      }
+    ]
+  },
+  "preflight_results": {
+    "project_dir_exists": true,
+    "project_dir_writable": true,
+    "success_criteria_present": true,
+    "claude_available": true,
+    "codex_available": true
+  },
+  "unresolved_flags": [
+    {
+      "id": "issue_hints",
+      "concern": "Did the work fully address the issue hints, user notes, and approved plan requirements?: Plan Step 10.1 names `.migrations_staging/` as the default migration-runner path 'matching the repo convention'. I read .migrations_staging/README.md: that folder is explicitly a HAND-OFF area whose contents must be copied into `/Users/peteromalley/Documents/banodoco-workspace/supabase/migrations/` before they actually run. Glob of the workspace migrations folder confirms it holds the real authoritative migration list. The plan's framing 'default is a new timestamped file in .migrations_staging/' is partially correct (the staging convention exists for live_update_* migrations, e.g. 20260511110349_live_update_environment_split.sql) but omits the hand-off step. An operator running the runbook would write SQL into the staging folder, then need to know the file must be moved to the workspace migrations folder and applied via `supabase db push` or similar before it takes effect. Minor wrinkle in the resolution of FLAG-006.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "Plan Step 10.1 names `.migrations_staging/` as the default migration-runner path 'matching the repo convention'. I read .migrations_staging/README.md: that folder is explicitly a HAND-OFF area whose contents must be copied into `/Users/peteromalley/Documents/banodoco-workspace/supabase/migrations/` before they actually run. Glob of the workspace migrations folder confirms it holds the real authoritative migration list. The plan's framing 'default is a new timestamped file in .migrations_staging/' is partially correct (the staging convention exists for live_update_* migrations, e.g. 20260511110349_live_update_environment_split.sql) but omits the hand-off step. An operator running the runbook would write SQL into the staging folder, then need to know the file must be moved to the workspace migrations folder and applied via `supabase db push` or similar before it takes effect. Minor wrinkle in the resolution of FLAG-006.",
+      "raised_in": "critique_v2.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false,
+      "addressed_in": "plan_v2.md"
+    },
+    {
+      "id": "correctness-1",
+      "concern": "Are the proposed changes technically correct?: The new cross-window partial-publish tally in \u00a76 (Step 7.2) queries `topics WHERE publication_status='partial' GROUP BY environment` since the Phase-1 soak start. Verified against the redesign: Phase 1 explicitly runs with publishing OFF (docs/live-update-editor-redesign.md:611 'does not publish to Discord', :627 'no Discord sends', :633 'publishing OFF'). A partial-publish row cannot exist in dev because Phase 1 never attempts to publish. The cross-window query therefore returns at most 0 rows for environment='dev' by design \u2014 the dev arm of the trip-wire is operationally vacuous. The plan inherits this inconsistency from the redesign's loosely worded :600 ('shadow-mode or prod'), but it bears flagging because the operator running the query will see only prod partials and may wrongly think the dev side is 'clean' when it's actually unmeasurable.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "The new cross-window partial-publish tally in \u00a76 (Step 7.2) queries `topics WHERE publication_status='partial' GROUP BY environment` since the Phase-1 soak start. Verified against the redesign: Phase 1 explicitly runs with publishing OFF (docs/live-update-editor-redesign.md:611 'does not publish to Discord', :627 'no Discord sends', :633 'publishing OFF'). A partial-publish row cannot exist in dev because Phase 1 never attempts to publish. The cross-window query therefore returns at most 0 rows for environment='dev' by design \u2014 the dev arm of the trip-wire is operationally vacuous. The plan inherits this inconsistency from the redesign's loosely worded :600 ('shadow-mode or prod'), but it bears flagging because the operator running the query will see only prod partials and may wrongly think the dev side is 'clean' when it's actually unmeasurable.",
+      "raised_in": "critique_v2.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false,
+      "addressed_in": "plan_v2.md"
+    },
+    {
+      "id": "correctness-2",
+      "concern": "Are the proposed changes technically correct?: Step 6 Branch B verification depends on a 'suppression marker' column or metadata key on `live_update_editor_runs` that is itself a TODO(phase-1). If Phase 1 ships a publish-call gate without writing any marker on the run row (perfectly plausible \u2014 an early-return at `_publish_accepted_candidates` doesn't need to record anything), the SQL-side verification has nothing concrete to check and the operator falls back to scrolling Discord for the legacy bot identity. The plan acknowledges this with TODO markers but the resulting verification is thin in that branch.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "Step 6 Branch B verification depends on a 'suppression marker' column or metadata key on `live_update_editor_runs` that is itself a TODO(phase-1). If Phase 1 ships a publish-call gate without writing any marker on the run row (perfectly plausible \u2014 an early-return at `_publish_accepted_candidates` doesn't need to record anything), the SQL-side verification has nothing concrete to check and the operator falls back to scrolling Discord for the legacy bot identity. The plan acknowledges this with TODO markers but the resulting verification is thin in that branch.",
+      "raised_in": "critique_v2.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false,
+      "addressed_in": "plan_v2.md"
+    },
+    {
+      "id": "correctness-3",
+      "concern": "Are the proposed changes technically correct?: Plan Step 6.5/6.6 verifies via a 15-minute SQL window after toggle flip. Per :633, dev cadence is hourly; Phase 2 likely keeps hourly. If the toggle is flipped between hourly ticks, the 15-minute window may show zero rows for entirely benign reasons (no run fired yet), making 'zero partial' trivially true and giving false confidence. Procedure should sequence verification around the next observed tick rather than a fixed 15-minute window.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "Addressed all nine open critique flags by (1) replacing \u00a75's incorrect \"zero new rows in legacy live_update_feed_items\" verification with Discord-send-targeted verification that branches on the Phase-1 suppression mechanism (Branch A scheduler-tick vs. Branch B publish-call); (2) re-anchoring \u00a75 verification on the next observed live_update_editor_runs row instead of a fixed 15-minute window (hourly cadence per :633); (3) reframing the \u00a77 partial-publish trip-wire as \"2 cumulative across Phase 1 shadow + Phase 2 watch\" per :600, with a corresponding cross-window tally query in \u00a76; (4) splitting \u00a77's \"lease contention\" row into three distinct symptom rows (new-editor self-contention, legacy writing to new tables, lease-key overlap); (5) correcting \u00a79's cross-reference target from docs/live-update-editor-legacy-boundaries.md (which is about daily_summaries) to docs/live-update-editor-redesign.md:212-223 plus src/common/storage_handler.py:652-1968 as the authoritative live runtime surface; (6) naming the default migration-runner path as a new timestamped file in .migrations_staging/ (matching repo convention) with a TODO(phase-1) for alternates; (7) adding a \"provisional until Phase 1 lands\" banner in \u00a71 enumerating the four TODO(phase-1) items so an operator does not run the procedure prematurely; (8) adding a \"Recent runs\" Fast Triage one-liner in \u00a72 to support the new verification shape. Preserved all original SD-1..SD-4 settled decisions and the doc-only scope.",
+      "raised_in": "critique_v1.json",
+      "status": "addressed",
+      "severity": "significant",
+      "verified": false,
+      "addressed_in": "plan_v2.md"
+    },
+    {
+      "id": "scope-1",
+      "concern": "Search for related code that handles the same concept. Is the reported issue a symptom of something broader?: Plan does not describe how the legacy editor's Discord suppression actually flips \u2014 it points at `_publish_accepted_candidates` (src/features/summarising/live_update_editor.py:84-107) and `_select_publishable_candidates` (:261-346) as 'the gated legacy code path' but leaves the gating mechanism as `TODO(phase-1)`. Acceptable per the brief's escape-hatch rule, BUT verification Step 6.4 depends on knowing that mechanism \u2014 if Phase 1 actually suppresses at scheduler-tick level (legacy editor never runs), then `_select_publishable_candidates` is never reached and the SQL verification on legacy run rows needs a different shape.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "Addressed all nine open critique flags by (1) replacing \u00a75's incorrect \"zero new rows in legacy live_update_feed_items\" verification with Discord-send-targeted verification that branches on the Phase-1 suppression mechanism (Branch A scheduler-tick vs. Branch B publish-call); (2) re-anchoring \u00a75 verification on the next observed live_update_editor_runs row instead of a fixed 15-minute window (hourly cadence per :633); (3) reframing the \u00a77 partial-publish trip-wire as \"2 cumulative across Phase 1 shadow + Phase 2 watch\" per :600, with a corresponding cross-window tally query in \u00a76; (4) splitting \u00a77's \"lease contention\" row into three distinct symptom rows (new-editor self-contention, legacy writing to new tables, lease-key overlap); (5) correcting \u00a79's cross-reference target from docs/live-update-editor-legacy-boundaries.md (which is about daily_summaries) to docs/live-update-editor-redesign.md:212-223 plus src/common/storage_handler.py:652-1968 as the authoritative live runtime surface; (6) naming the default migration-runner path as a new timestamped file in .migrations_staging/ (matching repo convention) with a TODO(phase-1) for alternates; (7) adding a \"provisional until Phase 1 lands\" banner in \u00a71 enumerating the four TODO(phase-1) items so an operator does not run the procedure prematurely; (8) adding a \"Recent runs\" Fast Triage one-liner in \u00a72 to support the new verification shape. Preserved all original SD-1..SD-4 settled decisions and the doc-only scope.",
+      "raised_in": "critique_v1.json",
+      "status": "addressed",
+      "severity": "significant",
+      "verified": false,
+      "addressed_in": "plan_v2.md"
+    },
+    {
+      "id": "scope-2",
+      "concern": "Search for related code that handles the same concept. Is the reported issue a symptom of something broader?: Plan \u00a77 decision tree includes 'Lease contention (both editors writing topics)' as a symptom. Per :651 'Both write to their own tables' \u2014 only the new editor writes to `topics`, the legacy editor writes to `live_update_feed_items`. They should not contend over the same row writes. If they share a single `(environment, guild_id, live_channel_id)` lease per :684, they cannot run concurrently at all. As written, the symptom row conflates several distinct failure modes (new-editor self-contention from a stuck run; legacy writing to new tables; lease-key collisions) and gives no clear handle.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "Addressed all nine open critique flags by (1) replacing \u00a75's incorrect \"zero new rows in legacy live_update_feed_items\" verification with Discord-send-targeted verification that branches on the Phase-1 suppression mechanism (Branch A scheduler-tick vs. Branch B publish-call); (2) re-anchoring \u00a75 verification on the next observed live_update_editor_runs row instead of a fixed 15-minute window (hourly cadence per :633); (3) reframing the \u00a77 partial-publish trip-wire as \"2 cumulative across Phase 1 shadow + Phase 2 watch\" per :600, with a corresponding cross-window tally query in \u00a76; (4) splitting \u00a77's \"lease contention\" row into three distinct symptom rows (new-editor self-contention, legacy writing to new tables, lease-key overlap); (5) correcting \u00a79's cross-reference target from docs/live-update-editor-legacy-boundaries.md (which is about daily_summaries) to docs/live-update-editor-redesign.md:212-223 plus src/common/storage_handler.py:652-1968 as the authoritative live runtime surface; (6) naming the default migration-runner path as a new timestamped file in .migrations_staging/ (matching repo convention) with a TODO(phase-1) for alternates; (7) adding a \"provisional until Phase 1 lands\" banner in \u00a71 enumerating the four TODO(phase-1) items so an operator does not run the procedure prematurely; (8) adding a \"Recent runs\" Fast Triage one-liner in \u00a72 to support the new verification shape. Preserved all original SD-1..SD-4 settled decisions and the doc-only scope.",
+      "raised_in": "critique_v1.json",
+      "status": "addressed",
+      "severity": "significant",
+      "verified": false,
+      "addressed_in": "plan_v2.md"
+    },
+    {
+      "id": "all_locations",
+      "concern": "Does the change touch all locations AND supporting infrastructure?: Verified FLAG-006 fix: \u00a79 step 1 names `.migrations_staging/<timestamp>_live_update_legacy_rename.sql` as the default with a TODO(phase-1) for alternates (Supabase dashboard SQL editor, psql-direct). Confirmed against existing repo files (.migrations_staging/20260511110349_live_update_environment_split.sql and 20260512185328_live_update_watchlist_lifecycle.sql) that this naming convention is in use for live_update_* migrations. As noted in the issue_hints check, the staging folder is a hand-off area for /Users/peteromalley/Documents/banodoco-workspace/supabase/migrations/ \u2014 the plan would benefit from naming that destination explicitly so the operator doesn't write SQL into the wrong place and assume it ran.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "Verified FLAG-006 fix: \u00a79 step 1 names `.migrations_staging/<timestamp>_live_update_legacy_rename.sql` as the default with a TODO(phase-1) for alternates (Supabase dashboard SQL editor, psql-direct). Confirmed against existing repo files (.migrations_staging/20260511110349_live_update_environment_split.sql and 20260512185328_live_update_watchlist_lifecycle.sql) that this naming convention is in use for live_update_* migrations. As noted in the issue_hints check, the staging folder is a hand-off area for /Users/peteromalley/Documents/banodoco-workspace/supabase/migrations/ \u2014 the plan would benefit from naming that destination explicitly so the operator doesn't write SQL into the wrong place and assume it ran.",
+      "raised_in": "critique_v2.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false,
+      "addressed_in": "plan_v2.md"
+    },
+    {
+      "id": "callers",
+      "concern": "Find the callers of the changed function. What arguments do they actually pass? Does the fix handle all of them?: The runbook depends on Phase 1 having actually wired a publish toggle and a suppression mechanism on the legacy editor. Neither exists in src/ today (grep for LIVE_UPDATE_PUBLISH*/publish_enabled returned nothing). If Phase 1 lands with a different shape than the plan's TODO placeholders assume \u2014 e.g., the toggle is a per-guild config row rather than an env var, or suppression happens at the scheduler tick rather than `_publish_accepted_candidates` \u2014 then \u00a75 procedure and \u00a78 rollback need re-fitting. Plan flags this via TODO(phase-1) markers but the operator should see in \u00a71 that the runbook is provisional until Phase 1 fills them in.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "Addressed all nine open critique flags by (1) replacing \u00a75's incorrect \"zero new rows in legacy live_update_feed_items\" verification with Discord-send-targeted verification that branches on the Phase-1 suppression mechanism (Branch A scheduler-tick vs. Branch B publish-call); (2) re-anchoring \u00a75 verification on the next observed live_update_editor_runs row instead of a fixed 15-minute window (hourly cadence per :633); (3) reframing the \u00a77 partial-publish trip-wire as \"2 cumulative across Phase 1 shadow + Phase 2 watch\" per :600, with a corresponding cross-window tally query in \u00a76; (4) splitting \u00a77's \"lease contention\" row into three distinct symptom rows (new-editor self-contention, legacy writing to new tables, lease-key overlap); (5) correcting \u00a79's cross-reference target from docs/live-update-editor-legacy-boundaries.md (which is about daily_summaries) to docs/live-update-editor-redesign.md:212-223 plus src/common/storage_handler.py:652-1968 as the authoritative live runtime surface; (6) naming the default migration-runner path as a new timestamped file in .migrations_staging/ (matching repo convention) with a TODO(phase-1) for alternates; (7) adding a \"provisional until Phase 1 lands\" banner in \u00a71 enumerating the four TODO(phase-1) items so an operator does not run the procedure prematurely; (8) adding a \"Recent runs\" Fast Triage one-liner in \u00a72 to support the new verification shape. Preserved all original SD-1..SD-4 settled decisions and the doc-only scope.",
+      "raised_in": "critique_v1.json",
+      "status": "addressed",
+      "severity": "significant",
+      "verified": false,
+      "addressed_in": "plan_v2.md"
+    },
+    {
+      "id": "scope",
+      "concern": "Search for related code that handles the same concept. Is the reported issue a symptom of something broader?: The plan implicitly assumes Phase 1 ships exactly one of Branch A or Branch B, not a hybrid (e.g., scheduler-tick gate per guild config, with a publish-call fallback). If Phase 1 ships any third mechanism (config-driven branch in a different code path; rollout per channel rather than global; partial guild rollout), neither verification shape covers it cleanly. Acknowledged as TODO(phase-1) in \u00a72 banner; flag here only because the binary branching may be overconfident.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "The plan implicitly assumes Phase 1 ships exactly one of Branch A or Branch B, not a hybrid (e.g., scheduler-tick gate per guild config, with a publish-call fallback). If Phase 1 ships any third mechanism (config-driven branch in a different code path; rollout per channel rather than global; partial guild rollout), neither verification shape covers it cleanly. Acknowledged as TODO(phase-1) in \u00a72 banner; flag here only because the binary branching may be overconfident.",
+      "raised_in": "critique_v2.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false
+    }
+  ]
+}

@@ -41,6 +41,14 @@ from src.features.payments.payment_worker_cog import PaymentWorkerCog
 from src.features.grants.solana_client import SolanaClient
 from src.features.payments.solana_provider import SolanaProvider
 
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def setup_logging(dev_mode=False):
     """Setup shared logging configuration for all bots"""
     log_handler = LogHandler(
@@ -114,11 +122,24 @@ async def main_async(args):
     logger.info("Starting unified bot initialization")
 
     try:
-        token = os.getenv('DISCORD_BOT_TOKEN')
+        if args.dev:
+            token = os.getenv('DEV_DISCORD_BOT_TOKEN')
+            if not token and _env_flag('ALLOW_PROD_DISCORD_TOKEN_IN_DEV', False):
+                token = os.getenv('DISCORD_BOT_TOKEN')
+                logger.warning("Using DISCORD_BOT_TOKEN in dev because ALLOW_PROD_DISCORD_TOKEN_IN_DEV=true")
+            if not token:
+                raise ValueError(
+                    "DEV_DISCORD_BOT_TOKEN is required in dev mode. "
+                    "Set ALLOW_PROD_DISCORD_TOKEN_IN_DEV=true only if you explicitly want to reuse the production bot token."
+                )
+            token_env_name = 'DEV_DISCORD_BOT_TOKEN'
+        else:
+            token = os.getenv('DISCORD_BOT_TOKEN')
+            token_env_name = 'DISCORD_BOT_TOKEN'
 
         logger.debug(f"Token length: {len(token) if token else 0}")
         logger.debug(f"Token starts with: {token[:6]}..." if token else "No token found")
-        logger.debug("Environment variable name used: DISCORD_BOT_TOKEN")
+        logger.debug(f"Environment variable name used: {token_env_name}")
 
         if not token:
             raise ValueError("Discord bot token not found in environment variables")            
@@ -136,13 +157,17 @@ async def main_async(args):
         
         # Store the command-line flags on the bot instance so cogs can access them
         bot.summary_now = args.summary_now
+        bot.legacy_summary_now = args.legacy_summary_now
+        bot.summary_with_archive = args.summary_with_archive
         bot.combine_only = args.combine_only
         bot.archive_days = args.archive_days
         bot.run_archive_script = run_archive_script  # Make the function available to cogs
 
-        # Event to signal when --summary-now completes so hourly fetch can start
+        # Startup live-update gate: --summary-now may run archive ingestion before
+        # one live-editor pass, so hourly archive fetch waits until that pass is
+        # complete. The name is kept for compatibility with existing cogs/tests.
         bot.summary_completed = asyncio.Event()
-        if not args.summary_now:
+        if not args.summary_now and not args.legacy_summary_now:
             bot.summary_completed.set()
 
         # ---- Initialize Core Components ----
@@ -329,9 +354,9 @@ async def main_async(args):
 
         @hourly_message_fetch.before_loop
         async def before_hourly_fetch():
-            """Wait for bot to be ready and for any --summary-now to complete before starting hourly fetch."""
+            """Wait for readiness and any startup live-editor pass before hourly fetch."""
             await bot.wait_until_ready()
-            logger.info("Waiting for summary_completed event before starting hourly fetch...")
+            logger.info("Waiting for startup live-update gate before starting hourly fetch...")
             await bot.summary_completed.wait()
             logger.info("Ready to start hourly message fetch loop")
 
@@ -363,14 +388,21 @@ async def main_async(args):
 
 def main():
     parser = argparse.ArgumentParser(description='Unified Discord Bot')
-    parser.add_argument('--summary-now', action='store_true', help='Run the summary process immediately')
-    parser.add_argument('--dev', action='store_true', help='Run in development mode')
+    parser.add_argument('--summary-now', action='store_true', help='Run one live-update editor pass immediately on startup')
+    parser.add_argument('--legacy-summary-now', action='store_true',
+                      help='Explicit legacy daily-summary/backfill startup run')
+    parser.add_argument(
+        '--dev',
+        action='store_true',
+        default=_env_flag('BOT_DEV_MODE', False),
+        help='Run in development mode; can also be enabled with BOT_DEV_MODE=true',
+    )
     parser.add_argument('--archive-days', type=int, help='Number of days to archive (can be used standalone or with --summary-now)')
-    parser.add_argument('--summary-with-archive', action='store_true', help='Archive past 24 hours FIRST, then run summary immediately')
+    parser.add_argument('--summary-with-archive', action='store_true', help='Archive past 24 hours FIRST, then run one live-update editor pass')
     parser.add_argument('--combine-only', action='store_true',
-                      help='Skip channel summaries, load existing ones from DB, and re-run only the combine+post step')
+                      help='Legacy daily-summary backfill: load existing channel summaries from DB and re-run only combine+post')
     parser.add_argument('--clear-today-summaries', action='store_true',
-                      help='Delete today\'s summaries from Supabase before running (useful for re-running)')
+                      help='Legacy daily-summary backfill: delete today\'s summaries from Supabase before running')
     args = parser.parse_args()
     
     # Handle --clear-today-summaries flag
@@ -393,11 +425,12 @@ def main():
         except Exception as e:
             print(f"⚠️  Error clearing summaries: {e}")
     
-    # Check for date-based environment variable triggers
+    # Check for date-based environment variable triggers. These env names are
+    # legacy deployment controls; they now trigger the live-update editor.
     # Priority: SUMMARY_WITH_ARCHIVE_DATE > JUST_SUMMARY_DATE
     today_str = datetime.now().strftime('%Y-%m-%d')
     
-    # Check SUMMARY_WITH_ARCHIVE_DATE first (archive + summary)
+    # Check SUMMARY_WITH_ARCHIVE_DATE first (archive + live update)
     env_archive_date = os.getenv('SUMMARY_WITH_ARCHIVE_DATE')
     if env_archive_date:
         env_archive_date = env_archive_date.strip()
@@ -406,7 +439,7 @@ def main():
             parsed_date_str = parsed_date.strftime('%Y-%m-%d')
             
             if parsed_date_str == today_str:
-                print(f"✓ SUMMARY_WITH_ARCHIVE_DATE={env_archive_date} matches today's date ({today_str}). Triggering archive + summary...")
+                print(f"✓ SUMMARY_WITH_ARCHIVE_DATE={env_archive_date} matches today's date ({today_str}). Triggering archive + live update...")
                 args.summary_with_archive = True
             else:
                 print(f"ℹ SUMMARY_WITH_ARCHIVE_DATE={env_archive_date} set but doesn't match today ({today_str}). Skipping auto-trigger.")
@@ -421,7 +454,7 @@ def main():
             parsed_date_str = parsed_date.strftime('%Y-%m-%d')
             
             if parsed_date_str == today_str:
-                print(f"✓ JUST_SUMMARY_DATE={env_summary_date} matches today's date ({today_str}). Triggering summary only...")
+                print(f"✓ JUST_SUMMARY_DATE={env_summary_date} matches today's date ({today_str}). Triggering live update only...")
                 args.summary_now = True
             else:
                 print(f"ℹ JUST_SUMMARY_DATE={env_summary_date} set but doesn't match today ({today_str}). Skipping auto-trigger.")
@@ -434,7 +467,7 @@ def main():
         args.archive_days = 1
 
     if args.combine_only:
-        args.summary_now = True
+        args.legacy_summary_now = True
 
     # No validation needed - --archive-days can be used standalone or with --summary-now
 

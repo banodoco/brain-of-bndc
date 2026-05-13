@@ -271,11 +271,13 @@ class AdminCog(commands.Cog):
         # Start task loops
         self.check_expired_mutes.start()
         self.enforce_channel_permissions.start()
+        self.enforce_models_alphabetical.start()
         logger.info("AdminCog initialized")
 
     def cog_unload(self):
         self.check_expired_mutes.cancel()
         self.enforce_channel_permissions.cancel()
+        self.enforce_models_alphabetical.cancel()
 
     def _get_server_field(self, guild_id: Optional[int], field: str, env_var: str) -> Optional[int]:
         if guild_id and self.server_config:
@@ -901,6 +903,109 @@ class AdminCog(commands.Cog):
     @enforce_channel_permissions.before_loop
     async def before_enforce_channel_permissions(self):
         await self.bot.wait_until_ready()
+
+    # ------------------------------------------------------------------
+    # Periodic alphabetical sort of the Models category
+    # ------------------------------------------------------------------
+    def _get_models_category_id(self) -> Optional[int]:
+        env_val = os.getenv('MODELS_CATEGORY_ID', '1212472332484870224')
+        try:
+            return int(env_val) if env_val else None
+        except ValueError:
+            logger.error(f"[ModelsSort] MODELS_CATEGORY_ID is not an integer: {env_val!r}")
+            return None
+
+    async def _sort_models_category_once(self) -> dict:
+        """Reorder the Models category alphabetically. Returns a summary dict."""
+        category_id = self._get_models_category_id()
+        if not category_id:
+            return {'status': 'skipped', 'reason': 'MODELS_CATEGORY_ID not configured'}
+
+        category = self.bot.get_channel(category_id)
+        if category is None:
+            try:
+                category = await self.bot.fetch_channel(category_id)
+            except discord.NotFound:
+                return {'status': 'skipped', 'reason': f'Category {category_id} not found'}
+            except discord.HTTPException as e:
+                return {'status': 'error', 'reason': f'Fetch failed: {e}'}
+
+        if not isinstance(category, discord.CategoryChannel):
+            return {'status': 'skipped', 'reason': f'Channel {category_id} is not a category'}
+
+        # category.channels is returned in current Discord order
+        current = list(category.channels)
+        desired = sorted(current, key=lambda c: c.name.lower())
+
+        if [c.id for c in current] == [c.id for c in desired]:
+            return {'status': 'ok', 'count': len(current), 'moved': 0}
+
+        # Bulk reposition via Discord's PATCH /guilds/{id}/channels endpoint.
+        # Discord requires absolute positions across the guild, but only the IDs
+        # we include get updated — siblings keep their relative order.
+        # We assign positions in the range currently occupied by the category's
+        # children (their min..max position), preserving each channel's slot
+        # but pointing it at the alphabetically-correct ID.
+        positions = sorted(c.position for c in current)
+        payload = [
+            {'id': str(channel.id), 'position': pos}
+            for channel, pos in zip(desired, positions)
+        ]
+
+        token = os.getenv('DISCORD_BOT_TOKEN')
+        if not token:
+            return {'status': 'error', 'reason': 'DISCORD_BOT_TOKEN missing'}
+
+        async with aiohttp.ClientSession() as session:
+            headers = {'Authorization': f'Bot {token}', 'Content-Type': 'application/json'}
+            async with session.patch(
+                f'https://discord.com/api/v10/guilds/{category.guild.id}/channels',
+                headers=headers,
+                json=payload,
+            ) as resp:
+                if resp.status in (200, 204):
+                    moved = sum(1 for a, b in zip(current, desired) if a.id != b.id)
+                    return {'status': 'fixed', 'count': len(current), 'moved': moved}
+                body = await resp.text()
+                return {'status': 'error', 'reason': f'HTTP {resp.status}: {body[:300]}'}
+
+    @tasks.loop(minutes=30)
+    async def enforce_models_alphabetical(self):
+        """Keep the Models category sorted alphabetically (case-insensitive)."""
+        try:
+            result = await self._sort_models_category_once()
+        except Exception as e:
+            logger.error(f"[ModelsSort] Unexpected error: {e}", exc_info=True)
+            return
+
+        status = result.get('status')
+        if status == 'fixed':
+            logger.info(f"[ModelsSort] Reordered {result.get('moved')} of {result.get('count')} channels")
+        elif status == 'ok':
+            logger.info(f"[ModelsSort] In order ({result.get('count')} channels)")
+        elif status == 'skipped':
+            logger.debug(f"[ModelsSort] Skipped: {result.get('reason')}")
+        else:
+            logger.error(f"[ModelsSort] {result.get('reason')}")
+
+    @enforce_models_alphabetical.before_loop
+    async def before_enforce_models_alphabetical(self):
+        await self.bot.wait_until_ready()
+
+    @commands.command(name="sort_models")
+    @commands.is_owner()
+    async def sort_models_command(self, ctx: commands.Context):
+        """Manually trigger the Models category alphabetical sort."""
+        result = await self._sort_models_category_once()
+        status = result.get('status')
+        if status == 'fixed':
+            await ctx.send(f"Reordered {result.get('moved')} of {result.get('count')} channels.")
+        elif status == 'ok':
+            await ctx.send(f"Already in order ({result.get('count')} channels).")
+        elif status == 'skipped':
+            await ctx.send(f"Skipped: {result.get('reason')}")
+        else:
+            await ctx.send(f"Error: {result.get('reason')}")
 
     @app_commands.command(name="update_details", description="Update your social media handles and website link.")
     async def update_details(self, interaction: discord.Interaction):

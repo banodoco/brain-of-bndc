@@ -1,0 +1,31 @@
+{
+  "output": "Authored \u00a77 (Symptom|Threshold|Action|Pointer decision tree with 3 distinct lease rows and a third-mechanism/discriminator-absent ABORT row) and \u00a78 (pre-rename and post-rename rollback variants citing :596).",
+  "commands_run": [],
+  "deviations": [
+    "Advisory audit finding: Sense check SC6 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC7 is missing an executor acknowledgment."
+  ],
+  "task_updates": [
+    {
+      "task_id": "T5",
+      "status": "done",
+      "executor_notes": "\u00a77: Symptom|Threshold|Action|Pointer markdown table covering 15 rows. Partial-publish split into two rows: (1) single partial in cutover window \u2192 INVESTIGATE via \u00a76(b); (2) '(Phase-1 telemetry shadow partials) + (Phase-2 prod partials from \u00a76) cumulative \u2265 2 per :600-601 \u2192 ABORT + restore topic_publications + \u00a78.' Rejection rate >50%/hr from \u00a76(d) \u2192 TUNE then ABORT consult redesign citing :676. Collision-override rate >10% \u2192 TUNE per :603/:670/:673. Duplicate posts split into two rows (1 isolated \u2192 HOT-FIX check _publish_accepted_candidates idempotency at :84-107 + topic_sources uniqueness per :625; \u22652 recurring \u2192 ABORT). Legacy editor accidentally publishes \u2192 HOT-FIX re-verify toggle + branch-A/B signal from \u00a75. Discord 429s/auth errors \u2192 HOT-FIX routing. LEASE SYMPTOMS SPLIT INTO THREE DISTINCT ROWS per :684: (i) new-editor self-contention on (environment, guild_id, live_channel_id) \u2192 HOT-FIX release lease + verify next tick; (ii) legacy editor writing to NEW tables (topics, topic_*) \u2192 ABORT (isolation broke per :651/:684); (iii) new + legacy run rows overlapping on same lease key \u2192 ABORT (lease misconfigured per :684). Shape divergence vs Phase 1 baseline split: explainable \u2192 ACCEPT pointing to \u00a74; unexplained \u2192 TUNE/ABORT. record_observation <1/run sustained \u2192 INFO post-cutover concern per :602. Third-mechanism row: 'Phase 1 turns out to be a third mechanism (not Branch A or B) OR run-source discriminator (TODO(phase-1) f) absent \u2192 ABORT immediately \u2014 this runbook does not cover the cutover.' Footer: 'If a symptom is not listed, ABORT to rollback and consult docs/live-update-editor-redesign.md.' \u00a78: two variants. Pre-rename rollback (5 steps): (1) flip <LIVE_EDITOR_PUBLISH_TOGGLE> back to legacy value; (2) drain new-editor in-flight run OR force-release lease for (environment, guild_id, live_channel_id) per :684; (3) wait for next scheduler tick (hourly per :633), confirm legacy publishes via _publish_accepted_candidates (live_update_editor.py:84-107 called from :261-346) \u2014 Branch A: new legacy run row appears under legacy run-source discriminator (TODO(phase-1) f); Branch B: post-rollback legacy run rows show suppression marker CLEARED (if Phase 1 writes one \u2014 TODO(phase-1) c) AND new live-channel post attributed to legacy bot identity (TODO(phase-1) d) as primary Discord-side signal; (4) verify new live_update_feed_items row AND corresponding Discord post; (5) 'Leave topics rows alone \u2014 do not truncate, do not rewrite' citing :596 with rationale that the runner-pointer flip is the rollback and new-editor topics state is durable for post-mortem. Post-rename rollback (rare): same toggle flip + reverse-rename migration mirror of \u00a79 (six tables _legacy_<name> back to original names) authored and handed off via the same .migrations_staging/ \u2192 supabase/migrations/ \u2192 supabase db push \u2192 verify in supabase_migrations.schema_migrations chain documented in \u00a79; then re-run pre-rename verification. Explicit statement at top of \u00a78: 'Run \u00a79 rename only after the 24-48h watch passes. This keeps rollback to a single toggle flip during the watch window.' Escalation: if rollback fails to restore legacy publishing within two scheduler ticks, page POM and consult the redesign doc.",
+      "sections_written": [
+        "\u00a77-watch-decision-tree",
+        "\u00a78-rollback"
+      ],
+      "stance": null,
+      "stop_signal": null
+    }
+  ],
+  "sense_check_acknowledgments": [
+    {
+      "sense_check_id": "SC5",
+      "executor_note": "Confirmed. \u00a77 splits lease symptoms into THREE DISTINCT ROWS: (i) new-editor self-contention HOT-FIX release lease for (environment, guild_id, live_channel_id) + verify next tick; (ii) legacy editor writing to NEW tables (topics, topic_*) \u2192 ABORT (isolation broke per :651/:684); (iii) new + legacy run rows overlapping on same lease key \u2192 ABORT (lease misconfigured per :684). Partial-publish trip-wire phrased exactly as '(Phase-1 telemetry shadow partials) + (Phase-2 prod partials from \u00a76) cumulative \u2265 2 per :600-601 \u2192 ABORT + restore topic_publications' with pointer to \u00a76 trip-wire and \u00a78. Third-mechanism row explicitly covers 'Phase 1 turns out to be a third mechanism (not Branch A or B) OR run-source discriminator (TODO(phase-1) f) absent \u2192 ABORT immediately.' \u00a78 leaves topics rows alone (step 5: 'Leave topics rows alone \u2014 do not truncate, do not rewrite' citing :596). Pre-rename rollback (single toggle flip + drain + next-tick verify) is distinct from post-rename rollback (toggle flip + reverse-rename migration via the \u00a79 hand-off chain + re-run verification). Branch-A verification (new legacy run row under legacy run-source discriminator on next tick) and Branch-B verification (suppression marker CLEARED + new Discord post by legacy bot identity as primary signal) are both covered explicitly. :596 cited at the leave-topics-alone instruction."
+    }
+  ],
+  "sections_written": [
+    "\u00a77-watch-decision-tree",
+    "\u00a78-rollback"
+  ]
+}

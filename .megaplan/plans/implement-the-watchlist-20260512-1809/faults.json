@@ -1,0 +1,269 @@
+{
+  "flags": [
+    {
+      "id": "FLAG-001",
+      "concern": "editor-init-cap: changing DEFAULT_MAX_PUBLISH_PER_RUN to None breaks the existing `max(1, int(... or os.getenv(..., DEFAULT)))` initializer (int(None) raises). Plan must rewrite the init expression, not just flip the constant.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "src/features/summarising/live_update_editor.py:101-104",
+      "raised_in": "critique_v1.json",
+      "status": "accepted_tradeoff",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "FLAG-002",
+      "concern": "editorial-bar-threading: `scanned_message_count` and `is_last_call` are new inputs to a classmethod with multiple call sites; no caller threads them today. Plan asserts threading is trivial but does not enumerate `_message_meets_editorial_bar` or other callers.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "src/features/summarising/live_update_prompts.py:903-956",
+      "raised_in": "critique_v1.json",
+      "status": "accepted_tradeoff",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "FLAG-003",
+      "concern": "watchlist-tool-dispatch: new `watchlist_add`/`watchlist_update` must be registered in the editor's tool dispatcher (live_update_editor.py ~line 440 unknown_tool branch), not in the generic `_run_requested_tool` invoker. Plan Step 3.2 points at the wrong location.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "src/features/summarising/live_update_editor.py:445; src/features/summarising/live_update_prompts.py:562",
+      "raised_in": "critique_v1.json",
+      "status": "accepted_tradeoff",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "FLAG-004",
+      "concern": "watchlist-write-duplication: existing `upsert_live_update_watchlist` (db_handler.py:595, storage_handler.py:1733) coexists with the new `insert_live_update_watchlist`. Two write paths for the same table risk divergent column handling.",
+      "category": "maintainability",
+      "severity_hint": "likely-minor",
+      "evidence": "src/common/db_handler.py:595; src/common/storage_handler.py:1733",
+      "raised_in": "critique_v1.json",
+      "status": "open",
+      "severity": "minor",
+      "verified": false
+    },
+    {
+      "id": "FLAG-005",
+      "concern": "active-cap-loophole: 50-row active cap only auto-archives oldest `fresh` rows; accumulated `revisit_due`/`last_call` can push active set beyond cap indefinitely.",
+      "category": "correctness",
+      "severity_hint": "likely-minor",
+      "evidence": "plan Step 2.4",
+      "raised_in": "critique_v1.json",
+      "status": "open",
+      "severity": "minor",
+      "verified": false
+    },
+    {
+      "id": "FLAG-006",
+      "concern": "author_is_high_signal-deadcode: signal does not exist on candidate payloads; the new showcase OR-clause is a no-op until the signal is implemented. Either drop the clause or stub the signal.",
+      "category": "correctness",
+      "severity_hint": "likely-minor",
+      "evidence": "plan Step 7.1; grep finds zero occurrences in source",
+      "raised_in": "critique_v1.json",
+      "status": "open",
+      "severity": "minor",
+      "verified": false
+    },
+    {
+      "id": "FLAG-007",
+      "concern": "extend-bump-ambiguity: `extend` action sets `next_revisit_at = least(now()+6-12h, expires_at)` \u2014 a range, not a value. Pick a concrete number or document the rule.",
+      "category": "correctness",
+      "severity_hint": "likely-minor",
+      "evidence": "plan Step 2.2",
+      "raised_in": "critique_v1.json",
+      "status": "open",
+      "severity": "minor",
+      "verified": false
+    },
+    {
+      "id": "FLAG-008",
+      "concern": "side-effect-on-read: TTL auto-archive inside `get_live_update_watchlist` couples reads to writes and can race across concurrent runs sharing a DB. Safer as an idempotent UPDATE before the SELECT.",
+      "category": "correctness",
+      "severity_hint": "likely-minor",
+      "evidence": "plan Step 2.3",
+      "raised_in": "critique_v1.json",
+      "status": "open",
+      "severity": "minor",
+      "verified": false
+    },
+    {
+      "id": "FLAG-009",
+      "concern": "reasoning-recovery-channel: plan adds `reasoning_recovery_path` telemetry but does not specify the handoff from `_parse_raw_candidates` to the editor (today: `self.last_editor_reasoning`). Needs an explicit attribute/return value so the editor can persist it into `metadata.agent_trace`.",
+      "category": "completeness",
+      "severity_hint": "likely-minor",
+      "evidence": "src/features/summarising/live_update_prompts.py:595-611",
+      "raised_in": "critique_v1.json",
+      "status": "open",
+      "severity": "minor",
+      "verified": false
+    },
+    {
+      "id": "verifiability-0",
+      "concern": "Criterion 13: requires human verification (observe_runtime_logs, subjective_judgment).",
+      "category": "other",
+      "severity_hint": "likely-minor",
+      "evidence": "",
+      "raised_in": "critique_v1.json",
+      "status": "verified",
+      "severity": "minor",
+      "verified": true,
+      "verified_in": "critique_v1.json"
+    },
+    {
+      "id": "issue_hints-1",
+      "concern": "Did the work fully address the issue hints, user notes, and approved plan requirements?: Brief Phase 4 item #5 (hard-requirement assertion in OUTPUT SHAPE saying an omitted REASONING prefix makes the response invalid and will be re-requested) is folded into plan Step 9.1 with the prefix instruction; plan should explicitly preserve that behaviour-shaping wording, not just the prefix mechanics.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "Brief Phase 4 item #5 (hard-requirement assertion in OUTPUT SHAPE saying an omitted REASONING prefix makes the response invalid and will be re-requested) is folded into plan Step 9.1 with the prefix instruction; plan should explicitly preserve that behaviour-shaping wording, not just the prefix mechanics.",
+      "raised_in": "critique_v1.json",
+      "status": "accepted_tradeoff",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "issue_hints-2",
+      "concern": "Did the work fully address the issue hints, user notes, and approved plan requirements?: Brief caps active rows at 50 globally; plan Step 2.4 only auto-archives oldest `fresh` rows beyond cap, so accumulated `revisit_due`/`last_call` items can push the active count beyond 50 indefinitely.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "Brief caps active rows at 50 globally; plan Step 2.4 only auto-archives oldest `fresh` rows beyond cap, so accumulated `revisit_due`/`last_call` items can push the active count beyond 50 indefinitely.",
+      "raised_in": "critique_v1.json",
+      "status": "accepted_tradeoff",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "correctness-1",
+      "concern": "Are the proposed changes technically correct?: Current init at live_update_editor.py:101-104 is `self.max_publish_per_run = max(1, int(max_publish_per_run or os.getenv('LIVE_UPDATE_MAX_POSTS_PER_RUN', self.DEFAULT_MAX_PUBLISH_PER_RUN)))`. If DEFAULT becomes None and env is unset, `int(None)` raises TypeError. Plan Step 5.1 says 'leave self.max_publish_per_run = None unless env var set' but does not explicitly rewrite the `max(1, int(...))` expression.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "Current init at live_update_editor.py:101-104 is `self.max_publish_per_run = max(1, int(max_publish_per_run or os.getenv('LIVE_UPDATE_MAX_POSTS_PER_RUN', self.DEFAULT_MAX_PUBLISH_PER_RUN)))`. If DEFAULT becomes None and env is unset, `int(None)` raises TypeError. Plan Step 5.1 says 'leave self.max_publish_per_run = None unless env var set' but does not explicitly rewrite the `max(1, int(...))` expression.",
+      "raised_in": "critique_v1.json",
+      "status": "accepted_tradeoff",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "correctness-2",
+      "concern": "Are the proposed changes technically correct?: `_meets_editorial_bar` (live_update_prompts.py:903) is a classmethod with a fixed signature; `scanned_message_count` does not exist anywhere in the repo (grep confirms zero hits). Plan assumption #4 calls threading 'trivial', but the bar is invoked from `_message_meets_editorial_bar` (line 941) and other paths \u2014 every call site needs the new args, including indirect ones.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "`_meets_editorial_bar` (live_update_prompts.py:903) is a classmethod with a fixed signature; `scanned_message_count` does not exist anywhere in the repo (grep confirms zero hits). Plan assumption #4 calls threading 'trivial', but the bar is invoked from `_message_meets_editorial_bar` (line 941) and other paths \u2014 every call site needs the new args, including indirect ones.",
+      "raised_in": "critique_v1.json",
+      "status": "accepted_tradeoff",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "correctness-3",
+      "concern": "Are the proposed changes technically correct?: `author_is_high_signal` doesn't exist on candidate/source-message payloads; assumption #3 says it degrades to False. That reduces the new showcase bar to `(reactions>=3 OR reply_count>=2) AND has_media` \u2014 the OR clause carries zero weight until the signal is implemented.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "`author_is_high_signal` doesn't exist on candidate/source-message payloads; assumption #3 says it degrades to False. That reduces the new showcase bar to `(reactions>=3 OR reply_count>=2) AND has_media` \u2014 the OR clause carries zero weight until the signal is implemented.",
+      "raised_in": "critique_v1.json",
+      "status": "gate_disputed",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "correctness-4",
+      "concern": "Are the proposed changes technically correct?: Step 2.2 says `extend` sets `next_revisit_at = least(now()+6-12h, expires_at)` \u2014 '6-12h' is a range, not a concrete value. Implementation needs a single number or documented derivation.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "Step 2.2 says `extend` sets `next_revisit_at = least(now()+6-12h, expires_at)` \u2014 '6-12h' is a range, not a concrete value. Implementation needs a single number or documented derivation.",
+      "raised_in": "critique_v1.json",
+      "status": "accepted_tradeoff",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "correctness-5",
+      "concern": "Are the proposed changes technically correct?: Plan auto-archives TTL-expired rows inside `get_live_update_watchlist` (a read path), turning every read into a write and exposing a race across concurrent dev/prod runs sharing a DB. Safer as an idempotent UPDATE before the SELECT.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "Plan auto-archives TTL-expired rows inside `get_live_update_watchlist` (a read path), turning every read into a write and exposing a race across concurrent dev/prod runs sharing a DB. Safer as an idempotent UPDATE before the SELECT.",
+      "raised_in": "critique_v1.json",
+      "status": "accepted_tradeoff",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "scope-1",
+      "concern": "Search for related code that handles the same concept. Is the reported issue a symptom of something broader?: Existing `upsert_live_update_watchlist` (db_handler.py:595, storage_handler.py:1733) already writes the table; plan introduces a parallel `insert_live_update_watchlist`. Two write entry points for the same table risk divergent column handling. Plan should replace the upsert or document the relationship.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "Existing `upsert_live_update_watchlist` (db_handler.py:595, storage_handler.py:1733) already writes the table; plan introduces a parallel `insert_live_update_watchlist`. Two write entry points for the same table risk divergent column handling. Plan should replace the upsert or document the relationship.",
+      "raised_in": "critique_v1.json",
+      "status": "accepted_tradeoff",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "scope-2",
+      "concern": "Search for related code that handles the same concept. Is the reported issue a symptom of something broader?: `get_live_update_watchlist` currently accepts a `status='active'` filter; plan broadens values and changes return shape to a grouped dict. Only caller is editor.py:140 which doesn't pass status, so direct risk is low \u2014 but the contract change is a real break for any future caller assuming a list.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "`get_live_update_watchlist` currently accepts a `status='active'` filter; plan broadens values and changes return shape to a grouped dict. Only caller is editor.py:140 which doesn't pass status, so direct risk is low \u2014 but the contract change is a real break for any future caller assuming a list.",
+      "raised_in": "critique_v1.json",
+      "status": "accepted_tradeoff",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "all_locations-1",
+      "concern": "Does the change touch all locations AND supporting infrastructure?: Storage layer (`storage_handler.py:1733-1780`) wraps Supabase calls; plan's db_handler step does not explicitly call out the storage_handler counterpart for the new insert/update methods or for new column writes (storage_handler.py:1738 builds the payload with hardcoded keys). The file inventory lists storage_handler edits, but Step 2 lacks specifics for the lower layer.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "Storage layer (`storage_handler.py:1733-1780`) wraps Supabase calls; plan's db_handler step does not explicitly call out the storage_handler counterpart for the new insert/update methods or for new column writes (storage_handler.py:1738 builds the payload with hardcoded keys). The file inventory lists storage_handler edits, but Step 2 lacks specifics for the lower layer.",
+      "raised_in": "critique_v1.json",
+      "status": "accepted_tradeoff",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "all_locations-2",
+      "concern": "Does the change touch all locations AND supporting infrastructure?: Tool dispatch: `_run_requested_tool` (live_update_prompts.py:562) is a generic invoker that calls `tool_runner(name, args)`. The real per-tool routing lives in `live_update_editor.py`'s tool runner at ~line 440 (`return {'error': f'unknown_tool:{tool_name}'}`). Plan Step 3.2 points dispatch wiring at `_run_requested_tool`, but new tool names must be added to the editor's dispatcher.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "Tool dispatch: `_run_requested_tool` (live_update_prompts.py:562) is a generic invoker that calls `tool_runner(name, args)`. The real per-tool routing lives in `live_update_editor.py`'s tool runner at ~line 440 (`return {'error': f'unknown_tool:{tool_name}'}`). Plan Step 3.2 points dispatch wiring at `_run_requested_tool`, but new tool names must be added to the editor's dispatcher.",
+      "raised_in": "critique_v1.json",
+      "status": "accepted_tradeoff",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "callers-1",
+      "concern": "Find the callers of the changed function. What arguments do they actually pass? Does the fix handle all of them?: `get_live_update_watchlist` is called at live_update_editor.py:140 with only `guild_id`+`environment`. Changing the return shape from list-of-rows to a state-grouped dict requires the prompt builder (live_update_prompts.py:450) to consume the new shape; plan Step 4 handles rendering but doesn't note the type change is a breaking contract for any editor-level telemetry that counts/loops watchlist items.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "`get_live_update_watchlist` is called at live_update_editor.py:140 with only `guild_id`+`environment`. Changing the return shape from list-of-rows to a state-grouped dict requires the prompt builder (live_update_prompts.py:450) to consume the new shape; plan Step 4 handles rendering but doesn't note the type change is a breaking contract for any editor-level telemetry that counts/loops watchlist items.",
+      "raised_in": "critique_v1.json",
+      "status": "accepted_tradeoff",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "callers-2",
+      "concern": "Find the callers of the changed function. What arguments do they actually pass? Does the fix handle all of them?: `_meets_editorial_bar` callers: `_message_meets_editorial_bar` at line 941 forwards a single message and computes confidence locally; with new `scanned_message_count`/`is_last_call` params, that wrapper plus every direct caller must thread the new context. Plan should enumerate caller-by-caller.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "`_meets_editorial_bar` callers: `_message_meets_editorial_bar` at line 941 forwards a single message and computes confidence locally; with new `scanned_message_count`/`is_last_call` params, that wrapper plus every direct caller must thread the new context. Plan should enumerate caller-by-caller.",
+      "raised_in": "critique_v1.json",
+      "status": "accepted_tradeoff",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "callers-3",
+      "concern": "Find the callers of the changed function. What arguments do they actually pass? Does the fix handle all of them?: `_parse_raw_candidates` (line 595) currently stashes `self.last_editor_reasoning` for the editor to consume. Plan adds `reasoning_recovery_path` telemetry but doesn't specify the handoff channel (new attribute? return value?). Editor needs an unambiguous handle to write into `metadata.agent_trace`.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "`_parse_raw_candidates` (line 595) currently stashes `self.last_editor_reasoning` for the editor to consume. Plan adds `reasoning_recovery_path` telemetry but doesn't specify the handoff channel (new attribute? return value?). Editor needs an unambiguous handle to write into `metadata.agent_trace`.",
+      "raised_in": "critique_v1.json",
+      "status": "accepted_tradeoff",
+      "severity": "significant",
+      "verified": false
+    }
+  ]
+}

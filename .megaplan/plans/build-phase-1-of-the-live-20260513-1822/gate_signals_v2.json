@@ -1,0 +1,527 @@
+{
+  "robustness": "standard",
+  "signals": {
+    "iteration": 2,
+    "idea": "Build Phase 1 of the live-update editor redesign described in docs/live-update-editor-redesign.md (v6): a shadow-mode dev vertical slice with publishing OFF. Implement the 5-table schema (topics with publication columns, topic_sources, topic_aliases, topic_transitions, editorial_observations) plus the native Anthropic tool-use editor with 4 read tools + 6 decision tools, all 4 dispatcher invariants including the v6 collision-override path, and a pure publisher that posts comparison trace embeds in #main_test. Before any code, resolve the 5 locked decisions (canonicalizer algorithm with fuzz against historical headlines; editorial_observations retention policy; collision similarity threshold + override semantics; rejected-call logging shape \u2014 confirm topic_transitions single-table; defer audit on live live_update_candidates and decide whether pending_review is Day-1 schema). Build the runner to replay 20+ recent source-message windows from the prod archive against the new editor with publishing disabled, and post comparison trace embeds (source-message count, tool calls fired, topics posted/watched/updated/discarded, near-miss observations, cost, latency, divergence vs today's editor). Phase 2 prod cutover is explicitly OUT OF SCOPE \u2014 stop at the shadow-mode decision gate.",
+    "significant_flags": 18,
+    "unresolved_flags": [
+      {
+        "id": "FLAG-003",
+        "concern": "Test infrastructure gap: dispatcher tests require the 5 new tables in the test DB, but .migrations_staging/ is described as manual-handoff for the workspace Supabase repo. Plan does not specify how dispatcher and alias-resolution tests get a schema fixture (test container? skip-if-no-DB? in-memory shim?). Without this, multiple fail_to_pass tests cannot run.",
+        "category": "completeness",
+        "severity": "significant",
+        "status": "addressed"
+      },
+      {
+        "id": "issue_hints",
+        "concern": "Did the work fully address the issue hints, user notes, and approved plan requirements?: Run-provenance is left ambiguous in Step 7.1: 'Insert a live_update_editor_runs row (existing table is acceptable for run-id provenance, read only; or add a new topic_editor_runs if the existing schema does not fit cleanly).' Inserting into live_update_editor_runs would violate the brief hard constraint that the new editor writes ONLY to the 5 new tables. Plan should commit to a new run table in the new migration.",
+        "category": "completeness",
+        "severity": "significant",
+        "status": "addressed"
+      },
+      {
+        "id": "correctness-1",
+        "concern": "Are the proposed changes technically correct?: Hot-path cost: get_live_update_context_for_message_ids (storage_handler.py:1224-1266) is a heavy accessor that joins discord_messages -> channels -> engagement context -> author profiles, designed for prompt assembly, not the dispatch hot path. Calling it on every post_simple_topic/post_sectioned_topic/watch_topic invocation will add measurable latency and cost vs a lean select author_id from discord_messages where message_id in (...). Plan should add a thin get_message_author_ids accessor for the dispatcher.",
+        "category": "correctness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "correctness-2",
+        "concern": "Are the proposed changes technically correct?: Trigram approximation in fake store: Step 11 uses difflib.SequenceMatcher.ratio as a Python-side stand-in for pg_trgm similarity. The two algorithms produce different scores for the same string pair \u2014 SequenceMatcher uses LCS-style matching while pg_trgm uses character-trigram set intersection. A test threshold tuned at 0.55 against SequenceMatcher may pass tests but diverge from production pg_trgm. Plan should pin a fixture-based oracle (precomputed expected pairs) rather than relying on the stand-in for threshold tuning.",
+        "category": "correctness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "correctness-3",
+        "concern": "Are the proposed changes technically correct?: Step 4.2 inserts topics with state='posted' and publication_status='sent' for the backfill, but the existing live_update_feed_items rows have a status column (storage_handler.py:759 defaults to 'posted') that can be 'pending'/'posted'/'failed'. Backfill must filter to status='posted' AND discord_message_ids non-empty, otherwise non-posted legacy rows enter the new schema with publication_status='sent' inconsistent with reality. Plan does not enumerate the filter.",
+        "category": "correctness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "correctness-4",
+        "concern": "Are the proposed changes technically correct?: Plan structural rejection for post_simple_topic (Step 6.2 Inv 1) uses distinct_authors >= 2 OR len(source_message_ids) >= 3. The dispatcher must derive distinct_authors from the messages archive (authoritative), not from a tool argument (untrusted), but the plan does not specify the lookup path. Worth an explicit statement that author resolution goes through get_live_update_context_for_message_ids or equivalent.",
+        "category": "correctness",
+        "severity": "significant",
+        "status": "addressed"
+      },
+      {
+        "id": "scope-1",
+        "concern": "Search for related code that handles the same concept. Is the reported issue a symptom of something broader?: Env-scoping invariant applies to new topic_* tables ONLY. The plan's Step 4 backfill and Step 12 replay runner read from live_update_feed_items / live_update_candidates / discord_messages \u2014 those existing accessors filter by guild_id but not always by environment (storage_handler.py:1238-1250 in get_live_update_context_for_message_ids accepts environment='prod' parameter but does not pass it to the Supabase query). Plan does not clarify the env-scoping boundary, which could confuse executors into adding env filters to legacy accessors and breaking the 'do not modify live_update_*' constraint.",
+        "category": "completeness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "scope-2",
+        "concern": "Search for related code that handles the same concept. Is the reported issue a symptom of something broader?: Brief constraint: 'Do not modify, dual-write to, or read for decisions from the existing live_update_* tables.' Step 12.3 says shadow runner reads live_update_candidates / live_update_feed_items for the divergence-vs-today comparison. This is read-for-comparison (not read-for-decision), which is the spirit of the constraint, but the brief wording is broad. Plan should explicitly state the read is comparison-only and never feeds back into dispatcher state.",
+        "category": "completeness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "scope-3",
+        "concern": "Search for related code that handles the same concept. Is the reported issue a symptom of something broader?: Plan does not say where the dispatcher similarity scan reads from (Step 6.2 Inv 2). The doc requires trigram + alias lookup on topics AND author_overlap, which means joining to topic_sources and to the messages archive for author resolution. Plan implies this via search_topics_by_headline but does not enumerate the author_overlap lookup, the implementation detail that decides whether the threshold is actually tunable.",
+        "category": "completeness",
+        "severity": "significant",
+        "status": "addressed"
+      },
+      {
+        "id": "all_locations-1",
+        "concern": "Does the change touch all locations AND supporting infrastructure?: Verified FLAG-003 fix attempt with caveat: Step 11 introduces tests/fakes/topic_store.py + a topic_store_fake pytest fixture. However, plan calls this 'Small' scope and 'aligned with the existing conftest.py stub pattern' \u2014 the existing pattern (conftest.py:13-39, sys.modules stubs) is shallow: it replaces import surfaces with stateless return-value stubs (return 'yes|approved'). The fake topic store needs stateful behavior \u2014 env-scoped reads, (topic_id, message_id) UNIQUE enforcement, alias resolution by canonical_key, trigram similarity, idempotency on (run_id, tool_call_id), per-run transition logs. That is a medium-scope shim, not aligned with the conftest stub idiom. Plan's framing understates the work.",
+        "category": "completeness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "all_locations-2",
+        "concern": "Does the change touch all locations AND supporting infrastructure?: Migration includes the 6th topic_editor_runs table but Step 2.2 schema does not declare a FK from topic_transitions.run_id -> topic_editor_runs.run_id. The dispatcher's idempotency invariant keys on (run_id, tool_call_id) against topic_transitions; without the FK or a documented loose-link, orphan run_ids in transitions are silently allowed, undermining audit-trail integrity.",
+        "category": "completeness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "all_locations-3",
+        "concern": "Does the change touch all locations AND supporting infrastructure?: Plan does not specify at which seam (DatabaseHandler vs StorageHandler) the tests/fakes/topic_store.py fake intercepts. Since Step 6 mandates the two-layer pattern, the fake must replace the right layer (most likely DatabaseHandler.<accessor> for production parity) or it will subtly diverge from real behavior. Worth a one-line directive.",
+        "category": "completeness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "all_locations-4",
+        "concern": "Does the change touch all locations AND supporting infrastructure?: Trip-wire 7-day rolling metrics require a query over topic_transitions filtered by action and environment. Plan does not specify the aggregate accessor (presumably an additional db_handler method), which is part of the supporting infrastructure for the success-criterion 'override rate per-run + rolling'.",
+        "category": "completeness",
+        "severity": "significant",
+        "status": "addressed"
+      },
+      {
+        "id": "callers-1",
+        "concern": "Find the callers of the changed function. What arguments do they actually pass? Does the fix handle all of them?: get_live_update_context_for_message_ids is invoked by both the dispatcher's _resolve_authors (Step 7.2) and the backfill script (Step 4). Both callers extract just author_id from the embedded source_message in the heavy source_context dict. Either caller could subtly break if the function's contract changes. A thin get_message_author_ids accessor would make the dependency obvious and decoupled.",
+        "category": "correctness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "callers-2",
+        "concern": "Find the callers of the changed function. What arguments do they actually pass? Does the fix handle all of them?: Step 12.3 reads from live_update_candidates and live_update_feed_items for divergence-vs-today. The shadow runner needs environment='prod' for archive source reads AND comparison-decisions reads, while writing topic_* state in environment='dev'. Plan does not explicitly say the runner uses prod for archive vs dev for topic writes \u2014 a real risk of cross-wiring at the call site.",
+        "category": "correctness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "callers-3",
+        "concern": "Find the callers of the changed function. What arguments do they actually pass? Does the fix handle all of them?: tests/fakes/topic_store.py is referenced but no caller-by-caller mapping is provided showing which production accessor each fake method satisfies. Without that mapping, the fake is liable to drift from the real interface (signature/return-shape mismatches) once production code lands.",
+        "category": "correctness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "issue_hints-1",
+        "concern": "Did the work fully address the issue hints, user notes, and approved plan requirements?: Brief says 'ship the 5-table topic schema'; rev 2 ships 6 tables (5 spec + topic_editor_runs). Defensible expansion to satisfy the 'writes ONLY to new tables' constraint after FLAG-001, but does exceed the literal scope wording. Success criterion updated to 'exactly 6 tables'. Worth surfacing as a deliberate scope expansion rather than implicit drift.",
+        "category": "completeness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "issue_hints-2",
+        "concern": "Did the work fully address the issue hints, user notes, and approved plan requirements?: Defer-audit timing: Step 1.1 runs the audit on Day 0 but Step 2 lands the DDL on Day 1. Plan does not branch Step 2 / Step 7 conditionally on audit outcome. If the audit forces state='pending_review' + request_review_topic per locked-decision #5, the DDL and tool list must include them in this migration, not rev-the-migration mid-week. Plan should add an explicit 'if audit forces pending_review, append state + tool to Step 2/7 before SQL freeze' branch.",
+        "category": "completeness",
+        "severity": "significant",
+        "status": "open"
+      }
+    ],
+    "resolved_flags": [
+      {
+        "id": "FLAG-001",
+        "concern": "Run-provenance ambiguity: Step 7.1 leaves it as 'reuse live_update_editor_runs or add a new topic_editor_runs if it does not fit cleanly'. The brief constraint is hard: new editor writes ONLY to the 5 new tables. Plan should commit to a new run table in the new migration and remove the reuse fallback.",
+        "resolution": "Committed to a new `topic_editor_runs` table (removed the reuse-of-`live_update_editor_runs` fallback in Step 7.1). Replaced impossible pure-SQL backfill with a post-migration Python script `scripts/backfill_topics_from_feed_items.py` that resolves authors via the archive and calls the Python canonicalizer; migration DDL is now backfill-free. Added a hard env-scoped read invariant on every new accessor (`cross_env=False` as the only escape hatch). Made dispatcher author resolution authoritative via `get_live_update_context_for_message_ids` rather than trusting agent tool args. Enumerated every storage_handler.py counterpart (DEBT-028 mirror) and added `get_topic_transition_rates` for trip-wire rolling metrics. Added `tests/fakes/topic_store.py` in-memory fake-store fixture aligned with the existing `conftest.py` stub pattern so dispatcher/alias/shadow tests run without a live DB. Explicitly acknowledged concurrent-run lease as deferred to Phase 1.5 with a `lease: DEFERRED` indicator in trace embeds. Restated `search_topics` is env-scoped at the dispatcher layer. Migration adds 6 tables (5 spec + `topic_editor_runs`), DDL-only."
+      },
+      {
+        "id": "FLAG-002",
+        "concern": "Backfill-in-SQL is mechanically impossible as specified: Step 2.5 pure-SQL INSERT SELECT FROM live_update_feed_items cannot (a) call Python canonicalize() for canonical_key, (b) populate source_authors (column does not exist on feed_items), nor (c) trivially convert the JSONB source_message_ids array to bigint rows. Plan needs an explicit Python backfill script that runs after migration apply, or a Postgres-resident canonicalizer.",
+        "resolution": "Committed to a new `topic_editor_runs` table (removed the reuse-of-`live_update_editor_runs` fallback in Step 7.1). Replaced impossible pure-SQL backfill with a post-migration Python script `scripts/backfill_topics_from_feed_items.py` that resolves authors via the archive and calls the Python canonicalizer; migration DDL is now backfill-free. Added a hard env-scoped read invariant on every new accessor (`cross_env=False` as the only escape hatch). Made dispatcher author resolution authoritative via `get_live_update_context_for_message_ids` rather than trusting agent tool args. Enumerated every storage_handler.py counterpart (DEBT-028 mirror) and added `get_topic_transition_rates` for trip-wire rolling metrics. Added `tests/fakes/topic_store.py` in-memory fake-store fixture aligned with the existing `conftest.py` stub pattern so dispatcher/alias/shadow tests run without a live DB. Explicitly acknowledged concurrent-run lease as deferred to Phase 1.5 with a `lease: DEFERRED` indicator in trace embeds. Restated `search_topics` is env-scoped at the dispatcher layer. Migration adds 6 tables (5 spec + `topic_editor_runs`), DDL-only."
+      },
+      {
+        "id": "FLAG-004",
+        "concern": "Env-scoped read invariant unstated: Plan does not assert that search_topics, alias resolution, dispatcher collision scans, and list_watching_topics all filter by (environment, guild_id) by default. Shadow-mode replay loads prod windows but writes dev; without env filter on reads, dispatcher could collide against prod topics.",
+        "resolution": "Committed to a new `topic_editor_runs` table (removed the reuse-of-`live_update_editor_runs` fallback in Step 7.1). Replaced impossible pure-SQL backfill with a post-migration Python script `scripts/backfill_topics_from_feed_items.py` that resolves authors via the archive and calls the Python canonicalizer; migration DDL is now backfill-free. Added a hard env-scoped read invariant on every new accessor (`cross_env=False` as the only escape hatch). Made dispatcher author resolution authoritative via `get_live_update_context_for_message_ids` rather than trusting agent tool args. Enumerated every storage_handler.py counterpart (DEBT-028 mirror) and added `get_topic_transition_rates` for trip-wire rolling metrics. Added `tests/fakes/topic_store.py` in-memory fake-store fixture aligned with the existing `conftest.py` stub pattern so dispatcher/alias/shadow tests run without a live DB. Explicitly acknowledged concurrent-run lease as deferred to Phase 1.5 with a `lease: DEFERRED` indicator in trace embeds. Restated `search_topics` is env-scoped at the dispatcher layer. Migration adds 6 tables (5 spec + `topic_editor_runs`), DDL-only."
+      },
+      {
+        "id": "FLAG-005",
+        "concern": "Dispatcher structural check needs server-side author resolution: Step 6.2 Inv 1 says distinct_authors(source_message_ids) >= 2 rejects post_simple_topic, but the count must be derived from the messages archive (authoritative), not from agent tool input (untrusted). Plan implies this but does not state it.",
+        "resolution": "plan_v1.md Step 6.2 Inv 1; doc line 395; get_live_update_context_for_message_ids is the obvious source"
+      },
+      {
+        "id": "FLAG-006",
+        "concern": "Storage-layer write accessors underspecified: Step 5 enumerates db_handler accessors but treats storage_handler entries as 'mirror as needed'. Every new write path needs both layers (db_handler wraps storage_handler which builds the supabase payload with hardcoded keys, per storage_handler.py:1733-1780). Same shape as recurring debt DEBT-028.",
+        "resolution": "plan_v1.md Step 5.2; storage_handler.py:743-762 existing pattern; recurring debt DEBT-028"
+      },
+      {
+        "id": "FLAG-007",
+        "concern": "Concurrent-run protection deferred against doc recommendation: doc line 684 explicitly says 'Worth implementing in Phase 1'. Plan defers it to Phase-1.5. Acceptable per scope discipline, but should be called out as a known deviation so POM does not expect lease behavior in Week-1 trace embeds.",
+        "resolution": "plan_v1.md Overview + Assumptions; doc line 684"
+      }
+    ],
+    "weighted_score": 25.0,
+    "weighted_history": [
+      27.5
+    ],
+    "plan_delta_from_previous": 51.03,
+    "recurring_critiques": [],
+    "scope_creep_flags": [],
+    "loop_summary": "Iteration 2. Weighted score trajectory: 27.5 -> 25.0. Plan deltas: 51.0%. Recurring critiques: 0. Resolved flags: 6. Open significant flags: 18.",
+    "debt_overlaps": [],
+    "escalated_debt_subsystems": []
+  },
+  "warnings": [],
+  "criteria_check": {
+    "count": 17,
+    "items": [
+      {
+        "criterion": "`docs/live-update-editor-phase1-locked-decisions.md` exists and resolves all five locked decisions (canonicalizer rule + 50-headline fuzz fixture, editorial_observations retention, collision threshold + override semantics, single-table rejected logging, defer-audit-driven pending_review decision).",
+        "priority": "must",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "New migration in `.migrations_staging/` creates exactly 6 tables: 5 spec tables (topics, topic_sources, topic_aliases, topic_transitions, editorial_observations) with v6 corrections (topic_transitions env+guild_id+nullable topic_id; topic_sources UNIQUE = (topic_id, message_id); topics publication_* columns; trigram extension + topics_headline_trgm GIN index) plus a NEW `topic_editor_runs` provenance table. No backfill SQL inside the migration.",
+        "priority": "must",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "No modifications to `src/features/summarising/live_update_editor.py`, `src/features/summarising/live_update_prompts.py`, `src/common/llm/claude_client.py:generate_chat_completion`, or any existing `live_update_*` table or DB accessor. The new editor never writes to `live_update_editor_runs` or any other legacy table.",
+        "priority": "must",
+        "requires": [
+          "parse_diff",
+          "run_shell"
+        ]
+      },
+      {
+        "criterion": "All 10 native Anthropic tool definitions (4 read + 6 decision) match the v6 spec; write tools (`post_simple_topic`, `post_sectioned_topic`, `watch_topic`) accept `override_collisions: list[{topic_id, reason}]`; `search_topics` is env-scoped at the dispatcher.",
+        "priority": "must",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Dispatcher enforces all 4 invariants with author resolution coming from the archive (`get_live_update_context_for_message_ids`), not agent tool args. Every rejection writes a topic_transitions row (`topic_id=NULL` for failed creates, `action='rejected_*'`); every override writes `action='override'` with reason in `payload`.",
+        "priority": "must",
+        "requires": [
+          "run_tests"
+        ]
+      },
+      {
+        "criterion": "Canonicalizer fuzz test passes on the 50-headline fixture: idempotence under whitespace/case/article variation, parent/child story headlines share a canonical_key prefix or trigger an alias hit.",
+        "priority": "must",
+        "requires": [
+          "run_tests"
+        ]
+      },
+      {
+        "criterion": "Pure `render_topic(topic)` produces correct output for simple, sectioned, story-update (`Update:` prefix + parent link), and partial-publish recovery; no DB calls and no Discord network calls invoked from the renderer.",
+        "priority": "must",
+        "requires": [
+          "run_tests"
+        ]
+      },
+      {
+        "criterion": "Shadow-mode replay smoke test runs against the in-memory fake-store (no live DB): topic_transitions rows are recorded, no `channel.send` to the live feed channel is attempted (mocked), trace-embed payload contains source-message count, tool-call counts by name, posted/watched/updated/discarded/observation tallies, tokens, latency, divergence-vs-today summary, override rate, observation rate, and a `lease: DEFERRED` indicator.",
+        "priority": "must",
+        "requires": [
+          "run_tests"
+        ]
+      },
+      {
+        "criterion": "Existing tests `tests/test_live_update_editor_lifecycle.py`, `tests/test_live_update_editor_publishing.py`, `tests/test_live_update_prompts.py` remain green without modification.",
+        "priority": "must",
+        "requires": [
+          "run_tests"
+        ]
+      },
+      {
+        "criterion": "`scripts/run_live_update_shadow.py` exists as a new entrypoint that does NOT route through `LiveUpdateEditor` and never writes to legacy tables; loads >=20 historical source-message windows from the prod archive; runs them through the new editor with publishing OFF; posts one trace embed per window plus an aggregate summary to `DEV_SHADOW_TRACE_CHANNEL_ID`.",
+        "priority": "must",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Every new read accessor (`search_topics_by_headline`, `resolve_topic_by_alias`, `list_watching_topics`, `get_topic_by_canonical_key`, `get_topic_transition_rates`) filters by `(environment, guild_id)` mandatorily; only `cross_env=False` unlocks cross-env reads.",
+        "priority": "must",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "`scripts/backfill_topics_from_feed_items.py` exists as a one-shot post-migration Python script: resolves source-message authors via `get_live_update_context_for_message_ids`, calls `topic_canonicalizer.canonicalize`, inserts `topics` + `topic_sources` rows; idempotent on `(environment, guild_id, canonical_key)`.",
+        "priority": "must",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Alias resolution verified by rolling the same window twice through different runs (in the fake store) and confirming the second run resolves to the same topic_id via topic_aliases.",
+        "priority": "must",
+        "requires": [
+          "run_tests"
+        ]
+      },
+      {
+        "criterion": "Every new `db_handler.py` accessor has a matching `storage_handler.py` counterpart (DEBT-028 two-layer pattern); the list is enumerated in Step 6.",
+        "priority": "must",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Trace embed surfaces the three trip-wires explicitly: override rate (per-run + 7-day rolling via `get_topic_transition_rates`), record_observation rate (per-run + rolling), partial-publish incidents, plus a `lease: DEFERRED` indicator.",
+        "priority": "should",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Net new code stays within ~800-1000 LOC; alarm raised if it exceeds ~1500 LOC (Phase-1.5 creep indicator).",
+        "priority": "should",
+        "requires": [
+          "run_shell"
+        ]
+      },
+      {
+        "criterion": "Trace embeds across 20 replayed windows show divergences explainable as 'valid different call' rather than drift; POM judges new editor equivalent-or-better at the Week-1 decision gate.",
+        "priority": "info",
+        "requires": [
+          "subjective_judgment"
+        ]
+      }
+    ]
+  },
+  "preflight_results": {
+    "project_dir_exists": true,
+    "project_dir_writable": true,
+    "success_criteria_present": true,
+    "claude_available": true,
+    "codex_available": true
+  },
+  "unresolved_flags": [
+    {
+      "id": "FLAG-003",
+      "concern": "Test infrastructure gap: dispatcher tests require the 5 new tables in the test DB, but .migrations_staging/ is described as manual-handoff for the workspace Supabase repo. Plan does not specify how dispatcher and alias-resolution tests get a schema fixture (test container? skip-if-no-DB? in-memory shim?). Without this, multiple fail_to_pass tests cannot run.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "Committed to a new `topic_editor_runs` table (removed the reuse-of-`live_update_editor_runs` fallback in Step 7.1). Replaced impossible pure-SQL backfill with a post-migration Python script `scripts/backfill_topics_from_feed_items.py` that resolves authors via the archive and calls the Python canonicalizer; migration DDL is now backfill-free. Added a hard env-scoped read invariant on every new accessor (`cross_env=False` as the only escape hatch). Made dispatcher author resolution authoritative via `get_live_update_context_for_message_ids` rather than trusting agent tool args. Enumerated every storage_handler.py counterpart (DEBT-028 mirror) and added `get_topic_transition_rates` for trip-wire rolling metrics. Added `tests/fakes/topic_store.py` in-memory fake-store fixture aligned with the existing `conftest.py` stub pattern so dispatcher/alias/shadow tests run without a live DB. Explicitly acknowledged concurrent-run lease as deferred to Phase 1.5 with a `lease: DEFERRED` indicator in trace embeds. Restated `search_topics` is env-scoped at the dispatcher layer. Migration adds 6 tables (5 spec + `topic_editor_runs`), DDL-only.",
+      "raised_in": "critique_v1.json",
+      "status": "addressed",
+      "severity": "significant",
+      "verified": false,
+      "addressed_in": "plan_v2.md"
+    },
+    {
+      "id": "issue_hints",
+      "concern": "Did the work fully address the issue hints, user notes, and approved plan requirements?: Run-provenance is left ambiguous in Step 7.1: 'Insert a live_update_editor_runs row (existing table is acceptable for run-id provenance, read only; or add a new topic_editor_runs if the existing schema does not fit cleanly).' Inserting into live_update_editor_runs would violate the brief hard constraint that the new editor writes ONLY to the 5 new tables. Plan should commit to a new run table in the new migration.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "Committed to a new `topic_editor_runs` table (removed the reuse-of-`live_update_editor_runs` fallback in Step 7.1). Replaced impossible pure-SQL backfill with a post-migration Python script `scripts/backfill_topics_from_feed_items.py` that resolves authors via the archive and calls the Python canonicalizer; migration DDL is now backfill-free. Added a hard env-scoped read invariant on every new accessor (`cross_env=False` as the only escape hatch). Made dispatcher author resolution authoritative via `get_live_update_context_for_message_ids` rather than trusting agent tool args. Enumerated every storage_handler.py counterpart (DEBT-028 mirror) and added `get_topic_transition_rates` for trip-wire rolling metrics. Added `tests/fakes/topic_store.py` in-memory fake-store fixture aligned with the existing `conftest.py` stub pattern so dispatcher/alias/shadow tests run without a live DB. Explicitly acknowledged concurrent-run lease as deferred to Phase 1.5 with a `lease: DEFERRED` indicator in trace embeds. Restated `search_topics` is env-scoped at the dispatcher layer. Migration adds 6 tables (5 spec + `topic_editor_runs`), DDL-only.",
+      "raised_in": "critique_v1.json",
+      "status": "addressed",
+      "severity": "significant",
+      "verified": false,
+      "addressed_in": "plan_v2.md"
+    },
+    {
+      "id": "correctness-1",
+      "concern": "Are the proposed changes technically correct?: Hot-path cost: get_live_update_context_for_message_ids (storage_handler.py:1224-1266) is a heavy accessor that joins discord_messages -> channels -> engagement context -> author profiles, designed for prompt assembly, not the dispatch hot path. Calling it on every post_simple_topic/post_sectioned_topic/watch_topic invocation will add measurable latency and cost vs a lean select author_id from discord_messages where message_id in (...). Plan should add a thin get_message_author_ids accessor for the dispatcher.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "Hot-path cost: get_live_update_context_for_message_ids (storage_handler.py:1224-1266) is a heavy accessor that joins discord_messages -> channels -> engagement context -> author profiles, designed for prompt assembly, not the dispatch hot path. Calling it on every post_simple_topic/post_sectioned_topic/watch_topic invocation will add measurable latency and cost vs a lean select author_id from discord_messages where message_id in (...). Plan should add a thin get_message_author_ids accessor for the dispatcher.",
+      "raised_in": "critique_v2.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false,
+      "addressed_in": "plan_v2.md"
+    },
+    {
+      "id": "correctness-2",
+      "concern": "Are the proposed changes technically correct?: Trigram approximation in fake store: Step 11 uses difflib.SequenceMatcher.ratio as a Python-side stand-in for pg_trgm similarity. The two algorithms produce different scores for the same string pair \u2014 SequenceMatcher uses LCS-style matching while pg_trgm uses character-trigram set intersection. A test threshold tuned at 0.55 against SequenceMatcher may pass tests but diverge from production pg_trgm. Plan should pin a fixture-based oracle (precomputed expected pairs) rather than relying on the stand-in for threshold tuning.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "Trigram approximation in fake store: Step 11 uses difflib.SequenceMatcher.ratio as a Python-side stand-in for pg_trgm similarity. The two algorithms produce different scores for the same string pair \u2014 SequenceMatcher uses LCS-style matching while pg_trgm uses character-trigram set intersection. A test threshold tuned at 0.55 against SequenceMatcher may pass tests but diverge from production pg_trgm. Plan should pin a fixture-based oracle (precomputed expected pairs) rather than relying on the stand-in for threshold tuning.",
+      "raised_in": "critique_v2.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false,
+      "addressed_in": "plan_v2.md"
+    },
+    {
+      "id": "correctness-3",
+      "concern": "Are the proposed changes technically correct?: Step 4.2 inserts topics with state='posted' and publication_status='sent' for the backfill, but the existing live_update_feed_items rows have a status column (storage_handler.py:759 defaults to 'posted') that can be 'pending'/'posted'/'failed'. Backfill must filter to status='posted' AND discord_message_ids non-empty, otherwise non-posted legacy rows enter the new schema with publication_status='sent' inconsistent with reality. Plan does not enumerate the filter.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "Step 4.2 inserts topics with state='posted' and publication_status='sent' for the backfill, but the existing live_update_feed_items rows have a status column (storage_handler.py:759 defaults to 'posted') that can be 'pending'/'posted'/'failed'. Backfill must filter to status='posted' AND discord_message_ids non-empty, otherwise non-posted legacy rows enter the new schema with publication_status='sent' inconsistent with reality. Plan does not enumerate the filter.",
+      "raised_in": "critique_v2.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false,
+      "addressed_in": "plan_v2.md"
+    },
+    {
+      "id": "correctness-4",
+      "concern": "Are the proposed changes technically correct?: Plan structural rejection for post_simple_topic (Step 6.2 Inv 1) uses distinct_authors >= 2 OR len(source_message_ids) >= 3. The dispatcher must derive distinct_authors from the messages archive (authoritative), not from a tool argument (untrusted), but the plan does not specify the lookup path. Worth an explicit statement that author resolution goes through get_live_update_context_for_message_ids or equivalent.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "Committed to a new `topic_editor_runs` table (removed the reuse-of-`live_update_editor_runs` fallback in Step 7.1). Replaced impossible pure-SQL backfill with a post-migration Python script `scripts/backfill_topics_from_feed_items.py` that resolves authors via the archive and calls the Python canonicalizer; migration DDL is now backfill-free. Added a hard env-scoped read invariant on every new accessor (`cross_env=False` as the only escape hatch). Made dispatcher author resolution authoritative via `get_live_update_context_for_message_ids` rather than trusting agent tool args. Enumerated every storage_handler.py counterpart (DEBT-028 mirror) and added `get_topic_transition_rates` for trip-wire rolling metrics. Added `tests/fakes/topic_store.py` in-memory fake-store fixture aligned with the existing `conftest.py` stub pattern so dispatcher/alias/shadow tests run without a live DB. Explicitly acknowledged concurrent-run lease as deferred to Phase 1.5 with a `lease: DEFERRED` indicator in trace embeds. Restated `search_topics` is env-scoped at the dispatcher layer. Migration adds 6 tables (5 spec + `topic_editor_runs`), DDL-only.",
+      "raised_in": "critique_v1.json",
+      "status": "addressed",
+      "severity": "significant",
+      "verified": false,
+      "addressed_in": "plan_v2.md"
+    },
+    {
+      "id": "scope-1",
+      "concern": "Search for related code that handles the same concept. Is the reported issue a symptom of something broader?: Env-scoping invariant applies to new topic_* tables ONLY. The plan's Step 4 backfill and Step 12 replay runner read from live_update_feed_items / live_update_candidates / discord_messages \u2014 those existing accessors filter by guild_id but not always by environment (storage_handler.py:1238-1250 in get_live_update_context_for_message_ids accepts environment='prod' parameter but does not pass it to the Supabase query). Plan does not clarify the env-scoping boundary, which could confuse executors into adding env filters to legacy accessors and breaking the 'do not modify live_update_*' constraint.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "Env-scoping invariant applies to new topic_* tables ONLY. The plan's Step 4 backfill and Step 12 replay runner read from live_update_feed_items / live_update_candidates / discord_messages \u2014 those existing accessors filter by guild_id but not always by environment (storage_handler.py:1238-1250 in get_live_update_context_for_message_ids accepts environment='prod' parameter but does not pass it to the Supabase query). Plan does not clarify the env-scoping boundary, which could confuse executors into adding env filters to legacy accessors and breaking the 'do not modify live_update_*' constraint.",
+      "raised_in": "critique_v2.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false,
+      "addressed_in": "plan_v2.md"
+    },
+    {
+      "id": "scope-2",
+      "concern": "Search for related code that handles the same concept. Is the reported issue a symptom of something broader?: Brief constraint: 'Do not modify, dual-write to, or read for decisions from the existing live_update_* tables.' Step 12.3 says shadow runner reads live_update_candidates / live_update_feed_items for the divergence-vs-today comparison. This is read-for-comparison (not read-for-decision), which is the spirit of the constraint, but the brief wording is broad. Plan should explicitly state the read is comparison-only and never feeds back into dispatcher state.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "Brief constraint: 'Do not modify, dual-write to, or read for decisions from the existing live_update_* tables.' Step 12.3 says shadow runner reads live_update_candidates / live_update_feed_items for the divergence-vs-today comparison. This is read-for-comparison (not read-for-decision), which is the spirit of the constraint, but the brief wording is broad. Plan should explicitly state the read is comparison-only and never feeds back into dispatcher state.",
+      "raised_in": "critique_v2.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false,
+      "addressed_in": "plan_v2.md"
+    },
+    {
+      "id": "scope-3",
+      "concern": "Search for related code that handles the same concept. Is the reported issue a symptom of something broader?: Plan does not say where the dispatcher similarity scan reads from (Step 6.2 Inv 2). The doc requires trigram + alias lookup on topics AND author_overlap, which means joining to topic_sources and to the messages archive for author resolution. Plan implies this via search_topics_by_headline but does not enumerate the author_overlap lookup, the implementation detail that decides whether the threshold is actually tunable.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "Committed to a new `topic_editor_runs` table (removed the reuse-of-`live_update_editor_runs` fallback in Step 7.1). Replaced impossible pure-SQL backfill with a post-migration Python script `scripts/backfill_topics_from_feed_items.py` that resolves authors via the archive and calls the Python canonicalizer; migration DDL is now backfill-free. Added a hard env-scoped read invariant on every new accessor (`cross_env=False` as the only escape hatch). Made dispatcher author resolution authoritative via `get_live_update_context_for_message_ids` rather than trusting agent tool args. Enumerated every storage_handler.py counterpart (DEBT-028 mirror) and added `get_topic_transition_rates` for trip-wire rolling metrics. Added `tests/fakes/topic_store.py` in-memory fake-store fixture aligned with the existing `conftest.py` stub pattern so dispatcher/alias/shadow tests run without a live DB. Explicitly acknowledged concurrent-run lease as deferred to Phase 1.5 with a `lease: DEFERRED` indicator in trace embeds. Restated `search_topics` is env-scoped at the dispatcher layer. Migration adds 6 tables (5 spec + `topic_editor_runs`), DDL-only.",
+      "raised_in": "critique_v1.json",
+      "status": "addressed",
+      "severity": "significant",
+      "verified": false,
+      "addressed_in": "plan_v2.md"
+    },
+    {
+      "id": "all_locations-1",
+      "concern": "Does the change touch all locations AND supporting infrastructure?: Verified FLAG-003 fix attempt with caveat: Step 11 introduces tests/fakes/topic_store.py + a topic_store_fake pytest fixture. However, plan calls this 'Small' scope and 'aligned with the existing conftest.py stub pattern' \u2014 the existing pattern (conftest.py:13-39, sys.modules stubs) is shallow: it replaces import surfaces with stateless return-value stubs (return 'yes|approved'). The fake topic store needs stateful behavior \u2014 env-scoped reads, (topic_id, message_id) UNIQUE enforcement, alias resolution by canonical_key, trigram similarity, idempotency on (run_id, tool_call_id), per-run transition logs. That is a medium-scope shim, not aligned with the conftest stub idiom. Plan's framing understates the work.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "Verified FLAG-003 fix attempt with caveat: Step 11 introduces tests/fakes/topic_store.py + a topic_store_fake pytest fixture. However, plan calls this 'Small' scope and 'aligned with the existing conftest.py stub pattern' \u2014 the existing pattern (conftest.py:13-39, sys.modules stubs) is shallow: it replaces import surfaces with stateless return-value stubs (return 'yes|approved'). The fake topic store needs stateful behavior \u2014 env-scoped reads, (topic_id, message_id) UNIQUE enforcement, alias resolution by canonical_key, trigram similarity, idempotency on (run_id, tool_call_id), per-run transition logs. That is a medium-scope shim, not aligned with the conftest stub idiom. Plan's framing understates the work.",
+      "raised_in": "critique_v2.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false,
+      "addressed_in": "plan_v2.md"
+    },
+    {
+      "id": "all_locations-2",
+      "concern": "Does the change touch all locations AND supporting infrastructure?: Migration includes the 6th topic_editor_runs table but Step 2.2 schema does not declare a FK from topic_transitions.run_id -> topic_editor_runs.run_id. The dispatcher's idempotency invariant keys on (run_id, tool_call_id) against topic_transitions; without the FK or a documented loose-link, orphan run_ids in transitions are silently allowed, undermining audit-trail integrity.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "Migration includes the 6th topic_editor_runs table but Step 2.2 schema does not declare a FK from topic_transitions.run_id -> topic_editor_runs.run_id. The dispatcher's idempotency invariant keys on (run_id, tool_call_id) against topic_transitions; without the FK or a documented loose-link, orphan run_ids in transitions are silently allowed, undermining audit-trail integrity.",
+      "raised_in": "critique_v2.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false,
+      "addressed_in": "plan_v2.md"
+    },
+    {
+      "id": "all_locations-3",
+      "concern": "Does the change touch all locations AND supporting infrastructure?: Plan does not specify at which seam (DatabaseHandler vs StorageHandler) the tests/fakes/topic_store.py fake intercepts. Since Step 6 mandates the two-layer pattern, the fake must replace the right layer (most likely DatabaseHandler.<accessor> for production parity) or it will subtly diverge from real behavior. Worth a one-line directive.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "Plan does not specify at which seam (DatabaseHandler vs StorageHandler) the tests/fakes/topic_store.py fake intercepts. Since Step 6 mandates the two-layer pattern, the fake must replace the right layer (most likely DatabaseHandler.<accessor> for production parity) or it will subtly diverge from real behavior. Worth a one-line directive.",
+      "raised_in": "critique_v2.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false,
+      "addressed_in": "plan_v2.md"
+    },
+    {
+      "id": "all_locations-4",
+      "concern": "Does the change touch all locations AND supporting infrastructure?: Trip-wire 7-day rolling metrics require a query over topic_transitions filtered by action and environment. Plan does not specify the aggregate accessor (presumably an additional db_handler method), which is part of the supporting infrastructure for the success-criterion 'override rate per-run + rolling'.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "Committed to a new `topic_editor_runs` table (removed the reuse-of-`live_update_editor_runs` fallback in Step 7.1). Replaced impossible pure-SQL backfill with a post-migration Python script `scripts/backfill_topics_from_feed_items.py` that resolves authors via the archive and calls the Python canonicalizer; migration DDL is now backfill-free. Added a hard env-scoped read invariant on every new accessor (`cross_env=False` as the only escape hatch). Made dispatcher author resolution authoritative via `get_live_update_context_for_message_ids` rather than trusting agent tool args. Enumerated every storage_handler.py counterpart (DEBT-028 mirror) and added `get_topic_transition_rates` for trip-wire rolling metrics. Added `tests/fakes/topic_store.py` in-memory fake-store fixture aligned with the existing `conftest.py` stub pattern so dispatcher/alias/shadow tests run without a live DB. Explicitly acknowledged concurrent-run lease as deferred to Phase 1.5 with a `lease: DEFERRED` indicator in trace embeds. Restated `search_topics` is env-scoped at the dispatcher layer. Migration adds 6 tables (5 spec + `topic_editor_runs`), DDL-only.",
+      "raised_in": "critique_v1.json",
+      "status": "addressed",
+      "severity": "significant",
+      "verified": false,
+      "addressed_in": "plan_v2.md"
+    },
+    {
+      "id": "callers-1",
+      "concern": "Find the callers of the changed function. What arguments do they actually pass? Does the fix handle all of them?: get_live_update_context_for_message_ids is invoked by both the dispatcher's _resolve_authors (Step 7.2) and the backfill script (Step 4). Both callers extract just author_id from the embedded source_message in the heavy source_context dict. Either caller could subtly break if the function's contract changes. A thin get_message_author_ids accessor would make the dependency obvious and decoupled.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "get_live_update_context_for_message_ids is invoked by both the dispatcher's _resolve_authors (Step 7.2) and the backfill script (Step 4). Both callers extract just author_id from the embedded source_message in the heavy source_context dict. Either caller could subtly break if the function's contract changes. A thin get_message_author_ids accessor would make the dependency obvious and decoupled.",
+      "raised_in": "critique_v2.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false,
+      "addressed_in": "plan_v2.md"
+    },
+    {
+      "id": "callers-2",
+      "concern": "Find the callers of the changed function. What arguments do they actually pass? Does the fix handle all of them?: Step 12.3 reads from live_update_candidates and live_update_feed_items for divergence-vs-today. The shadow runner needs environment='prod' for archive source reads AND comparison-decisions reads, while writing topic_* state in environment='dev'. Plan does not explicitly say the runner uses prod for archive vs dev for topic writes \u2014 a real risk of cross-wiring at the call site.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "Step 12.3 reads from live_update_candidates and live_update_feed_items for divergence-vs-today. The shadow runner needs environment='prod' for archive source reads AND comparison-decisions reads, while writing topic_* state in environment='dev'. Plan does not explicitly say the runner uses prod for archive vs dev for topic writes \u2014 a real risk of cross-wiring at the call site.",
+      "raised_in": "critique_v2.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false,
+      "addressed_in": "plan_v2.md"
+    },
+    {
+      "id": "callers-3",
+      "concern": "Find the callers of the changed function. What arguments do they actually pass? Does the fix handle all of them?: tests/fakes/topic_store.py is referenced but no caller-by-caller mapping is provided showing which production accessor each fake method satisfies. Without that mapping, the fake is liable to drift from the real interface (signature/return-shape mismatches) once production code lands.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "tests/fakes/topic_store.py is referenced but no caller-by-caller mapping is provided showing which production accessor each fake method satisfies. Without that mapping, the fake is liable to drift from the real interface (signature/return-shape mismatches) once production code lands.",
+      "raised_in": "critique_v2.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false,
+      "addressed_in": "plan_v2.md"
+    },
+    {
+      "id": "issue_hints-1",
+      "concern": "Did the work fully address the issue hints, user notes, and approved plan requirements?: Brief says 'ship the 5-table topic schema'; rev 2 ships 6 tables (5 spec + topic_editor_runs). Defensible expansion to satisfy the 'writes ONLY to new tables' constraint after FLAG-001, but does exceed the literal scope wording. Success criterion updated to 'exactly 6 tables'. Worth surfacing as a deliberate scope expansion rather than implicit drift.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "Brief says 'ship the 5-table topic schema'; rev 2 ships 6 tables (5 spec + topic_editor_runs). Defensible expansion to satisfy the 'writes ONLY to new tables' constraint after FLAG-001, but does exceed the literal scope wording. Success criterion updated to 'exactly 6 tables'. Worth surfacing as a deliberate scope expansion rather than implicit drift.",
+      "raised_in": "critique_v2.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "issue_hints-2",
+      "concern": "Did the work fully address the issue hints, user notes, and approved plan requirements?: Defer-audit timing: Step 1.1 runs the audit on Day 0 but Step 2 lands the DDL on Day 1. Plan does not branch Step 2 / Step 7 conditionally on audit outcome. If the audit forces state='pending_review' + request_review_topic per locked-decision #5, the DDL and tool list must include them in this migration, not rev-the-migration mid-week. Plan should add an explicit 'if audit forces pending_review, append state + tool to Step 2/7 before SQL freeze' branch.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "Defer-audit timing: Step 1.1 runs the audit on Day 0 but Step 2 lands the DDL on Day 1. Plan does not branch Step 2 / Step 7 conditionally on audit outcome. If the audit forces state='pending_review' + request_review_topic per locked-decision #5, the DDL and tool list must include them in this migration, not rev-the-migration mid-week. Plan should add an explicit 'if audit forces pending_review, append state + tool to Step 2/7 before SQL freeze' branch.",
+      "raised_in": "critique_v2.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false
+    }
+  ]
+}

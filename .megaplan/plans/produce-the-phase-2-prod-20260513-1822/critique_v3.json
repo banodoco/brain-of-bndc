@@ -1,0 +1,121 @@
+{
+  "checks": [
+    {
+      "id": "issue_hints",
+      "question": "Did the work fully address the issue hints, user notes, and approved plan requirements?",
+      "findings": [
+        {
+          "detail": "Verified FLAG-007 fix: \u00a79 step 1 now names the full migration hand-off chain \u2014 author timestamped file in `.migrations_staging/`, copy verbatim into `/Users/peteromalley/Documents/banodoco-workspace/supabase/migrations/` per `.migrations_staging/README.md`, apply via `supabase db push` (TODO(phase-1) for alternates), verify recorded in `supabase_migrations.schema_migrations`. \u00a710 step 2 reuses the same chain for DROP TABLE. Operator can no longer write SQL into staging and assume it ran. Resolved.",
+          "flagged": false
+        },
+        {
+          "detail": "Verified plan still satisfies all eight original pass_to_pass criteria. Length budget reportedly preserved (sentence-level edits, no new sections). Self-review pass (Step 13) walks the 14 internal checks. The fifth TODO(phase-1) (new-editor / legacy bot identity) is a new addition that the brief did not enumerate but is needed for Branch-B Discord-side verification; it does not contradict the brief, it strengthens it.",
+          "flagged": false
+        },
+        {
+          "detail": "Plan v3 strengthens FLAG-007 fix by referencing `supabase_migrations.schema_migrations` as the verification table. That table is the standard Supabase CLI migration-tracking artifact (created by `supabase migration ...` commands). Plan's assumption that the project uses `supabase db push` is an inference \u2014 .migrations_staging/README.md only specifies the destination folder, not the apply mechanism. Plan acknowledges this with a TODO(phase-1) for alternates (dashboard, psql-direct), which is appropriately defensive.",
+          "flagged": false
+        }
+      ]
+    },
+    {
+      "id": "correctness",
+      "question": "Are the proposed changes technically correct?",
+      "findings": [
+        {
+          "detail": "Verified FLAG-008 fix: the v2 `topics GROUP BY environment` cross-window tally has been replaced with a prod-only count plus an explicit instruction in \u00a76 step 2 to source the Phase-1 shadow partial count from Phase-1 shadow-mode telemetry (trace embed in the Phase-1 monitoring channel + shadow logs per :611-644), citing :611/:627/:633 for why dev `topics` has no `partial` rows. \u00a72/\u00a73/\u00a74 also carry the 'dev has no partials' annotation. Operator records the two numbers inline and the trip-wire fires when their sum \u2265 2. Resolved.",
+          "flagged": false
+        },
+        {
+          "detail": "Verified FLAG-009 fix: \u00a75 Branch B now names the Discord-side count (scroll the live channel since the flip timestamp for posts attributed to the legacy bot identity) as the PRIMARY signal. The SQL suppression-marker check is demoted to nice-to-have with explicit 'acceptable to skip if Phase 1 doesn't write one' wording. A fifth TODO(phase-1) is added to the \u00a71 banner for the new-editor / legacy bot identity distinction so the Discord-side count has a concrete anchor. Resolved.",
+          "flagged": false
+        },
+        {
+          "detail": "Verified FLAG-004 fix (carried from v2): \u00a75 step 4 anchors verification on `live_update_editor_runs` with `status='completed'` after the flip timestamp, not a fixed window. Still correctly preserved in v3.",
+          "flagged": false
+        },
+        {
+          "detail": "The plan repeatedly references the 'legacy run-source' as a way to distinguish legacy-editor rows from new-editor rows on the shared `live_update_editor_runs` table. \u00a73 precondition says 'latest live_update_editor_runs row under legacy run-source within last hour', and \u00a75 Branch A primary signal says 'no new live_update_editor_runs rows under the legacy run-source after the flip timestamp'. I read src/common/storage_handler.py:652-682 and `live_update_editor_runs` today has columns guild_id, environment, trigger, status, live_channel_id, checkpoint_*, memory_snapshot, duplicate_snapshot, *_count, skipped_reason, error_message, metadata, completed_at \u2014 NO `run_source` / `editor_source` / `run_type` column. Per redesign :223/:562 the table is retained for both editors; without a Phase-1-added discriminator (could be a new column, a metadata JSON key, or a trigger-prefix convention), Branch A's SQL verification cannot tell legacy runs apart from new runs and the precondition check cannot confirm 'legacy editor still running'. This gap is not captured in the five TODO(phase-1) markers \u2014 it is a sixth Phase-1 dependency.",
+          "flagged": true
+        },
+        {
+          "detail": "Plan \u00a79 step 3 still recommends a pg_views check via `definition ilike '%live_update_%'` and notes views are NOT auto-updated. As previously noted, pg_views.definition does reflect the new name post-rename (deps tracked by OID), so the recommendation is harmless but slightly misleading; the real hazards (functions, triggers, RLS policy bodies referencing tables by string) are not specifically searched. Acceptable for a runbook \u2014 the operator can extend the check \u2014 but the wording is imprecise.",
+          "flagged": false
+        }
+      ]
+    },
+    {
+      "id": "scope",
+      "question": "Search for related code that handles the same concept. Is the reported issue a symptom of something broader?",
+      "findings": [
+        {
+          "detail": "Verified FLAG-010 fix: \u00a71 banner now contains an explicit out-of-scope clause: 'if Phase 1 ships any mechanism other than Branch A or Branch B (hybrid, per-guild config branch, per-channel rollout, partial guild rollout), ABORT to consult-the-doc escape hatch'. \u00a73 preconditions adds 'Phase 1 shipped Branch A or Branch B (not a third mechanism)' as an explicit gate. \u00a77 decision tree adds 'Phase 1 turns out to be a third mechanism \u2192 ABORT immediately' as a row. Defense in depth across banner + precondition + decision-tree row. Resolved.",
+          "flagged": false
+        },
+        {
+          "detail": "Verified prior scope-1/scope-2 fixes carried correctly from v2: \u00a75 has Branch A/B verification shapes; \u00a77 splits lease symptoms into three distinct rows. Both unchanged in v3.",
+          "flagged": false
+        },
+        {
+          "detail": "Plan now lists five Phase-1 TODOs (toggle, suppression mechanism, Branch-B marker, bot identity, trace channel). As noted in correctness, the run-source discriminator on `live_update_editor_runs` is implicit but absent from the codebase today and not listed as a TODO \u2014 effectively a sixth dependency the operator should not miss. The plan's broader 'all five TODOs resolved' precondition would therefore pass even if Phase 1 forgot the discriminator, leaving the operator unable to run the Branch-A primary signal.",
+          "flagged": true
+        }
+      ]
+    },
+    {
+      "id": "all_locations",
+      "question": "Does the change touch all locations AND supporting infrastructure?",
+      "findings": [
+        {
+          "detail": "Verified FLAG-007/all_locations fix: \u00a79 step 1 names the full chain `.migrations_staging/` author \u2192 `/Users/peteromalley/Documents/banodoco-workspace/supabase/migrations/` apply destination \u2192 `supabase db push` \u2192 verify in `supabase_migrations.schema_migrations`. Confirmed against .migrations_staging/README.md which dictates the destination path. The verification-in-schema_migrations step is a nice touch \u2014 it catches the case where the operator forgets to apply. Resolved.",
+          "flagged": false
+        },
+        {
+          "detail": "Plan remains doc-only. Output is a single new file at `docs/live-update-editor-phase-2-runbook.md`. Confirmed the path does not currently exist. No code edits, no test edits.",
+          "flagged": false
+        },
+        {
+          "detail": "All anchor citations in the v3 plan continue to resolve to real content: redesign anchors :117-123, :130-132, :188-191, :212-223, :223, :562, :596, :599-604, :600-601, :603, :611, :625, :627, :633, :642-644, :646-653, :651, :684; storage_handler.py:652-1968; live_update_editor.py:60/:84-107/:261-346; .migrations_staging/README.md. No broken anchors detected.",
+          "flagged": false
+        }
+      ]
+    },
+    {
+      "id": "callers",
+      "question": "Find the callers of the changed function. What arguments do they actually pass? Does the fix handle all of them?",
+      "findings": [
+        {
+          "detail": "Caller analysis remains not applicable in the code-change sense \u2014 this is a doc-only deliverable. The runbook references src/features/summarising/live_update_editor.py:60, :84-107, :261-346 only as the legacy fallback path the runner-pointer rollback re-enables. Line ranges remain accurate.",
+          "flagged": false
+        },
+        {
+          "detail": "The provisional banner in \u00a71 (now five TODOs) plus the precondition gate plus the decision-tree row form a tight containment of Phase-1-not-yet-landed risk. The only residual concern is the unenumerated sixth Phase-1 dependency (run-source discriminator) flagged under correctness; if the operator follows the runbook strictly and Phase 1 omits the discriminator, the gating logic does not catch it.",
+          "flagged": true
+        }
+      ]
+    }
+  ],
+  "flags": [
+    {
+      "id": "FLAG-011",
+      "concern": "Plan repeatedly references a 'legacy run-source' on `live_update_editor_runs` to distinguish legacy-editor rows from new-editor rows (\u00a73 precondition 'most recent live_update_editor_runs row under legacy run-source within last hour'; \u00a75 Branch A primary signal 'no new live_update_editor_runs rows under the legacy run-source after the flip timestamp'; \u00a78 rollback Branch A 'a new legacy live_update_editor_runs row appears under the legacy run-source'). Verified against src/common/storage_handler.py:652-682: the table today carries no `run_source` / `editor_source` / `run_type` column \u2014 columns are guild_id, environment, trigger, status, live_channel_id, checkpoint_*, snapshots, *_count, error_message, metadata, completed_at. Phase 1 must add a discriminator (new column, metadata JSON key, or trigger-string convention) for the SQL-side verification to work, but this dependency is not in the five TODO(phase-1) markers. Plan should add it as a sixth TODO and as a precondition gate, otherwise the 'all Phase-1 TODOs resolved' gate would pass without catching this gap and Branch A verification would be impossible by SQL.",
+      "category": "completeness",
+      "severity_hint": "likely-minor",
+      "evidence": "Plan \u00a73 preconditions, \u00a75 Branch A step 1, \u00a78 rollback Branch A step 3 vs. src/common/storage_handler.py:652-682"
+    },
+    {
+      "id": "verifiability-0",
+      "concern": "Criterion 20: requires human verification (subjective_judgment).",
+      "category": "verifiability",
+      "severity_hint": "likely-minor",
+      "status": "open"
+    }
+  ],
+  "verified_flag_ids": [
+    "FLAG-007",
+    "FLAG-008",
+    "FLAG-009",
+    "FLAG-010"
+  ],
+  "disputed_flag_ids": []
+}

@@ -1,0 +1,71 @@
+{
+  "output": "Completed T2. The lifecycle migration was copied into the workspace Supabase migrations directory, applied to the linked Banodoco project, confirmed in remote migration history, and verified through Supabase REST column selection. Updated the migration staging README and wrote the batch checkpoint.",
+  "files_changed": [
+    ".migrations_staging/README.md",
+    "../supabase/migrations/20260512185328_live_update_watchlist_lifecycle.sql",
+    ".megaplan/plans/execute-the-live-update-20260513-2217/execution_batch_3.json"
+  ],
+  "commands_run": [
+    "pwd && git status --short && rg -n \"20260512185328|live_update_watchlist_lifecycle|migration up|migrations_staging|Supabase\" .migrations_staging/README.md .migrations_staging/20260512185328_live_update_watchlist_lifecycle.sql",
+    "supabase projects list && supabase migration list --linked",
+    "sed -n '1,220p' .migrations_staging/README.md",
+    "sed -n '1,260p' .migrations_staging/20260512185328_live_update_watchlist_lifecycle.sql",
+    "find .. -maxdepth 3 -type d -name migrations -path '*supabase*' -print && find ../supabase -maxdepth 2 -type f | sort | tail -20",
+    "test -e ../supabase/migrations/20260512185328_live_update_watchlist_lifecycle.sql; echo $?",
+    "supabase migration up --linked",
+    "supabase migration list --linked | tail -20",
+    "rg -n \"SUPABASE|supabase\" .env | sed -E 's/(KEY|TOKEN|SECRET|PASSWORD)=.*/\\\\1=<redacted>/'",
+    "set -a; source .env; set +a; psql \"$SUPABASE_CONNECTION_STRING\" -Atc \"select column_name || ':' || data_type || ':' || is_nullable || ':' || coalesce(column_default, '') from information_schema.columns where table_schema = 'public' and table_name = 'live_update_watchlist' and column_name in ('expires_at','next_revisit_at','revisit_count','origin_reason','evidence') order by column_name;\"",
+    "set -a; source .env; set +a; curl -sS -o /tmp/live_update_watchlist_lifecycle_check.json -w '%{http_code}\\n' \"$SUPABASE_URL/rest/v1/live_update_watchlist?select=expires_at,next_revisit_at,revisit_count,origin_reason,evidence&limit=1\" -H \"apikey: $SUPABASE_SERVICE_KEY\" -H \"Authorization: Bearer $SUPABASE_SERVICE_KEY\"; head -c 500 /tmp/live_update_watchlist_lifecycle_check.json",
+    "python -m json.tool .megaplan/plans/execute-the-live-update-20260513-2217/execution_batch_3.json >/dev/null",
+    "supabase migration list --linked | rg '20260512185328'",
+    "ls -l ../supabase/migrations/20260512185328_live_update_watchlist_lifecycle.sql"
+  ],
+  "deviations": [
+    "Direct psql information_schema verification could not run because local DNS resolution failed for db.ujlwuvkrxlvoswwkerdf.supabase.co; verified the columns through Supabase REST instead, which returned HTTP 200.",
+    "A git status command that included ../supabase failed because that path is outside the brain-of-bndc repository; file presence was verified with ls instead.",
+    "Advisory observation mismatch: executor claimed files not observed in git status/content hash delta: ../supabase/migrations/20260512185328_live_update_watchlist_lifecycle.sql, .megaplan/plans/execute-the-live-update-20260513-2217/execution_batch_3.json, .migrations_staging/README.md",
+    "Advisory audit finding: Executor claimed changed files not present in git status: ../supabase/migrations/20260512185328_live_update_watchlist_lifecycle.sql, .migrations_staging/README.md",
+    "Advisory audit finding: Git status shows changed files not claimed by any task: .claude/scheduled_tasks.lock, .megaplan/briefs/, .megaplan/debt.json, .megaplan/plans/build-phase-1-of-the-live-20260513-1821/, .megaplan/plans/build-phase-1-of-the-live-20260513-1822/, .megaplan/plans/execute-the-live-update-20260513-2216/, .megaplan/plans/implement-the-watchlist-20260512-1809/, .megaplan/plans/live-update-environment-split/, .megaplan/plans/produce-the-phase-2-prod-20260513-1821/, .megaplan/plans/produce-the-phase-2-prod-20260513-1822/, .megaplan/schemas/directors_notes.json, .megaplan/schemas/execution_doc.json, .megaplan/schemas/feedback.json, .megaplan/schemas/finalize.json, .megaplan/schemas/review.json, .megaplan/schemas/revise.json, docs/debug-utility-validation.md, docs/live-editor-watchlist-plan.md, docs/live-update-editor-legacy-boundaries.md, docs/live-update-editor-phase-2-runbook.md, docs/live-update-editor-redesign.md, docs/live-update-editor-sprint-plan.md, main.py, scripts/backfill_guild_ids.py, scripts/debug.py, scripts/debug_live_editor_audit.py, scripts/discord_tools.py, scripts/inspect_editor_reasoning.py, scripts/run_live_update_dev.py, scripts/send_social_picks.py, src/common/db_handler.py, src/common/storage_handler.py, src/features/admin/admin_cog.py, src/features/admin_chat/agent.py, src/features/admin_chat/tools.py, src/features/archive/archive_cog.py, src/features/gating/intro_embed.py, src/features/health/health_check_cog.py, src/features/summarising/live_top_creations.py, src/features/summarising/live_update_editor.py, src/features/summarising/live_update_prompts.py, src/features/summarising/summariser.py, src/features/summarising/summariser_cog.py, structure.md, tests/test_live_admin_health.py, tests/test_live_runtime_wiring.py, tests/test_live_storage_wrappers.py, tests/test_live_top_creations.py, tests/test_live_update_editor_lifecycle.py, tests/test_live_update_editor_publishing.py, tests/test_live_update_prompts.py, tests/test_social_route_tools.py",
+    "Advisory audit finding: Sense check SC3 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC4 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC5 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC6 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC7 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC8 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC9 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC10 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC11 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC12 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC13 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC14 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC15 is missing an executor acknowledgment.",
+    "Advisory audit finding: Tasks left pending after execute (executor never started them): T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15"
+  ],
+  "task_updates": [
+    {
+      "task_id": "T2",
+      "status": "done",
+      "executor_notes": "Verified U1 remained satisfied: `supabase projects list` showed the linked Banodoco project `ujlwuvkrxlvoswwkerdf`, and `supabase migration list --linked` connected to remote history. Copied `.migrations_staging/20260512185328_live_update_watchlist_lifecycle.sql` into `/Users/peteromalley/Documents/banodoco-workspace/supabase/migrations/20260512185328_live_update_watchlist_lifecycle.sql`, then applied it with `supabase migration up --linked`. Confirmed remote history now includes `20260512185328`. Confirmed lifecycle columns are available by querying Supabase REST for `expires_at,next_revisit_at,revisit_count,origin_reason,evidence` on `live_update_watchlist`, which returned HTTP 200. Updated `.migrations_staging/README.md` to document the current copy/apply/verify handoff path and the applied lifecycle migration. A direct `psql` information_schema check was attempted but local DNS resolution for `db.ujlwuvkrxlvoswwkerdf.supabase.co` failed, so REST schema verification was used instead.",
+      "files_changed": [
+        ".migrations_staging/README.md",
+        "../supabase/migrations/20260512185328_live_update_watchlist_lifecycle.sql",
+        ".megaplan/plans/execute-the-live-update-20260513-2217/execution_batch_3.json"
+      ],
+      "commands_run": [
+        "supabase projects list && supabase migration list --linked",
+        "supabase migration up --linked",
+        "supabase migration list --linked | rg '20260512185328'",
+        "curl Supabase REST select for live_update_watchlist lifecycle columns returned HTTP 200",
+        "python -m json.tool .megaplan/plans/execute-the-live-update-20260513-2217/execution_batch_3.json >/dev/null"
+      ],
+      "auto_attributed_files": null
+    }
+  ],
+  "sense_check_acknowledgments": [
+    {
+      "sense_check_id": "SC2",
+      "executor_note": "Yes. The backlog watchlist lifecycle migration was copied into the workspace Supabase migrations directory, applied to the linked Banodoco project, verified in remote migration history, and verified through REST column selection. `.migrations_staging/README.md` now reflects the actual copy/apply/verify handoff path instead of only the old blocked/manual handoff."
+    }
+  ]
+}

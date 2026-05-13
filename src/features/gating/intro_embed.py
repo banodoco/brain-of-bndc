@@ -55,7 +55,7 @@ def build_application_embed(member_row: dict, approval_request: dict, art: Optio
     title = resource_name or f"{display_name} would like to become a speaker"
     slug = (member_row.get('username') or '').strip()
     profile_url = f"https://banodoco.ai/@{slug}" if slug else None
-    description = f"*{bio}*" if bio else "*No bio provided.*"
+    description = f"*{bio}*" if bio else "No bio provided."
     embed = discord.Embed(
         title=title,
         url=profile_url,

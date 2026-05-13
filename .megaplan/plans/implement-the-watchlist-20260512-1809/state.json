@@ -1,0 +1,301 @@
+{
+  "name": "implement-the-watchlist-20260512-1809",
+  "idea": "Implement the watchlist-driven live update editor improvements specified in docs/live-editor-watchlist-plan.md. Read that file first \u2014 it is the authoritative brief for this run. Key deliverables: (1) model-driven watchlist tool calls watchlist_add and watchlist_update with publish_now/extend/discard actions, no auto-population; (2) watchlist lifecycle with 72h TTL, 6h/24h revisit checkpoints, state-grouped prompt rendering capped at 20/state; (3) additive schema additions (expires_at, next_revisit_at, revisit_count, origin_reason, evidence) and status broadening; (4) fix the prompt rendering bug where watch_type/description don't exist in the schema (should be subject_type/notes); (5) remove DEFAULT_MAX_PUBLISH_PER_RUN=1 and the at-most-one prompt language; (6) lower the publish bar (showcase/top_creation reactions>=5 \u2192 >=3, quiet-hour rule when <50 scanned messages, last-call watchlist bar); (7) make editor_reasoning bulletproof \u2014 persist raw_text on every run, REASONING: prefix convention, parser fallback chain with recovery_path telemetry, alias keys, prose-prefix recovery. Tests for lifecycle and parser branches. Out of scope: live_top_creations, legacy summariser, lookback changes.",
+  "current_state": "aborted",
+  "iteration": 1,
+  "created_at": "2026-05-12T16:09:41Z",
+  "config": {
+    "project_dir": "/Users/peteromalley/Documents/banodoco-workspace/brain-of-bndc",
+    "auto_approve": true,
+    "robustness": "standard",
+    "mode": "code",
+    "strict_notes": false,
+    "agent": "",
+    "profile": "thoughtful",
+    "phase_model": [
+      "plan=claude:low",
+      "prep=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "critique=claude:low",
+      "revise=claude:low",
+      "gate=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "finalize=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "execute=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "loop_plan=claude:low",
+      "loop_execute=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "review=claude:low",
+      "tiebreaker_researcher=claude:low",
+      "tiebreaker_challenger=claude:low"
+    ]
+  },
+  "sessions": {
+    "claude_planner": {
+      "id": "a26e94be-81c3-435d-bcb3-996054880a14",
+      "mode": "persistent",
+      "created_at": "2026-05-12T16:11:37Z",
+      "last_used_at": "2026-05-12T16:11:37Z",
+      "refreshed": false
+    },
+    "claude_critic": {
+      "id": "2085f707-56b1-4e71-9fde-9f2d75c6c63b",
+      "mode": "persistent",
+      "created_at": "2026-05-12T16:14:36Z",
+      "last_used_at": "2026-05-12T16:35:51Z",
+      "refreshed": false
+    },
+    "hermes_gatekeeper": {
+      "id": "96cf8b6e-c4a5-47ad-b757-99ac08f0daf1",
+      "mode": "persistent",
+      "created_at": "2026-05-12T16:16:54Z",
+      "last_used_at": "2026-05-12T16:44:28Z",
+      "refreshed": false
+    },
+    "hermes_finalizer": {
+      "id": "7b5f592b-dd99-42a1-872e-8aba23418e56",
+      "mode": "persistent",
+      "created_at": "2026-05-12T16:52:06Z",
+      "last_used_at": "2026-05-12T16:52:06Z",
+      "refreshed": false
+    },
+    "hermes_executor": {
+      "id": "4e30c1a7-b62a-47c7-b9ab-25d4b64411a5",
+      "mode": "persistent",
+      "created_at": "2026-05-12T17:10:03Z",
+      "last_used_at": "2026-05-12T18:10:28Z",
+      "refreshed": true
+    }
+  },
+  "plan_versions": [
+    {
+      "version": 1,
+      "file": "plan_v1.md",
+      "hash": "sha256:ee67594fc84ced1477d118f82565cec27c2efbf534c93d0ea04bf9a365c783ca",
+      "timestamp": "2026-05-12T16:11:37Z"
+    }
+  ],
+  "history": [
+    {
+      "step": "init",
+      "timestamp": "2026-05-12T16:09:41Z",
+      "duration_ms": 0,
+      "cost_usd": 0.0,
+      "result": "success",
+      "environment": {
+        "claude": true,
+        "codex": true
+      }
+    },
+    {
+      "step": "plan",
+      "timestamp": "2026-05-12T16:11:37Z",
+      "duration_ms": 109596,
+      "cost_usd": 0.60797995,
+      "result": "success",
+      "prompt_tokens": 339240,
+      "completion_tokens": 8073,
+      "total_tokens": 347313,
+      "session_mode": "persistent",
+      "session_id": "a26e94be-81c3-435d-bcb3-996054880a14",
+      "agent": "claude",
+      "output_file": "plan_v1.md",
+      "artifact_hash": "sha256:ee67594fc84ced1477d118f82565cec27c2efbf534c93d0ea04bf9a365c783ca"
+    },
+    {
+      "step": "critique",
+      "timestamp": "2026-05-12T16:14:36Z",
+      "duration_ms": 173399,
+      "cost_usd": 1.26188775,
+      "result": "success",
+      "prompt_tokens": 812647,
+      "completion_tokens": 16422,
+      "total_tokens": 829069,
+      "session_mode": "persistent",
+      "session_id": "2085f707-56b1-4e71-9fde-9f2d75c6c63b",
+      "agent": "claude",
+      "output_file": "critique_v1.json",
+      "artifact_hash": "sha256:95eb506e1c55d307d647d86112373e17e0668ab6163cbf5e372ac7ac098bef68",
+      "flags_count": 24
+    },
+    {
+      "step": "gate",
+      "timestamp": "2026-05-12T16:16:54Z",
+      "duration_ms": 133637,
+      "cost_usd": 0.053764259999999994,
+      "result": "success",
+      "prompt_tokens": 21055,
+      "completion_tokens": 4922,
+      "total_tokens": 25977,
+      "session_mode": "persistent",
+      "session_id": "49e601b1-c978-459f-967b-383109132391",
+      "agent": "hermes",
+      "output_file": "gate.json",
+      "artifact_hash": "sha256:7b6a6c5e28e98d028cd49ed19dbe841450a09cfd689a37306d083edb0877b8a9",
+      "recommendation": "PROCEED"
+    },
+    {
+      "step": "finalize",
+      "timestamp": "2026-05-12T16:25:01Z",
+      "duration_ms": 476124,
+      "cost_usd": 0.0,
+      "result": "error",
+      "raw_output_file": "finalize_v1_raw.txt",
+      "message": "Finalize user_action U2 is sole coverage for a plan step and must include `requires_human_only_reason`."
+    },
+    {
+      "step": "finalize",
+      "timestamp": "2026-05-12T16:31:55Z",
+      "duration_ms": 408067,
+      "cost_usd": 0.0,
+      "result": "error",
+      "raw_output_file": "finalize_v1_raw.txt",
+      "message": "Finalize user_action U3 is sole coverage for a plan step and must include `requires_human_only_reason`."
+    },
+    {
+      "step": "critique",
+      "timestamp": "2026-05-12T16:35:51Z",
+      "duration_ms": 18867,
+      "cost_usd": 0.5588942499999999,
+      "result": "success",
+      "prompt_tokens": 187031,
+      "completion_tokens": 1285,
+      "total_tokens": 188316,
+      "session_mode": "persistent",
+      "session_id": "2085f707-56b1-4e71-9fde-9f2d75c6c63b",
+      "agent": "claude",
+      "output_file": "critique_v1.json",
+      "artifact_hash": "sha256:efdfe8576d8f3c52ec043776cac9bef19036dd2eb0c43808883ce0050be6fc16",
+      "flags_count": 0
+    },
+    {
+      "step": "gate",
+      "timestamp": "2026-05-12T16:44:28Z",
+      "duration_ms": 512724,
+      "cost_usd": 1.08518058,
+      "result": "success",
+      "prompt_tokens": 603769,
+      "completion_tokens": 9949,
+      "total_tokens": 613718,
+      "session_mode": "persistent",
+      "session_id": "96cf8b6e-c4a5-47ad-b757-99ac08f0daf1",
+      "agent": "hermes",
+      "output_file": "gate.json",
+      "artifact_hash": "sha256:d0608565dc0bcfa6aacc9ff4db39cb88598b63cc0cd9cc298963b83b32d9be7c",
+      "recommendation": "PROCEED"
+    },
+    {
+      "step": "finalize",
+      "timestamp": "2026-05-12T16:52:06Z",
+      "duration_ms": 447970,
+      "cost_usd": 1.57010988,
+      "result": "success",
+      "prompt_tokens": 875288,
+      "completion_tokens": 13537,
+      "total_tokens": 888825,
+      "session_mode": "persistent",
+      "session_id": "7b5f592b-dd99-42a1-872e-8aba23418e56",
+      "agent": "hermes",
+      "output_file": "finalize.json",
+      "artifact_hash": "sha256:a1ac2253ef948f4dd53276db81b563b5999ffcbe2659eda277215c834d4eb58f"
+    },
+    {
+      "step": "execute",
+      "timestamp": "2026-05-12T17:20:24Z",
+      "duration_ms": 1692857,
+      "cost_usd": 8.25023262,
+      "result": "blocked",
+      "session_mode": "persistent",
+      "session_id": "9a6a793f-60bc-4491-bd9a-896a59c03bc4",
+      "agent": "hermes",
+      "output_file": "execution.json",
+      "artifact_hash": "sha256:f97f84e4a2b5fa332a48cbb1f52694af33976599c811525c93afcda2f77f334d",
+      "finalize_hash": "sha256:cc514073ac5a7ca172861c5f2967b33de56c53e913b1e495236a7725674fb932",
+      "approval_mode": "auto_approve"
+    },
+    {
+      "step": "execute",
+      "timestamp": "2026-05-12T18:10:28Z",
+      "duration_ms": 2983706,
+      "cost_usd": 10.93633848,
+      "result": "blocked",
+      "session_mode": "persistent",
+      "session_id": "4e30c1a7-b62a-47c7-b9ab-25d4b64411a5",
+      "agent": "hermes",
+      "output_file": "execution.json",
+      "artifact_hash": "sha256:eae9f93a54850f32d0c74afd798fe7cdee8ca6518e1c174c4c64744fba577fd6",
+      "finalize_hash": "sha256:74e1fdce1ce23a13572810d1cd825c94c48653127679f97fec1277a1fd8ea95c",
+      "approval_mode": "auto_approve"
+    },
+    {
+      "step": "execute",
+      "timestamp": "2026-05-12T18:10:57Z",
+      "duration_ms": 0,
+      "cost_usd": 0.0,
+      "result": "blocked",
+      "message": "Blocked: existing blocked task(s) prevent dependent execution: T13. Resolve or replan the blocked task(s) before continuing."
+    }
+  ],
+  "meta": {
+    "significant_counts": [
+      17,
+      0
+    ],
+    "weighted_scores": [
+      28.5
+    ],
+    "plan_deltas": [],
+    "recurring_critiques": [
+      [],
+      []
+    ],
+    "total_cost_usd": 24.324388,
+    "overrides": [
+      {
+        "action": "replan",
+        "timestamp": "2026-05-12T16:34:44Z",
+        "reason": "Drop info-priority post-merge verification criterion (24h dev soak) that finalize cannot map cleanly \u2014 keeps U1 (Supabase credentials) and U2 (migration apply) which are tied to code tasks, removes U3 (24h soak) which is sole coverage of an info criterion and triggers validator bug"
+      },
+      {
+        "action": "abort",
+        "timestamp": "2026-05-12T18:27:32Z",
+        "reason": "User-accepted closure: 14/16 tasks executed, all 27 new tests pass, full suite has 21 fewer failures than pre-run (2 remaining failures pre-existed in dev-env-routing tests). T13/T16 were redundant test-suite gates blocked only on migration-not-applied check, not on actual code correctness. Code on disk; user will apply migration separately."
+      }
+    ],
+    "notes": [
+      {
+        "timestamp": "2026-05-12T16:34:44Z",
+        "note": "Edit plan_v1.md to remove the verification gate item and edit plan_v1.meta.json to remove the info-priority success criterion (line 110-117). Keep everything else intact."
+      }
+    ],
+    "current_invocation_id": "54597ba6df7b4aec"
+  },
+  "last_gate": {
+    "recommendation": "PROCEED",
+    "rationale": "All blocking flags are resolved. The plan is concrete and well-scoped with clear phases, specific file paths, and line-level detail. The user has pruned the plan by removing the manual verification gate and the diff-focus criterion, signaling intent to move forward without those checks. Preflight confirms writability and tool availability. No recurring critiques or unresolved blocking flags remain.",
+    "reprompted": false,
+    "signals_assessment": "Weighted score trajectory: 28.5 \u2192 0 after iteration 1 resolution. All 24 flags resolved during critique; zero unresolved blocking flags. Preflight posture clean (project writable, tools available). Escalated debt subsystems (admin-payments, editorial-bar-threading, etc.) are acknowledged as decision context but do not overlap the current plan's scope. Plan delta: user removed the Validation Order section and the diff-focus success criterion from metadata, narrowing verification to automated tests only.",
+    "warnings": [
+      "DEBT-015 (init expression): When DEFAULT_MAX_PUBLISH_PER_RUN is changed to None, the __init__ at line 101-104 (`max(1, int(... or self.DEFAULT_MAX_PUBLISH_PER_RUN))`) will raise TypeError. Rewrite the init expression during Step 5, not just flip the constant.",
+      "DEBT-019 (tool dispatch location): New watchlist tools must be added to the editor's tool dispatcher in live_update_editor.py (~line 445 `unknown_tool` branch), not to the generic `_run_requested_tool` in prompts.py. Plan Step 3.2 points at the wrong location.",
+      "DEBT-017/DEBT-018 (editorial bar threading): `scanned_message_count` does not exist in the repo today. Every call site of `_meets_editorial_bar` and `_message_meets_editorial_bar` must thread the new parameter. Enumerate callers before implementing quiet-hour rule.",
+      "DEBT-023 (extend bump): '6-12h' is a range, not a concrete value. Settle on a single duration (suggest 6h) before implementing `update_live_update_watchlist`.",
+      "DEBT-022 (active cap loophole): 50-row cap only auto-archives oldest `fresh` rows; accumulated `revisit_due`/`last_call` items can push total beyond 50. Consider capping across all states combined.",
+      "DEBT-024 (side-effect on read): Auto-archiving TTL-expired rows inside `get_live_update_watchlist` turns every read into a write and creates a race between concurrent runs. Run the sweep before the select, not inside it."
+    ],
+    "settled_decisions": [
+      "Manual verification gate (scripts/run_live_update_dev.py soak) removed from validation order \u2014 automated tests are the acceptance criterion",
+      "Diff-scope criterion (no unrelated edits check) removed from success criteria \u2014 scope enforcement is handled by the plan's explicit out-of-scope list rather than a post-hoc diff audit",
+      "Migrations go in `.migrations_staging/` per existing repo convention",
+      "`LIVE_UPDATE_MAX_POSTS_PER_RUN` defaults unset (truly unlimited) in prod \u2014 only used as emergency throttle",
+      "`author_is_high_signal` degrades to `False` if the signal isn't available on candidate payloads",
+      "`evidence` jsonb is populated at insert time only, not updated on extend"
+    ],
+    "passed": true,
+    "preflight_results": {
+      "project_dir_exists": true,
+      "project_dir_writable": true,
+      "success_criteria_present": true,
+      "claude_available": true,
+      "codex_available": true
+    },
+    "orchestrator_guidance": "First iteration; follow gate recommendation: PROCEED."
+  }
+}

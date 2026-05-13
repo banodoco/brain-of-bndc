@@ -1,0 +1,310 @@
+{
+  "tasks": [
+    {
+      "id": "T10",
+      "description": "Read user_actions.md. For each before_execute action, programmatically verify completion using bash tools \u2014 grep .env for required keys, query the migrations table, curl the dev server, etc. Reading the file does NOT count as verification; you must run a command. For actions that genuinely cannot be verified mechanically (manual UI checks), explicitly ask the user. If anything is incomplete or unverifiable, mark this task blocked with reason and STOP.",
+      "depends_on": [],
+      "status": "pending",
+      "executor_notes": "",
+      "files_changed": [],
+      "commands_run": [],
+      "evidence_files": [],
+      "reviewer_verdict": ""
+    },
+    {
+      "id": "T1",
+      "description": "Create migration: `.migrations_staging/20260511XXXXXX_live_update_environment_split.sql`. Add `environment text not null default 'prod'` to all 11 tables: `live_update_editor_runs`, `live_update_candidates`, `live_update_decisions`, `live_update_feed_items`, `live_update_checkpoints`, `live_update_editorial_memory`, `live_update_watchlist`, `live_update_duplicate_state`, `live_top_creation_runs`, `live_top_creation_posts`, `live_top_creation_checkpoints`. Drop and recreate composite unique constraints: `live_update_checkpoints` \u2192 `unique(environment, checkpoint_key)`, `live_update_duplicate_state` \u2192 `unique(environment, duplicate_key)`, `live_top_creation_checkpoints` \u2192 `unique(environment, checkpoint_key)`. Add partial unique index on `live_top_creation_posts (environment, duplicate_key) where status = 'posted'`. Match the existing migration naming convention `YYYYMMDDhhmmss_description.sql`. NOTE: resolve the `live_update_runs` vs `live_update_editor_runs` table name discrepancy by checking the actual DB schema before writing the migration.",
+      "depends_on": [
+        "T10"
+      ],
+      "status": "pending",
+      "executor_notes": "",
+      "reviewer_verdict": ""
+    },
+    {
+      "id": "T2",
+      "description": "Storage handler: append `environment: str = 'prod'` as the LAST kwarg on every write and read method for the 11 tables. WRITES: `create_live_update_run` (L652), `update_live_update_run` (L674), `store_live_update_candidate` (L682), `store_live_update_candidates` (L704), `update_live_update_candidate_status` (L712), `store_live_update_decision` (L724), `store_live_update_feed_item` (L738), `update_live_update_feed_item_messages` (L758), `upsert_live_update_duplicate_state` (L825) \u2014 also change `on_conflict` to `'environment,duplicate_key'`, `upsert_live_update_checkpoint` (L858) \u2014 also change `on_conflict` to `'environment,checkpoint_key'`, `upsert_live_update_editorial_memory` (L1653), `upsert_live_update_watchlist` (L1709), `create_live_top_creation_run` (L1763), `update_live_top_creation_run` (L1779), `store_live_top_creation_post` (L1786), `upsert_live_top_creation_checkpoint` (L1848) \u2014 also change `on_conflict` to `'environment,checkpoint_key'`. READS: `get_recent_live_update_feed_items` (L773), `find_live_update_duplicate` (L799), `get_live_update_checkpoint` (L840), `get_live_update_context_for_messages` (L988), `_get_author_live_update_stats` (L1088), `search_live_update_messages` (L1145), `get_live_update_context_for_message_ids` (L1183), `get_live_update_author_profile` (L1220), `get_live_update_message_engagement_context` (L1237), `get_live_update_recent_reaction_events` (L1317), `_live_update_participant_profiles` (L1555), `search_live_update_feed_items` (L1571), `search_live_update_editorial_memory` (L1616), `get_live_update_editorial_memory` (L1694), `get_live_update_watchlist` (L1748), `get_live_top_creation_checkpoint` (L1831). For each: stamp `payload['environment'] = environment` on inserts or add `.eq('environment', environment)` on select/update filters. Add NEW method `get_live_top_creation_post_by_duplicate_key(self, environment: str, duplicate_key: str)` \u2192 returns latest row where `status='posted'` or None. Fix pre-insert lookups (FLAG-005): in `store_live_top_creation_post` (~L1810), `upsert_live_update_editorial_memory` (~L1673), `upsert_live_update_watchlist` (~L1726), add `.eq('environment', environment)` to the existing `(natural_key, guild_id)` lookup query so update-vs-insert decisions never cross environments. Do NOT touch `get_archived_messages_after_checkpoint` (L912).",
+      "depends_on": [
+        "T10",
+        "T1"
+      ],
+      "status": "pending",
+      "executor_notes": "",
+      "reviewer_verdict": ""
+    },
+    {
+      "id": "T3",
+      "description": "DB handler (`src/common/db_handler.py`): append `environment: str = 'prod'` as the LAST kwarg on every wrapper (L254\u2013629) that calls a storage_handler method touched in T2, and forward it through. Add wrapper for the new `get_live_top_creation_post_by_duplicate_key` method. Verify `send_social_picks.py:116` uses keyword args (confirmed: `guild_id=`, `live_channel_id=`, `limit=`) so appending `environment` at the end is safe.",
+      "depends_on": [
+        "T10",
+        "T2"
+      ],
+      "status": "pending",
+      "executor_notes": "",
+      "reviewer_verdict": ""
+    },
+    {
+      "id": "T4",
+      "description": "Convert `LiveUpdateEditor` (`src/features/summarising/live_update_editor.py`): (a) Constructor: add `environment: str = 'prod'`, store `self.environment`. Delete `dry_run` constructor param. Keep `dry_run_lookback_hours`. (b) `run_once` (L110): delete the `if self.dry_run: return await self._run_dry_once(...)` short-circuit. After `get_live_update_checkpoint(...)` at L113, if return is None AND `self.environment == 'dev'`, synthesize an in-memory checkpoint at `now - dry_run_lookback_hours`. (c) Pass `environment=self.environment` as final kwarg on all `self.db.*` calls that touch the 11 tables (the 42 sites from plan). Skip `get_archived_messages_after_checkpoint` calls (L151, L313). (d) Replace ALL remaining `self.dry_run` references with `self.environment == 'dev'`: L951, L1037, L1347 (confirmed 3 remaining after constructor). (e) Delete `_run_dry_once` (L289\u2013427) and `_publish_dry_run_debug_report` (L430\u2013463). Also delete `_dry_candidate_decision` (L416\u2013428) if ONLY used by them \u2014 verify by grep first. (f) Channel resolution: unchanged (`_resolve_live_channel_id` L1344 keeps dev env-var logic, now gated on `self.environment == 'dev'`).",
+      "depends_on": [
+        "T10",
+        "T3"
+      ],
+      "status": "pending",
+      "executor_notes": "",
+      "reviewer_verdict": ""
+    },
+    {
+      "id": "T5",
+      "description": "Convert `LiveTopCreations` (`src/features/summarising/live_top_creations.py`): (a) Constructor: add `environment: str = 'prod'`; delete `dry_run`, `top_gens_channel_id`, and `live_channel_id` constructor params. Keep `dry_run_lookback_hours`. (b) Replace `DEFAULT_MAX_POSTS = 5` (L42) with `MAX_POSTS_SAFETY_BELT = 50`. Delete the `max_posts` constructor param and `self.max_posts` assignment. Replace `pending[: self.max_posts]` at L159 and `candidates[: self.max_posts]` at L238 with `pending[: MAX_POSTS_SAFETY_BELT]` and `candidates[: MAX_POSTS_SAFETY_BELT]`. (c) `run_once` (L82): delete the `if self.dry_run: return await self._run_dry_once(...)` short-circuit. After `get_live_top_creation_checkpoint` at L90, if None AND `environment == 'dev'`, synthesize a checkpoint at `now - dry_run_lookback_hours`. (d) Pass `environment=self.environment` as final kwarg on all 8 `self.db.*` calls (L90, L93, L137, L175, L204, L336, L376). Skip `get_archived_messages_after_checkpoint` (L114). (e) Replace ALL remaining `self.dry_run` refs with `self.environment == 'dev'`: L326 in `_publish_candidate`, L404 in `_resolve_top_channel_id`, L434 in `_resolve_art_channel_id`. (f) Collapse `_resolve_top_channel_id` (L401\u2013429): dev \u2192 `DEV_SUMMARY_CHANNEL_ID` (fallback `DEV_LIVE_UPDATE_CHANNEL_ID`). Prod \u2192 guild `summary_channel_id` only. Stop reading `DEV_TOP_GENS_CHANNEL_ID`, server `top_gens_channel_id`, `TOP_GENS_ID`/`TOP_GENS_CHANNEL_ID` env vars, and `self.live_channel_id` fallback. Remove `self.top_gens_channel_id` checks entirely. (g) Pre-publish dedupe in `_publish_candidate` (~L320, BEFORE `_send_without_mentions`): call `self.db.get_live_top_creation_post_by_duplicate_key(candidate['duplicate_key'], environment=self.environment)`. If exists, return skip result. Thread skip into run-summary counters at L137/175/204. (h) Keep checkpoint `posted_duplicate_keys` as soft optimization. (i) Delete `_run_dry_once` (L215\u2013262).",
+      "depends_on": [
+        "T10",
+        "T3"
+      ],
+      "status": "pending",
+      "executor_notes": "",
+      "reviewer_verdict": ""
+    },
+    {
+      "id": "T6",
+      "description": "Wire callers: (a) `summariser_cog.py` ~L61\u201373: pass `environment='dev' if self.dev_mode else 'prod'` to `LiveUpdateEditor` and `LiveTopCreations`. Remove `dry_run=self.dev_mode`. For `LiveTopCreations`, remove any `top_gens_channel_id`/`live_channel_id` args if present (none should remain after T5 constructor cleanup). (b) `scripts/run_live_update_dev.py` L129\u2013140: drop `dry_run=True`; pass `environment='dev'`. Keep `dry_run_lookback_hours=args.lookback_hours`.",
+      "depends_on": [
+        "T10",
+        "T4",
+        "T5"
+      ],
+      "status": "pending",
+      "executor_notes": "",
+      "reviewer_verdict": ""
+    },
+    {
+      "id": "T7",
+      "description": "Update existing live-update tests for new behavior. (a) `test_live_update_editor_publishing.py`: flip 'Dry run posts without persisting editor state' to 'Dev env posts AND persists with environment=dev'. Delete the debug-report test. Rename 'Dry run prefers dev channel env' to 'Dev env resolves DEV_LIVE_UPDATE_CHANNEL_ID'. (b) `test_live_top_creations.py`: flip 'Dry run posts without persisting state' to dev-persistence. Flip 'Dry run prefers dev channel env' to assert resolution to summary channel (DEV_SUMMARY_CHANNEL_ID), not top-gens. Augment 'Suppresses repeated posts from checkpoint' to cover checkpoint-reset survival via new DB dedupe lookup. (c) `test_live_update_editor_lifecycle.py`, `test_live_storage_wrappers.py`, `test_live_runtime_wiring.py`: thread `environment` through mocks and assert wrapper forwarding. (d) In-memory DB fakes: extend to honor `environment` filtering and composite unique-constraint scoping so isolation is asserted.",
+      "depends_on": [
+        "T10",
+        "T6"
+      ],
+      "status": "pending",
+      "executor_notes": "",
+      "reviewer_verdict": ""
+    },
+    {
+      "id": "T8",
+      "description": "Add two new tests for cross-environment isolation + dedupe: (a) In `test_live_top_creations.py` (or new): run top-creations twice over same archived message (reactions \u2265 5) \u2192 exactly one `store_live_top_creation_post` call and one Discord send; second pass short-circuits via `get_live_top_creation_post_by_duplicate_key`. (b) In `test_live_update_editor_publishing.py` or `test_live_runtime_wiring.py`: seed dev-env rows; run prod editor pass; assert they don't appear in `get_recent_live_update_feed_items`, watchlist, editorial memory, or top-creation dedupe lookup.",
+      "depends_on": [
+        "T10",
+        "T7"
+      ],
+      "status": "pending",
+      "executor_notes": "",
+      "reviewer_verdict": ""
+    },
+    {
+      "id": "T9",
+      "description": "Final audit grep + full test suite. (a) Runtime grep: `grep -n 'self\\.dry_run' src/features/summarising/live_update_editor.py src/features/summarising/live_top_creations.py` must return ZERO results. (b) Storage grep: in `storage_handler.py`, every select/update/upsert against `live_update_*` or `live_top_creation_*` (excluding `live_update_archived_messages`) must include `.eq('environment', environment)` or have `environment` in payload/on_conflict. Confirm zero misses. (c) Channel grep: `grep -rn 'DEV_TOP_GENS_CHANNEL_ID\\|top_gens_channel_id\\|TOP_GENS_ID\\|TOP_GENS_CHANNEL_ID' src/features/summarising/live_top_creations.py` must return nothing (except in comments/docs). (d) Run `pytest tests/test_live_storage_wrappers.py tests/test_live_top_creations.py tests/test_live_update_editor_publishing.py tests/test_live_update_editor_lifecycle.py -x`. (e) Run `pytest tests/test_live_runtime_wiring.py tests/test_live_admin_health.py -x`. (f) Run full `pytest -x`. Fix any failures.",
+      "depends_on": [
+        "T10",
+        "T8"
+      ],
+      "status": "pending",
+      "executor_notes": "",
+      "reviewer_verdict": ""
+    }
+  ],
+  "watch_items": [
+    "FLAG-002 (addressed): Ensure `environment` is ALWAYS appended as the final kwarg on every signature change \u2014 never inserted mid-list. `send_social_picks.py:116` uses keyword args so trailing `environment` is safe, but verify before marking done.",
+    "FLAG-003 (addressed): Runtime grep in T9 MUST confirm zero `self.dry_run` references remain in `live_update_editor.py` and `live_top_creations.py`. Grep after Step T4+T5, not just at final audit.",
+    "FLAG-004 (addressed): The `on_conflict` changes in T2 must match the migration's new composite unique constraints (T1). If they diverge, upserts will fail with constraint violation errors.",
+    "FLAG-005 (addressed): The three manual pre-insert lookups (store_live_top_creation_post ~L1810, upsert_live_update_editorial_memory ~L1673, upsert_live_update_watchlist ~L1726) MUST add `.eq('environment', environment)` to their lookup queries. A dev run without this will silently update a prod row instead of inserting a separate dev row.",
+    "DB table name: `live_update_editor_runs` \u2014 note this table is named `live_update_editor_runs` in the storage code (L654, L680) but listed as `live_update_runs` in the plan schema. Confirm the actual DB table name before migration. Grep for `live_update_editor_runs` vs `live_update_runs` in the schema.",
+    "`update_live_top_creation_run` in top_creations.py passes `guild_id` as positional arg (L137, L175, L204). Verify that appending `environment` kwarg at end of the db_handler signature doesn't shift positional bindings (`run_id`, `updates`, `guild_id=None`, `environment='prod'` \u2014 `guild_id` stays 3rd positional).",
+    "`_dry_candidate_decision` (L416-428) appears only used inside `_run_dry_once`. Verify before deleting alongside T4. If any other caller exists, refactor instead.",
+    "The `_call_db` static method in both editor and top-creations does `method(*args, **kwargs)` \u2014 so passing `environment=...` as a kwarg is safe as long as storage_handler signatures accept it as a kwarg.",
+    "Test in-memory DB fakes must be extended to honor environment filtering AND composite unique constraints. Without this, cross-environment isolation tests won't actually verify the behavior."
+  ],
+  "sense_checks": [
+    {
+      "id": "SC1",
+      "task_id": "T1",
+      "question": "Does the migration drop existing single-column constraints by their actual discovered names (not guessed names)? Did you grep the current schema to find the real constraint names first?",
+      "verdict": ""
+    },
+    {
+      "id": "SC2",
+      "task_id": "T2",
+      "question": "Are ANY reads against `live_update_*` or `live_top_creation_*` tables missing the `.eq('environment', environment)` filter? Did you audit every select call in the file (not just the listed methods)?",
+      "verdict": ""
+    },
+    {
+      "id": "SC3",
+      "task_id": "T2",
+      "question": "Are the three pre-insert lookups (FLAG-005) all scoped by environment? Grep for `.eq('duplicate_key',` and `.eq('memory_key',` and `.eq('watch_key',` and verify each is preceded by or accompanied by `.eq('environment', environment)`.",
+      "verdict": ""
+    },
+    {
+      "id": "SC4",
+      "task_id": "T3",
+      "question": "Does `send_social_picks.py:116` still compile and call correctly after the `environment` kwarg append? The call uses keyword args (`guild_id=`, `live_channel_id=`, `limit=`) so trailing `environment` should be fine \u2014 but did you verify?",
+      "verdict": ""
+    },
+    {
+      "id": "SC5",
+      "task_id": "T4",
+      "question": "After deleting `_run_dry_once`, do any remaining methods in `live_update_editor.py` still call `_dry_candidate_decision`? Grep the file to confirm zero references before deleting it.",
+      "verdict": ""
+    },
+    {
+      "id": "SC6",
+      "task_id": "T4",
+      "question": "Are ALL 42 `self.db.*` calls passing `environment=self.environment`? Did you audit every call site (including those inside helper methods like `_record_skipped_run`, `_record_post_duplicate`, `_publish_candidate`, `_write_checkpoint_after_messages`, etc.)?",
+      "verdict": ""
+    },
+    {
+      "id": "SC7",
+      "task_id": "T5",
+      "question": "Does `_resolve_top_channel_id` now ONLY resolve to the summary channel? Confirm zero reads of `DEV_TOP_GENS_CHANNEL_ID`, `top_gens_channel_id` (server), `TOP_GENS_ID`/`TOP_GENS_CHANNEL_ID` env vars, or `self.live_channel_id` fallback.",
+      "verdict": ""
+    },
+    {
+      "id": "SC8",
+      "task_id": "T5",
+      "question": "Does `_publish_candidate` call `get_live_top_creation_post_by_duplicate_key` BEFORE the Discord send (`_send_without_mentions`)? And does the skip result thread into the run-summary counters at L137/175/204?",
+      "verdict": ""
+    },
+    {
+      "id": "SC9",
+      "task_id": "T6",
+      "question": "Do callers to `LiveUpdateEditor` and `LiveTopCreations` anywhere else in the repo (besides cog and dev script) still pass `dry_run`? Grep for `LiveUpdateEditor(` and `LiveTopCreations(` across the whole repo.",
+      "verdict": ""
+    },
+    {
+      "id": "SC10",
+      "task_id": "T7",
+      "question": "Did you extend the in-memory DB fakes to honor `environment` filtering AND composite unique constraints? Without this, the tests won't actually verify cross-environment isolation.",
+      "verdict": ""
+    },
+    {
+      "id": "SC11",
+      "task_id": "T8",
+      "question": "Does the dedupe test verify exactly ONE Discord send AND exactly ONE DB row? Both assertions must be present (not just one or the other).",
+      "verdict": ""
+    },
+    {
+      "id": "SC12",
+      "task_id": "T9",
+      "question": "Did `grep -n 'self\\.dry_run' src/features/summarising/live_*.py` return ZERO results? Run it and paste the output.",
+      "verdict": ""
+    },
+    {
+      "id": "SC13",
+      "task_id": "T10",
+      "question": "Were all before_execute user_actions programmatically verified before execution proceeded?",
+      "executor_note": "",
+      "verdict": ""
+    }
+  ],
+  "user_actions": [
+    {
+      "id": "U1",
+      "description": "Run the migration SQL (from T1) against the Supabase database. This is a schema change requiring human execution against the production database.",
+      "phase": "after_execute",
+      "blocks_task_ids": [
+        "T2",
+        "T3",
+        "T4",
+        "T5",
+        "T6",
+        "T7",
+        "T8",
+        "T9"
+      ],
+      "rationale": "The migration must be applied to the live DB for tests and runtime to work. However, T2-T9 can proceed against a local Supabase instance or test environment. The final validation (criterion 16 in plan: `scripts/run_live_update_dev.py --once` against real Supabase) requires the migration to be live."
+    },
+    {
+      "id": "U2",
+      "description": "Set DEV_SUMMARY_CHANNEL_ID and DEV_LIVE_UPDATE_CHANNEL_ID env vars if not already present. DEV_TOP_GENS_CHANNEL_ID is no longer needed after this change.",
+      "phase": "before_execute",
+      "blocks_task_ids": [],
+      "rationale": "The dev runner script reads these env vars for channel resolution. They should exist before running the dev script."
+    },
+    {
+      "id": "U3",
+      "description": "After all changes deployed: run `scripts/run_live_update_dev.py --once` against the real Supabase to confirm dev rows are tagged `environment='dev'` and a subsequent prod-mode pass does not surface them.",
+      "phase": "after_execute",
+      "blocks_task_ids": [],
+      "rationale": "This is the final acceptance criterion for the features. Requires the migration to be live on the real DB."
+    }
+  ],
+  "meta_commentary": "CRITICAL EXECUTION GUIDANCE:\n\n1. **ORDER MATTERS**: T1 (migration) MUST come first because the composite unique constraints must exist before the storage layer's `on_conflict` changes in T2. The migration drops old single-column constraints and creates new composite ones. If you run T2 before T1, upserts will fail.\n\n2. **TABLE NAME DISCREPANCY**: The plan lists `live_update_runs` but the storage handler code uses the table name `live_update_editor_runs` (lines 654, 680). You MUST resolve this: grep the actual Supabase schema or existing code to confirm the real table name. The migration and storage code must agree.\n\n3. **APPEND-ONLY KWARG RULE**: NEVER insert `environment` mid-signature. Always append it as the LAST parameter. This preserves compatibility with all positional and keyword callers (including `send_social_picks.py:116` which uses keyword args, and `update_live_top_creation_run` in top_creations.py which passes `guild_id` as 3rd positional).\n\n4. **ON_CONFLICT MATCHING**: The `on_conflict` strings in T2 must EXACTLY match the column names in the unique constraint from T1. Use `'environment,checkpoint_key'` and `'environment,duplicate_key'` (lowercase, comma+space). Supabase/PostgREST may be sensitive to formatting.\n\n5. **FLAG-005 TRIPLE-CHECK**: The three manual pre-insert lookups are the most dangerous oversight. If `store_live_top_creation_post`, `upsert_live_update_editorial_memory`, or `upsert_live_update_watchlist` skip the environment filter on their lookup query, a dev run WILL mutate a prod row. After editing these three methods, grep for the `.eq()` calls to verify environment is always scoped.\n\n6. **TEST FAKES**: The in-memory DB fakes used by tests must be extended. If they don't honor environment filtering and composite unique constraints, the tests will pass but be testing nothing meaningful. This is likely the most time-consuming sub-task in T7.\n\n7. **T4+T5 SCOPE**: Steps T4 and T5 are the largest and most complex. They should be done carefully, one at a time. T4 (editor) and T5 (top-creations) can be done in parallel by different people if needed, but they share no code so ordering between them doesn't matter.\n\n8. **DELETION VERIFICATION**: Before deleting `_dry_candidate_decision` in T4, grep for all callers. Before deleting `_run_dry_once` in T5, grep for all callers. Don't orphan helpers that other code uses.\n\n9. **CHANNEL COLLAPSE (T5f)**: `_resolve_top_channel_id` must become summary-channel-only. The function currently has many fallback paths. Strip them all: dev\u2192DEV_SUMMARY_CHANNEL_ID(\u2192DEV_LIVE_UPDATE_CHANNEL_ID fallback), prod\u2192guild.summary_channel_id only. No more top_gens_channel_id anywhere.\n\n10. **T9 GREP GATES are NON-NEGOTIABLE**: The runtime grep (zero `self.dry_run`) and storage grep (every select scoped) are load-bearing correctness checks. If either fails, the plan is incomplete.",
+  "validation": {
+    "plan_steps_covered": [
+      {
+        "plan_step_summary": "Step 1: Schema migration \u2014 add environment columns, drop+recreate composite unique constraints, partial unique index on live_top_creation_posts",
+        "finalize_item_ids": [
+          "T1",
+          "U1"
+        ]
+      },
+      {
+        "plan_step_summary": "Step 2: Stamp/filter environment everywhere in storage_handler.py \u2014 append kwarg to all write/read methods, fix on-conflict keys, fix pre-insert lookup scoping, add get_live_top_creation_post_by_duplicate_key",
+        "finalize_item_ids": [
+          "T2"
+        ]
+      },
+      {
+        "plan_step_summary": "Step 3: Mirror in db_handler.py \u2014 append environment kwarg on every wrapper, add wrapper for new dedupe lookup method",
+        "finalize_item_ids": [
+          "T3"
+        ]
+      },
+      {
+        "plan_step_summary": "Step 4: Convert LiveUpdateEditor to environment-aware \u2014 delete dry_run, fold dev checkpoint seeding into normal path, pass environment on all db calls, replace all self.dry_run refs, delete dry-run helpers",
+        "finalize_item_ids": [
+          "T4"
+        ]
+      },
+      {
+        "plan_step_summary": "Step 5: Convert LiveTopCreations \u2014 delete dry_run+channel params, collapse channel resolution to summary channel, pre-publish dedupe via DB lookup, remove max_posts cap, replace all self.dry_run refs",
+        "finalize_item_ids": [
+          "T5"
+        ]
+      },
+      {
+        "plan_step_summary": "Step 6: Wire environment through callers \u2014 summariser_cog.py and scripts/run_live_update_dev.py",
+        "finalize_item_ids": [
+          "T6"
+        ]
+      },
+      {
+        "plan_step_summary": "Step 7: Update existing live-update tests \u2014 flip from dry-run-skips-persistence to dev-persists-with-environment, extend in-memory DB fakes",
+        "finalize_item_ids": [
+          "T7"
+        ]
+      },
+      {
+        "plan_step_summary": "Step 8: Add cross-environment isolation + dedupe tests",
+        "finalize_item_ids": [
+          "T8"
+        ]
+      },
+      {
+        "plan_step_summary": "Step 9: Audit pass + run suite \u2014 storage grep, runtime grep, pytest full suite",
+        "finalize_item_ids": [
+          "T9"
+        ]
+      },
+      {
+        "plan_step_summary": "Verify before_execute user_actions",
+        "finalize_item_ids": [
+          "T10"
+        ]
+      }
+    ],
+    "orphan_tasks": [],
+    "completeness_notes": "All 9 plan steps are covered by tasks T1\u2013T9. User actions U1 (migration execution), U2 (env vars), and U3 (manual dev-script smoke test) cover the human-only operational steps. The plan's validation order (tests, then full suite, then greps) is folded into T9. FLAG-001 was rejected (the .migrations_staging/ directory exists). FLAGS 2\u20135 are addressed in the plan and surfaced as watch_items.",
+    "coverage_complete": true
+  },
+  "baseline_test_failures": [],
+  "baseline_test_command": "pytest --tb=no -q --no-header",
+  "baseline_test_note": "Run before beginning any edits to establish which tests (if any) are already failing. All failures after the change should be attributable to the change."
+}

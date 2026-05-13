@@ -1,0 +1,43 @@
+{
+  "receipt_id": "0608a402-fd22-4015-af43-a83650a62bda",
+  "plan_id": "implement-the-watchlist-20260512-1809",
+  "phase": "critique",
+  "iteration": 1,
+  "attempt": 1,
+  "timestamp_utc": "2026-05-12T16:35:51.852713+00:00",
+  "profile_name": "thoughtful",
+  "agent": "claude",
+  "agent_mode": "persistent",
+  "model_configured": "claude:low",
+  "model_actual": null,
+  "session_id": "2085f707-56b1-4e71-9fde-9f2d75c6c63b",
+  "megaplan_version": "0.8.1",
+  "schema_version": 1,
+  "prompt_hash_raw": "752245b91108316c9b1f1128bce51891dc39738c60cf37ae47a29a6a43f88beb",
+  "prompt_hash_canonical": "266e9d3af334e7d30686b01ed2578f96f762fc0f37c7d503bfd142a78befc9cb",
+  "canonicalization_version": 1,
+  "upstream_artifact_hashes": [
+    "sha256:612ea3b3263a711e261c3387c67a85ea9d44f25cb39f97a416a4346bd75cb485"
+  ],
+  "cost_usd": 0.5588942499999999,
+  "duration_ms": 18867,
+  "prompt_tokens": 187031,
+  "completion_tokens": 1285,
+  "verdict": null,
+  "metrics": {
+    "findings_per_check": {
+      "issue_hints": 2,
+      "correctness": 1,
+      "scope": 1,
+      "all_locations": 1,
+      "callers": 1
+    },
+    "severity_distribution": {
+      "unknown": 6
+    },
+    "clean_checks_count": 0,
+    "flagged_checks_count": 5,
+    "rubber_stamp_ratio": 0.0
+  },
+  "scope_drift_severity": null
+}

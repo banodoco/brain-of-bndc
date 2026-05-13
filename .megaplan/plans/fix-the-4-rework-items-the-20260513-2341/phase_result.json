@@ -1,0 +1,9 @@
+{
+  "phase": "finalize",
+  "invocation_id": "385bed8511794677",
+  "exit_kind": "internal_error",
+  "blocked_tasks": [],
+  "deviations": [],
+  "artifacts_written": [],
+  "cli_provenance": {}
+}

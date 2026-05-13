@@ -1,0 +1,44 @@
+{
+  "output": "T5 executed successfully. All deliverables completed: (a) watchlist_add and watchlist_update tool definitions added to available_tools array with correct schemas; (b) watchlist rendering bug fixed \u2014 replaced broken watch_type/description with schema-correct subject_type/notes, extracted into new _render_watchlist static method producing state-grouped structure {_explanation, fresh, revisit_due, last_call} with fields {watch_key, title, origin_reason, age_hours, source_message_ids, subject_type, channel_id, notes}; (c) build_user_prompt signature updated from List[Dict] to Dict to match T3 grouped dict return type. All 36 tests pass (25 prompt + 11 lifecycle/publishing). Throwaway verification script confirmed no watch_type/description in output, state-grouped structure correct, age_hours computed, evidence fallback works, non-dict inputs handled gracefully.",
+  "files_changed": [
+    "src/features/summarising/live_update_prompts.py"
+  ],
+  "commands_run": [
+    "pytest tests/test_live_update_prompts.py -x -v --tb=short (25 passed)",
+    "pytest tests/test_live_update_editor_lifecycle.py tests/test_live_update_editor_publishing.py -x -v --tb=short (11 passed)",
+    "pytest tests/test_live_update_prompts.py tests/test_live_update_editor_lifecycle.py tests/test_live_update_editor_publishing.py -x -v --tb=short (36 passed)",
+    "python _verify_t5_watchlist_rendering.py (all checks passed, then deleted)"
+  ],
+  "deviations": [
+    "Advisory quality: code changes lacked test updates: src/features/summarising/live_update_prompts.py.",
+    "Advisory audit finding: Sense check SC6 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC12 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC13 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC16 is missing an executor acknowledgment.",
+    "Advisory audit finding: Tasks left pending after execute (executor never started them): T6, T12, T13, T16"
+  ],
+  "task_updates": [
+    {
+      "id": "T5",
+      "status": "done",
+      "executor_notes": "(a) Added watchlist_add and watchlist_update tool definitions to available_tools array at lines 559-579 with correct schemas matching the brief (watch_key, title, reason, source_message_ids, channel_id, subject_type for add; watch_key, action, notes for update). (b) Fixed watchlist rendering block: replaced broken watch_type/description fields with schema-correct subject_type/notes. Extracted rendering into new _render_watchlist static method that handles state-grouped structure {_explanation, fresh, revisit_due, last_call} with fields {watch_key, title, origin_reason, age_hours, source_message_ids, subject_type, channel_id, notes}. Computes age_hours inline from created_at, falls back to evidence.source_message_ids when source_message_ids is absent, handles non-dict/None gracefully. (c) Updated build_user_prompt signature from List[Dict[str, Any]] to Dict[str, Any] to match T3's grouped dict return type. Throwaway verification script confirmed: no watch_type/description in output, state-grouped structure correct, age_hours computed, evidence fallback works, empty/non-dict inputs handled. All 36 tests across 3 test files pass.",
+      "reviewer_verdict": "",
+      "kind": "code",
+      "files_changed": [
+        "src/features/summarising/live_update_prompts.py"
+      ],
+      "task_id": "T5",
+      "commands_run": []
+    }
+  ],
+  "sense_check_acknowledgments": [
+    {
+      "id": "SC5",
+      "task_id": "T5",
+      "question": "Do watchlist_add/watchlist_update appear in available_tools with correct schemas, and does the watchlist rendering use subject_type/notes with state-grouped structure?",
+      "verdict": "CONFIRMED: watchlist_add tool at line 560 with args {watch_key, title, reason, source_message_ids, channel_id, subject_type}. watchlist_update tool at line 572 with args {watch_key, action: 'publish_now'|'extend'|'discard', notes}. Watchlist rendering at line 462 calls _render_watchlist static method (line 950) which produces state-grouped dict {_explanation, fresh, revisit_due, last_call} with schema-correct fields {watch_key, title, origin_reason, age_hours, source_message_ids, subject_type, channel_id, notes}. No watch_type or description fields anywhere in output.",
+      "executor_note": "Verified by: (1) code review of final state; (2) all 36 tests pass; (3) throwaway verification script confirmed zero watch_type/description fields, correct state-grouped structure, age_hours computation, and evidence fallback.",
+      "sense_check_id": "SC5"
+    }
+  ]
+}
