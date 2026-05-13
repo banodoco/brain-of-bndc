@@ -478,6 +478,22 @@ class DatabaseHandler:
             return None
         return self._run_async_in_thread(self.storage_handler.store_topic_transition(transition, environment=environment))
 
+    def get_topic_transitions_by_tool_call_ids(
+        self,
+        run_id: str,
+        tool_call_ids: List[str],
+        environment: str = 'prod',
+    ) -> Dict[str, Dict[str, Any]]:
+        if not self.storage_handler:
+            return {}
+        return self._run_async_in_thread(
+            self.storage_handler.get_topic_transitions_by_tool_call_ids(
+                run_id,
+                tool_call_ids,
+                environment=environment,
+            )
+        )
+
     def store_editorial_observation(self, observation: Dict[str, Any], environment: str = 'prod') -> Optional[Dict[str, Any]]:
         guild_id = observation.get('guild_id')
         if not self._live_write_allowed(guild_id) or not self.storage_handler:

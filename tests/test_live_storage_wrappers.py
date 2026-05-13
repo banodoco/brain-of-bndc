@@ -209,6 +209,10 @@ def test_db_handler_topic_editor_wrappers_are_reachable_through_storage_handler(
             calls.append(("transition", transition, environment))
             return {"transition_id": "transition-1"}
 
+        async def get_topic_transitions_by_tool_call_ids(self, run_id, tool_call_ids, environment="prod"):
+            calls.append(("get-transitions", run_id, tool_call_ids, environment))
+            return {"tool-1": {"tool_call_id": "tool-1", "action": "post_simple"}}
+
         async def store_editorial_observation(self, observation, environment="prod"):
             calls.append(("observation", observation, environment))
             return {"observation_id": "observation-1"}
@@ -245,6 +249,9 @@ def test_db_handler_topic_editor_wrappers_are_reachable_through_storage_handler(
     assert db.add_topic_source({"guild_id": 1, "topic_id": "topic-1", "message_id": 100}) == {"topic_source_id": "source-1"}
     assert db.upsert_topic_alias({"guild_id": 1, "topic_id": "topic-1", "alias_key": "demo"}) == {"alias_id": "alias-1"}
     assert db.store_topic_transition({"guild_id": 1, "run_id": "run-1", "action": "post_simple"}) == {"transition_id": "transition-1"}
+    assert db.get_topic_transitions_by_tool_call_ids("run-1", ["tool-1"]) == {
+        "tool-1": {"tool_call_id": "tool-1", "action": "post_simple"}
+    }
     assert db.store_editorial_observation({"guild_id": 1, "run_id": "run-1", "reason": "near miss"}) == {"observation_id": "observation-1"}
     assert db.upsert_topic_editor_checkpoint({"guild_id": 1, "checkpoint_key": "live", "channel_id": 20}) == {"checkpoint_key": "live"}
     assert db.mirror_live_checkpoint_to_topic_editor("live") == {"checkpoint_key": "live"}
@@ -257,6 +264,7 @@ def test_db_handler_topic_editor_wrappers_are_reachable_through_storage_handler(
         "source",
         "alias",
         "transition",
+        "get-transitions",
         "observation",
         "checkpoint",
         "get-live-checkpoint",
