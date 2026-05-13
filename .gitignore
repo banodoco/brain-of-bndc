@@ -155,3 +155,4 @@ logs.*.json
 results/
 
 .megaplan/plans/*/execution_trace.jsonl
+.codex-worktrees/
