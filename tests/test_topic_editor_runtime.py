@@ -317,6 +317,74 @@ def test_topic_editor_dispatch_allows_collision_override_and_dedupes_sources():
     assert db.transitions[1][0]["payload"]["overridden_topic_id"] == "topic-existing"
 
 
+def test_topic_editor_dispatch_allows_same_tool_id_collision_override_retry():
+    db = FakeDB()
+    db.active_topics = [{
+        "topic_id": "topic-existing",
+        "canonical_key": "alice-lora-test",
+        "headline": "Alice ships a new LoRA test",
+        "state": "watching",
+        "source_authors": ["alice"],
+    }]
+    editor = TopicEditor(
+        db_handler=db,
+        llm_client=FakeClaude(SimpleNamespace(content=[], usage=None)),
+        guild_id=1,
+        live_channel_id=2,
+        environment="prod",
+    )
+    context = {
+        "run_id": "run-1",
+        "guild_id": 1,
+        "live_channel_id": 2,
+        "messages": [{
+            "message_id": 100,
+            "guild_id": 1,
+            "channel_id": 10,
+            "author_id": 42,
+            "content": "Alice update",
+            "created_at": "2026-05-13T10:00:00Z",
+            "author_context_snapshot": {"username": "alice"},
+        }],
+        "active_topics": db.active_topics,
+        "aliases": [],
+        "seen_tool_call_ids": set(),
+        "observation_count": 0,
+        "created_topics": [],
+        "finalize": None,
+    }
+    first_call = {
+        "id": "tool-collision",
+        "name": "watch_topic",
+        "input": {
+            "proposed_key": "Alice LoRA Test v2",
+            "headline": "Alice ships a new LoRA test update",
+            "why_interesting": "Still developing.",
+            "revisit_when": "tomorrow",
+            "source_message_ids": ["100"],
+        },
+    }
+    retry_call = {
+        "id": "tool-collision",
+        "name": "watch_topic",
+        "input": {
+            **first_call["input"],
+            "why_interesting": "Different enough to track separately.",
+            "override_collisions": [{"topic_id": "topic-existing", "reason": "new artifact"}],
+        },
+    }
+
+    rejected = editor._dispatch_tool_call(first_call, context)
+    accepted = editor._dispatch_tool_call(retry_call, context)
+
+    assert rejected["outcome"] == "rejected_watch"
+    assert accepted["outcome"] == "accepted"
+    assert [transition[0]["action"] for transition in db.transitions] == ["rejected_watch", "watch", "override"]
+    assert {transition[0]["tool_call_id"] for transition in db.transitions} == {"tool-collision"}
+    assert db.transitions[0][0]["payload"]["collisions"][0]["topic_id"] == "topic-existing"
+    assert db.transitions[2][0]["payload"]["overridden_topic_id"] == "topic-existing"
+
+
 def test_topic_editor_dispatch_logs_invalid_update_and_discard_under_base_actions():
     blocks = [
         SimpleNamespace(

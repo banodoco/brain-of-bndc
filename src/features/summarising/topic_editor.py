@@ -772,6 +772,12 @@ class TopicEditor:
         )
         for row in override_rows:
             self._store_transition(row)
+        tool_call_id = call.get("id")
+        if tool_call_id:
+            key = (str(context.get("run_id")), str(tool_call_id))
+            context.setdefault("accepted_tool_call_ids", set()).add(key)
+            if args.get("override_collisions"):
+                context.setdefault("override_retry_consumed_tool_call_ids", set()).add(key)
         return {
             "tool_call_id": call["id"],
             "tool": call["name"],
@@ -865,6 +871,10 @@ class TopicEditor:
         extra: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         args = call["input"]
+        if reason == "topic_collision" and call.get("id"):
+            context.setdefault("collision_rejected_tool_call_ids", set()).add(
+                (str(context.get("run_id")), str(call["id"]))
+            )
         self._store_transition(build_rejected_transition(
             run_id=context["run_id"],
             environment=self.environment,
@@ -901,9 +911,29 @@ class TopicEditor:
         key = (str(context.get("run_id")), str(tool_call_id))
         seen = context.setdefault("seen_tool_call_ids", set())
         if key in seen:
+            if self._is_collision_override_retry(call, context, key):
+                return False
             return True
         seen.add(key)
         return False
+
+    def _is_collision_override_retry(
+        self,
+        call: Dict[str, Any],
+        context: Dict[str, Any],
+        key: tuple[str, str],
+    ) -> bool:
+        if call.get("name") not in {"post_simple_topic", "post_sectioned_topic", "watch_topic"}:
+            return False
+        if not (call.get("input") or {}).get("override_collisions"):
+            return False
+        if key not in context.get("collision_rejected_tool_call_ids", set()):
+            return False
+        if key in context.get("accepted_tool_call_ids", set()):
+            return False
+        if key in context.get("override_retry_consumed_tool_call_ids", set()):
+            return False
+        return True
 
     def _topics_with_aliases(
         self,
