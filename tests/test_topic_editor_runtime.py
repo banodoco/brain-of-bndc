@@ -1,8 +1,10 @@
 import asyncio
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 
+from src.common.storage_handler import StorageHandler
 import src.features.summarising.topic_editor as topic_editor_module
 from src.features.summarising.topic_editor import (
     TopicEditor,
@@ -198,6 +200,110 @@ def test_topic_editor_run_once_skips_when_active_lease_is_not_acquired():
     assert db.failed == []
     assert db.transitions == []
     assert db.checkpoints == []
+
+
+def test_acquire_topic_editor_run_expires_stale_running_lease(monkeypatch):
+    monkeypatch.setenv("TOPIC_EDITOR_LEASE_TIMEOUT_MINUTES", "30")
+
+    stale_started_at = (datetime.utcnow() - timedelta(minutes=45)).isoformat()
+    rows = [{
+        "run_id": "stale-run",
+        "environment": "prod",
+        "guild_id": 1,
+        "live_channel_id": 2,
+        "status": "running",
+        "started_at": stale_started_at,
+        "metadata": {"owner": "crashed-runner"},
+    }]
+
+    class Result:
+        def __init__(self, data):
+            self.data = data
+
+    class Query:
+        def __init__(self, table_name, operation=None, payload=None):
+            self.table_name = table_name
+            self.operation = operation
+            self.payload = payload
+            self.filters = []
+            self.limit_count = None
+
+        def select(self, *_args, **_kwargs):
+            self.operation = "select"
+            return self
+
+        def insert(self, payload):
+            self.operation = "insert"
+            self.payload = payload
+            return self
+
+        def update(self, payload):
+            self.operation = "update"
+            self.payload = payload
+            return self
+
+        def eq(self, column, value):
+            self.filters.append(("eq", column, value))
+            return self
+
+        def lt(self, column, value):
+            self.filters.append(("lt", column, value))
+            return self
+
+        def limit(self, count):
+            self.limit_count = count
+            return self
+
+        def execute(self):
+            if self.operation == "insert":
+                inserted = dict(self.payload)
+                inserted.setdefault("started_at", datetime.utcnow().isoformat())
+                rows.append(inserted)
+                return Result([inserted])
+
+            matched = [row for row in rows if self._matches(row)]
+            if self.limit_count is not None:
+                matched = matched[:self.limit_count]
+
+            if self.operation == "update":
+                for row in matched:
+                    row.update(self.payload)
+                return Result([dict(row) for row in matched])
+
+            return Result([dict(row) for row in matched])
+
+        def _matches(self, row):
+            for op, column, value in self.filters:
+                if op == "eq" and row.get(column) != value:
+                    return False
+                if op == "lt" and not (str(row.get(column)) < value):
+                    return False
+            return True
+
+    class FakeSupabase:
+        def table(self, table_name):
+            assert table_name == "topic_editor_runs"
+            return Query(table_name)
+
+    storage = StorageHandler.__new__(StorageHandler)
+    storage.supabase_client = FakeSupabase()
+
+    acquired = asyncio.run(storage.acquire_topic_editor_run({
+        "guild_id": 1,
+        "live_channel_id": 2,
+        "trigger": "scheduled",
+    }, environment="prod"))
+
+    assert acquired is not None
+    assert acquired["status"] == "running"
+    assert acquired["run_id"] != "stale-run"
+
+    stale_row = rows[0]
+    assert stale_row["status"] == "expired"
+    assert stale_row["metadata"]["owner"] == "crashed-runner"
+    assert stale_row["metadata"]["expired_by"] == acquired["run_id"]
+    assert stale_row["metadata"]["expired_at"]
+    assert rows[1]["run_id"] == acquired["run_id"]
 
 
 def test_topic_editor_dispatch_rejects_simple_collisions_and_replays_without_side_effects():

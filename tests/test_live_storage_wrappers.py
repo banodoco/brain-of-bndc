@@ -6,7 +6,28 @@ from src.common.storage_handler import StorageHandler
 
 def make_storage(calls):
     storage = StorageHandler.__new__(StorageHandler)
-    storage.supabase_client = object()
+
+    class NoStaleLeaseQuery:
+        def select(self, *_args, **_kwargs):
+            return self
+
+        def eq(self, *_args, **_kwargs):
+            return self
+
+        def lt(self, *_args, **_kwargs):
+            return self
+
+        def limit(self, *_args, **_kwargs):
+            return self
+
+        def execute(self):
+            return type("Result", (), {"data": []})()
+
+    class FakeSupabase:
+        def table(self, _table):
+            return NoStaleLeaseQuery()
+
+    storage.supabase_client = FakeSupabase()
 
     async def insert_live_row(table, payload):
         calls.append(("insert", table, payload))
