@@ -19,7 +19,32 @@ class FakeMessages:
 
     async def create(self, **kwargs):
         self.calls.append(kwargs)
+        if len(self.calls) > 1 and not self._has_finalize(self.response):
+            return SimpleNamespace(
+                content=[
+                    SimpleNamespace(
+                        type="tool_use",
+                        id="tool-finalize",
+                        name="finalize_run",
+                        input={
+                            "overall_reasoning": (
+                                "The scripted test response has already exercised the intended tool path. "
+                                "This finalizes the run so runtime tests do not depend on the max-turn guard."
+                            )
+                        },
+                    )
+                ],
+                usage=SimpleNamespace(input_tokens=0, output_tokens=0),
+            )
         return self.response
+
+    def _has_finalize(self, response):
+        for block in getattr(response, "content", []) or []:
+            block_type = getattr(block, "type", None) or (block.get("type") if isinstance(block, dict) else None)
+            name = getattr(block, "name", None) or (block.get("name") if isinstance(block, dict) else None)
+            if block_type == "tool_use" and name == "finalize_run":
+                return True
+        return False
 
 
 class FakeClaude:
@@ -39,6 +64,9 @@ class FakeDB:
         self.topic_updates = []
         self.active_topics = []
         self.topic_alias_rows = []
+        self.author_profiles = {}
+        self.message_context_rows = []
+        self.read_calls = []
 
     def get_topic_editor_checkpoint(self, checkpoint_key, environment="prod"):
         return {
@@ -73,6 +101,51 @@ class FakeDB:
 
     def get_topic_aliases(self, guild_id=None, environment="prod"):
         return self.topic_alias_rows
+
+    def search_topic_editor_topics(self, query, guild_id=None, environment="prod", state_filter=None, hours_back=72, limit=10):
+        self.read_calls.append(("search_topic_editor_topics", query, guild_id, environment, state_filter, hours_back, limit))
+        needle = str(query or "").lower()
+        aliases_by_topic = {}
+        for alias in self.topic_alias_rows:
+            if alias.get("environment") not in {None, environment}:
+                continue
+            if guild_id is not None and alias.get("guild_id") != guild_id:
+                continue
+            aliases_by_topic.setdefault(str(alias.get("topic_id")), []).append(alias.get("alias_key"))
+        rows = []
+        for topic in self.active_topics:
+            if topic.get("environment") not in {None, environment}:
+                continue
+            if guild_id is not None and topic.get("guild_id") != guild_id:
+                continue
+            if state_filter and topic.get("state") not in state_filter:
+                continue
+            aliases = aliases_by_topic.get(str(topic.get("topic_id")), [])
+            haystack = " ".join([
+                str(topic.get("headline") or ""),
+                str(topic.get("canonical_key") or ""),
+                " ".join(str(alias or "") for alias in aliases),
+            ]).lower()
+            if needle and needle not in haystack:
+                continue
+            rows.append({
+                "topic_id": topic.get("topic_id"),
+                "canonical_key": topic.get("canonical_key"),
+                "headline": topic.get("headline"),
+                "state": topic.get("state"),
+                "aliases": aliases,
+                "created_at": topic.get("created_at"),
+            })
+        return rows[:limit]
+
+    def get_topic_editor_author_profile(self, author_id, guild_id=None, environment="prod"):
+        self.read_calls.append(("get_topic_editor_author_profile", author_id, guild_id, environment))
+        return self.author_profiles.get(int(author_id), {}) if author_id is not None else {}
+
+    def get_topic_editor_message_context(self, message_ids, guild_id=None, environment="prod", limit=10):
+        self.read_calls.append(("get_topic_editor_message_context", message_ids, guild_id, environment, limit))
+        wanted = {str(message_id) for message_id in message_ids or []}
+        return [row for row in self.message_context_rows if str(row.get("message_id")) in wanted][:limit]
 
     def upsert_topic(self, topic, environment="prod"):
         self.topics.append((topic, environment))
@@ -152,7 +225,7 @@ def test_topic_editor_run_once_uses_native_tools_and_topic_run_lifecycle(monkeyp
     assert result["status"] == "completed"
     assert db.acquired[0]["publishing_enabled"] is False
     assert db.completed[0][1]["source_message_count"] == 1
-    assert db.completed[0][1]["tool_call_count"] == 1
+    assert db.completed[0][1]["tool_call_count"] == 2
     assert db.completed[0][1]["input_tokens"] == 123
     assert db.completed[0][1]["cost_usd"] == 0.001044
     assert db.checkpoints[0][0]["last_message_id"] == 100
@@ -164,7 +237,7 @@ def test_topic_editor_run_once_uses_native_tools_and_topic_run_lifecycle(monkeyp
     assert db.topic_updates[0][1]["publication_status"] == "suppressed"
     assert result["publish_results"][0]["status"] == "suppressed"
     assert result["trace_messages"]
-    assert "sources=1 tools=1" in result["trace_messages"][0]
+    assert "sources=1 tools=2" in result["trace_messages"][0]
     assert "publishing=OFF" in result["trace_messages"][0]
     assert "cost_usd=0.001044" in result["trace_messages"][0]
     assert "would-publish:" in result["trace_messages"][0]
@@ -173,7 +246,7 @@ def test_topic_editor_run_once_uses_native_tools_and_topic_run_lifecycle(monkeyp
 
     llm_call = editor.llm_client.client.messages.calls[0]
     assert llm_call["tools"] == TOPIC_EDITOR_TOOLS
-    assert len(llm_call["tools"]) == 10
+    assert len(llm_call["tools"]) == 11
 
 
 def test_topic_editor_run_once_skips_when_active_lease_is_not_acquired():
@@ -275,7 +348,7 @@ def test_topic_editor_dispatch_rejects_simple_collisions_and_replays_without_sid
 
     result = asyncio.run(editor.run_once("manual"))
 
-    assert [transition[0]["action"] for transition in db.transitions] == ["rejected_post_simple", "rejected_watch"]
+    assert [transition[0]["action"] for transition in db.transitions] == ["rejected_post_simple", "rejected_watch", "finalize_run"]
     assert db.transitions[0][0]["payload"]["outcome"] == "tool_error"
     assert db.transitions[0][0]["payload"]["source_message_ids"] == ["100", "101"]
     assert db.transitions[1][0]["payload"]["collisions"][0]["topic_id"] == "topic-existing"
@@ -313,7 +386,7 @@ def test_topic_editor_dispatch_allows_collision_override_and_dedupes_sources():
 
     assert result["outcomes"][0]["outcome"] == "accepted"
     assert [source[0]["message_id"] for source in db.sources] == ["100"]
-    assert [transition[0]["action"] for transition in db.transitions] == ["watch", "override"]
+    assert [transition[0]["action"] for transition in db.transitions] == ["watch", "override", "finalize_run"]
     assert db.transitions[1][0]["payload"]["overridden_topic_id"] == "topic-existing"
 
 
@@ -339,8 +412,8 @@ def test_topic_editor_dispatch_logs_invalid_update_and_discard_under_base_action
 
     result = asyncio.run(editor.run_once("manual"))
 
-    assert [transition[0]["action"] for transition in db.transitions] == ["update_sources", "discard"]
-    assert [transition[0]["payload"]["outcome"] for transition in db.transitions] == ["tool_error", "tool_error"]
+    assert [transition[0]["action"] for transition in db.transitions] == ["update_sources", "discard", "finalize_run"]
+    assert [transition[0]["payload"]["outcome"] for transition in db.transitions] == ["tool_error", "tool_error", "accepted"]
     assert {transition[0]["action"] for transition in db.transitions}.isdisjoint({"rejected_update_sources", "rejected_discard"})
     assert db.sources == []
     assert result["outcomes"][0]["error"] == "topic_not_found"
@@ -371,10 +444,109 @@ def test_topic_editor_dispatch_caps_record_observation_storage():
     result = asyncio.run(editor.run_once("manual"))
 
     assert len(observations) == 3
-    assert [transition[0]["action"] for transition in db.transitions] == ["observation", "observation", "observation", "observation"]
-    assert db.transitions[-1][0]["payload"]["outcome"] == "tool_error"
-    assert db.transitions[-1][0]["payload"]["error"] == "observation_cap_reached"
-    assert result["outcomes"][-1]["outcome"] == "tool_error"
+    assert [transition[0]["action"] for transition in db.transitions] == ["observation", "observation", "observation", "observation", "finalize_run"]
+    assert db.transitions[-2][0]["payload"]["outcome"] == "tool_error"
+    assert db.transitions[-2][0]["payload"]["error"] == "observation_cap_reached"
+    assert result["outcomes"][-2]["outcome"] == "tool_error"
+
+
+def test_topic_editor_read_tools_return_structured_real_data_from_store_and_source_window():
+    db = FakeDB()
+    db.active_topics = [
+        {
+            "topic_id": "topic-1",
+            "guild_id": 1,
+            "environment": "prod",
+            "canonical_key": "alice-lora-test",
+            "headline": "Alice ships a LoRA test",
+            "state": "watching",
+            "created_at": "2026-05-13T10:00:00Z",
+        }
+    ]
+    db.topic_alias_rows = [
+        {
+            "topic_id": "topic-1",
+            "guild_id": 1,
+            "environment": "prod",
+            "alias_key": "LoRA benchmark",
+        }
+    ]
+    db.author_profiles = {
+        42: {
+            "author_id": 42,
+            "message_count_30d": 3,
+            "recent_message_ids": ["102", "101", "100"],
+            "recent_message_dates": ["2026-05-13T12:00:00Z"],
+            "sample_messages": [{"message_id": "102", "content_preview": "Latest sample"}],
+        }
+    }
+    db.message_context_rows = [
+        {
+            "message_id": "100",
+            "channel_name": "show-and-tell",
+            "author_name": "alice",
+            "content": "I shipped a new LoRA test.",
+            "created_at": "2026-05-13T10:00:00Z",
+            "reply_to_message_id": None,
+            "thread_id": "thread-1",
+        }
+    ]
+    messages = [
+        {
+            "message_id": 100,
+            "guild_id": 1,
+            "channel_id": 10,
+            "channel_name": "show-and-tell",
+            "author_id": 42,
+            "content": "I shipped a new LoRA test with detailed benchmark notes.",
+            "created_at": "2999-05-13T10:00:00Z",
+            "author_context_snapshot": {"username": "alice"},
+        },
+        {
+            "message_id": 101,
+            "guild_id": 1,
+            "channel_id": 11,
+            "channel_name": "off-topic",
+            "author_id": 43,
+            "content": "Unrelated chatter",
+            "created_at": "2999-05-13T10:01:00Z",
+            "author_context_snapshot": {"username": "bob"},
+        },
+    ]
+    context = {
+        "run_id": "run-1",
+        "guild_id": 1,
+        "messages": messages,
+        "active_topics": db.active_topics,
+        "aliases": db.topic_alias_rows,
+        "seen_tool_call_ids": set(),
+    }
+    editor = TopicEditor(db_handler=db, llm_client=FakeClaude(SimpleNamespace(content=[], usage=None)), guild_id=1, live_channel_id=2, environment="prod")
+    calls = [
+        {"id": "read-1", "name": "search_topics", "input": {"query": "benchmark", "state_filter": ["watching"]}},
+        {"id": "read-2", "name": "search_messages", "input": {"query": "lora", "channel_id": 10, "author_id": 42}},
+        {"id": "read-3", "name": "get_author_profile", "input": {"author_id": 42}},
+        {"id": "read-4", "name": "get_message_context", "input": {"message_ids": ["100"]}},
+    ]
+
+    outcomes = [editor._dispatch_tool_call(call, context) for call in calls]
+    contents = [editor._tool_result_content(call, outcome) for call, outcome in zip(calls, outcomes)]
+
+    assert [outcome["outcome"] for outcome in outcomes] == ["read", "read", "read", "read"]
+    assert outcomes[0]["result"][0]["aliases"] == ["LoRA benchmark"]
+    assert outcomes[1]["result"] == [
+        {
+            "message_id": "100",
+            "channel_name": "show-and-tell",
+            "author_name": "alice",
+            "content_preview": "I shipped a new LoRA test with detailed benchmark notes.",
+            "created_at": "2999-05-13T10:00:00Z",
+        }
+    ]
+    assert outcomes[2]["result"]["message_count_30d"] == 3
+    assert outcomes[3]["result"][0]["thread_id"] == "thread-1"
+    assert all("stub results" not in content for content in contents)
+    assert all("result=" in content for content in contents)
 
 
 def test_topic_editor_audit_action_vocabulary_excludes_invalid_rejected_actions():

@@ -472,6 +472,65 @@ class DatabaseHandler:
             return []
         return self._run_async_in_thread(self.storage_handler.get_topic_aliases(guild_id=guild_id, environment=environment))
 
+    def search_topic_editor_topics(
+        self,
+        query: str,
+        guild_id: Optional[int] = None,
+        environment: str = 'prod',
+        state_filter: Optional[List[str]] = None,
+        hours_back: int = 72,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """Search compact topic rows for topic-editor read tools."""
+        if not self.storage_handler:
+            return []
+        return self._run_async_in_thread(
+            self.storage_handler.search_topic_editor_topics(
+                query=query,
+                guild_id=guild_id,
+                environment=environment,
+                state_filter=state_filter,
+                hours_back=hours_back,
+                limit=limit,
+            )
+        )
+
+    def get_topic_editor_author_profile(
+        self,
+        author_id: Optional[int],
+        guild_id: Optional[int] = None,
+        environment: str = 'prod',
+    ) -> Dict[str, Any]:
+        """Fetch compact author stats for topic-editor read tools."""
+        if not self.storage_handler:
+            return {}
+        return self._run_async_in_thread(
+            self.storage_handler.get_topic_editor_author_profile(
+                author_id,
+                guild_id=guild_id,
+                environment=environment,
+            )
+        )
+
+    def get_topic_editor_message_context(
+        self,
+        message_ids: List[str],
+        guild_id: Optional[int] = None,
+        environment: str = 'prod',
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """Fetch compact archived messages by id for topic-editor read tools."""
+        if not self.storage_handler:
+            return []
+        return self._run_async_in_thread(
+            self.storage_handler.get_topic_editor_message_context(
+                message_ids=message_ids,
+                guild_id=guild_id,
+                environment=environment,
+                limit=limit,
+            )
+        )
+
     def store_topic_transition(self, transition: Dict[str, Any], environment: str = 'prod') -> Optional[Dict[str, Any]]:
         guild_id = transition.get('guild_id')
         if not self._live_write_allowed(guild_id) or not self.storage_handler:

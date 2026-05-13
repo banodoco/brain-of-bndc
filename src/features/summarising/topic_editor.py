@@ -8,11 +8,12 @@ Anthropic or Discord dependencies.
 
 from __future__ import annotations
 
+import json
 import re
 import os
 import time
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 
 import discord
@@ -519,7 +520,11 @@ class TopicEditor:
         if outcome_name == "idempotent_replay":
             return f"tool={name} status=idempotent_replay (already executed in this run)"
         if name in {"search_topics", "search_messages", "get_author_profile", "get_message_context"}:
-            return f"tool={name} status=ok (read tools currently return stub results — relevant data is already in the initial source payload)"
+            result = outcome.get("result")
+            encoded = json.dumps(result, default=str, ensure_ascii=False, separators=(",", ":"))
+            if len(encoded) > 2000:
+                encoded = encoded[:1970] + "...<truncated>"
+            return f"tool={name} status=ok result={encoded}"
         action = outcome.get("action") or name
         topic_id = outcome.get("topic_id")
         if topic_id:
@@ -558,7 +563,7 @@ class TopicEditor:
         if self._is_idempotent_replay(call, context):
             return {"tool_call_id": call.get("id"), "tool": name, "outcome": "idempotent_replay"}
         if name in {"search_topics", "search_messages", "get_author_profile", "get_message_context"}:
-            return {"tool_call_id": call["id"], "tool": name, "outcome": "read"}
+            return self._dispatch_read_tool(call, context)
         if name == "record_observation":
             if int(context.get("observation_count") or 0) >= 3:
                 self._store_transition({
@@ -604,6 +609,103 @@ class TopicEditor:
         if name == "finalize_run":
             return self._dispatch_finalize_run(call, context)
         return {"tool_call_id": call["id"], "tool": name, "outcome": "unknown_tool"}
+
+    def _dispatch_read_tool(self, call: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+        name = call["name"]
+        args = call.get("input") or {}
+        try:
+            if name == "search_topics":
+                result = self.db.search_topic_editor_topics(
+                    query=args.get("query") or "",
+                    guild_id=context.get("guild_id"),
+                    environment=self.environment,
+                    state_filter=args.get("state_filter"),
+                    hours_back=int(args.get("hours_back") or 72),
+                    limit=10,
+                )
+            elif name == "search_messages":
+                result = self._search_source_messages(
+                    context.get("messages") or [],
+                    query=args.get("query") or "",
+                    channel_id=args.get("channel_id"),
+                    author_id=args.get("author_id"),
+                    hours_back=int(args.get("hours_back") or 24),
+                    limit=int(args.get("limit") or 20),
+                )
+            elif name == "get_author_profile":
+                result = self.db.get_topic_editor_author_profile(
+                    args.get("author_id"),
+                    guild_id=context.get("guild_id"),
+                    environment=self.environment,
+                )
+            elif name == "get_message_context":
+                result = self.db.get_topic_editor_message_context(
+                    args.get("message_ids") or [],
+                    guild_id=context.get("guild_id"),
+                    environment=self.environment,
+                    limit=10,
+                )
+            else:
+                result = None
+            return {"tool_call_id": call["id"], "tool": name, "outcome": "read", "result": result}
+        except Exception as exc:
+            return {"tool_call_id": call.get("id"), "tool": name, "outcome": "tool_error", "error": str(exc)}
+
+    def _search_source_messages(
+        self,
+        messages: Sequence[Dict[str, Any]],
+        *,
+        query: str,
+        channel_id: Optional[Any] = None,
+        author_id: Optional[Any] = None,
+        hours_back: int = 24,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        needle = str(query or "").lower()
+        safe_limit = max(1, min(int(limit or 20), 10))
+        since = datetime.now(timezone.utc) - timedelta(hours=max(1, int(hours_back or 24)))
+        rows: List[Dict[str, Any]] = []
+        for message in messages or []:
+            if channel_id is not None and str(message.get("channel_id")) != str(channel_id):
+                continue
+            if author_id is not None and str(message.get("author_id")) != str(author_id):
+                continue
+            if not self._message_is_since(message.get("created_at"), since):
+                continue
+            content = str(message.get("content") or "")
+            if needle and needle not in content.lower():
+                continue
+            author = message.get("author_context_snapshot") or {}
+            rows.append(
+                {
+                    "message_id": str(message.get("message_id")),
+                    "channel_name": message.get("channel_name"),
+                    "author_name": (
+                        message.get("author_name")
+                        or author.get("server_nick")
+                        or author.get("global_name")
+                        or author.get("display_name")
+                        or author.get("username")
+                    ),
+                    "content_preview": self._cap_text(content, 200),
+                    "created_at": message.get("created_at"),
+                }
+            )
+            if len(rows) >= safe_limit:
+                break
+        return rows
+
+    def _message_is_since(self, created_at: Any, since: datetime) -> bool:
+        if not created_at:
+            return True
+        try:
+            text = str(created_at).replace("Z", "+00:00")
+            dt = datetime.fromisoformat(text)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt >= since
+        except Exception:
+            return True
 
     def _dispatch_finalize_run(self, call: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
         args = call.get("input") or {}
