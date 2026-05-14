@@ -220,6 +220,125 @@
       "resolved": false,
       "resolved_by": null,
       "resolved_at": null
+    },
+    {
+      "id": "DEBT-014",
+      "subsystem": "live-update-social-actions",
+      "concern": "live-update social actions: the revised plan still allows generic `platform + action` fan-out but does not explicitly constrain the new handoff/runtime to `action=post`, even though sprint 1 forbids reply/thread/quote strategies and existing repo callers already use those non-post actions.",
+      "flag_ids": [
+        "FLAG-004"
+      ],
+      "plan_ids": [
+        "sprint-1-draft-social-review-retry-20260514-2258"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-14T23:13:09Z",
+      "updated_at": "2026-05-14T23:13:09Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
+    },
+    {
+      "id": "DEBT-015",
+      "subsystem": "persistence-rollout",
+      "concern": "persistence rollout: the plan still leaves the real ddl/migration location for `live_update_social_runs` unresolved, so the schema portion is not fully implementable end-to-end from this plan alone.",
+      "flag_ids": [
+        "FLAG-005"
+      ],
+      "plan_ids": [
+        "sprint-1-draft-social-review-retry-20260514-2258"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-14T23:13:09Z",
+      "updated_at": "2026-05-14T23:13:09Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
+    },
+    {
+      "id": "DEBT-016",
+      "subsystem": "did-the-work-fully-address-the-issue-hints-user-notes-and-approved-plan-requirements",
+      "concern": "did the work fully address the issue hints, user notes, and approved plan requirements?: the plan now deliberately replaces the requirement to let the social loop 'call the canonical social publish service' with a non-mutating preview facade layered around `socialpublishservice`. that is a defensible safety choice given sprint 1's non-publishing constraint, but it is still a real divergence from the requested helper list and should be treated as a tradeoff rather than a literal implementation of that bullet.",
+      "flag_ids": [
+        "issue_hints"
+      ],
+      "plan_ids": [
+        "sprint-1-draft-social-review-retry-20260514-2258"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-14T23:13:09Z",
+      "updated_at": "2026-05-14T23:13:09Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
+    },
+    {
+      "id": "DEBT-017",
+      "subsystem": "are-the-proposed-changes-technically-correct",
+      "concern": "are the proposed changes technically correct?: step 7 still says to create one run per eligible `topic_id + platform + action`, but the sprint brief explicitly says not to implement thread, quote, or reply social strategies. in this repo, existing callers already use `post`, `reply`, `retweet`, and `quote` through `execute_share_to_social()` and `sharer.send_tweet()`. without an explicit `action == \"post\"` restriction in the new handoff boundary, the plan can still admit forbidden action types if an upstream payload ever contains them.",
+      "flag_ids": [
+        "correctness"
+      ],
+      "plan_ids": [
+        "sprint-1-draft-social-review-retry-20260514-2258"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-14T23:13:09Z",
+      "updated_at": "2026-05-14T23:13:09Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
+    },
+    {
+      "id": "DEBT-018",
+      "subsystem": "search-for-related-code-that-handles-the-same-concept-is-the-reported-issue-a-symptom-of-something-broader",
+      "concern": "search for related code that handles the same concept. is the reported issue a symptom of something broader?: the new preview facade plus shared helper layer pushes sprint 1 farther into a general social-runtime refactor than the original brief strictly requires. the plan is still plausible, but it now changes `socialpublishservice`, `sharingcog`, admin-chat wrappers, and sharer internals together. that is broader than the minimal 'prove the product path' wording and increases the amount of adjacent behavior that can regress in one sprint.",
+      "flag_ids": [
+        "scope"
+      ],
+      "plan_ids": [
+        "sprint-1-draft-social-review-retry-20260514-2258"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-14T23:13:09Z",
+      "updated_at": "2026-05-14T23:13:09Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
+    },
+    {
+      "id": "DEBT-019",
+      "subsystem": "does-the-change-touch-all-locations-and-supporting-infrastructure",
+      "concern": "does the change touch all locations and supporting infrastructure?: one support location is still underspecified: the plan says the schema/ddl location for `live_update_social_runs` is 'tbd', and this checkout still has no tracked migration directory. the code and fake-supabase tests can move ahead, but the implementation plan does not yet say how the real table will be created in deployment, so the persistence work is not fully closed end-to-end.",
+      "flag_ids": [
+        "all_locations"
+      ],
+      "plan_ids": [
+        "sprint-1-draft-social-review-retry-20260514-2258"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-14T23:13:09Z",
+      "updated_at": "2026-05-14T23:13:09Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
+    },
+    {
+      "id": "DEBT-020",
+      "subsystem": "find-the-callers-of-the-changed-function-what-arguments-do-they-actually-pass-does-the-fix-handle-all-of-them",
+      "concern": "find the callers of the changed function. what arguments do they actually pass? does the fix handle all of them?: the remaining caller risk is around action values. current social callers already pass non-post actions (`reply`, `retweet`, `quote`) into the canonical publishing path. because the new handoff contract is described in generic `platform + action` terms, the plan should explicitly state where those non-post actions are rejected for live-update social runs; otherwise the draft runtime may inherit caller shapes that the sprint says it must not implement.",
+      "flag_ids": [
+        "callers"
+      ],
+      "plan_ids": [
+        "sprint-1-draft-social-review-retry-20260514-2258"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-14T23:13:09Z",
+      "updated_at": "2026-05-14T23:13:09Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
     }
   ]
 }
