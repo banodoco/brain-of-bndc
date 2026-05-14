@@ -1,0 +1,56 @@
+{
+  "name": "sprint-1-draft-social-review-20260514-2251",
+  "idea": "# Sprint 1: Draft Social Review, Tool Contract, and Admin Media Access\n\nProfile intent: `thoughtful//high @codex +feedback`.\n\nChain encoding note: this milestone should use first-class chain fields for `vendor: codex`, `depth: high`, `with_feedback: true`, and `deepseek_provider: direct`.\n\n## Source Plan\n\nUse `docs/agent-loop-standardisation-and-live-update-social-plan.md`, especially:\n\n- `Multi-Sprint Rollout Plan`\n- `Sprint 1: Draft-Only Social Review, Tool Contract, and Admin Media Access`\n- `Design Review Corrections`\n- `Definition of Done`\n\n## Goal\n\nCreate the post-live-update social review loop after successful Discord live-update posting, keep it non-publishing by default, and give it access to admin-equivalent media/social helpers immediately.\n\nThis sprint proves the product path and the minimal standardisation direction without migrating `TopicEditor` or `AdminChatAgent` to a shared runner.\n\n## Required Scope\n\nImplement:\n\n- `live_update_social_runs` persistence.\n- Durable duplicate guard for `topic_id + platform + action`.\n- `LiveUpdateSocialAgent` in `draft` mode.\n- Best-effort social review trigger after live-update publish results with `status in {\"sent\", \"partial\"}`.\n- Reconstruct `publish_units` from topic summary plus source metadata.\n- Minimal `ToolSpec` and `ToolBinding`.\n- Social-loop conformance tests so advertised tools have handlers.\n- Terminal decision tools:\n  - `draft_social_post`\n  - `skip_social_post`\n  - `request_social_review`\n- Trace/status logging for social runs.\n- Extract or wrap admin-chat helpers needed by the social loop:\n  - inspect a Discord message and fetch fresh attachment/embed media;\n  - download a media URL;\n  - refresh Discord CDN URLs;\n  - list/resolve social routes;\n  - call the canonical social publish service.\n\n## Media Requirements\n\nMedia is not optional, but this sprint must not publish media yet.\n\nImplement:\n\n- Store selected media refs as stable identities, not CDN URLs.\n- Record which media refs were considered, selected, skipped, or unresolved.\n- Add `MediaRefIdentity` and `ResolvedMedia`.\n- Resolve media refs to fresh URLs or local files on demand for draft/understanding.\n\nDo not:\n\n- Persist Discord CDN URLs as durable identity.\n- Queue or publish social posts.\n- Treat text-only fallback as success when media was expected.\n\n## Explicit Non-Goals\n\n- Do not migrate `TopicEditor` onto a shared runner.\n- Do not migrate `AdminChatAgent` onto a shared runner.\n- Do not implement queue or publish mode.\n- Do not implement thread, quote, or reply social strategies.\n- Do not add a broad generic `agent_runs` schema unless clearly necessary.\n\n## Acceptance Criteria\n\n- A successful live update creates one social review run.\n- The run records `skip`, `draft`, or `needs_review`.\n- Draft text and selected media ref identities are inspectable.\n- The social loop can use admin-equivalent media inspection/download/refresh behavior through shared helpers.\n- Duplicate reruns do not create a second social run for the same topic/platform/action.\n- No social publication is created in default mode.\n- Tests cover the trigger, persistence, duplicate guard, tool conformance, and media-ref recording.",
+  "current_state": "initialized",
+  "iteration": 0,
+  "created_at": "2026-05-14T22:51:51Z",
+  "config": {
+    "project_dir": "/workspace/brain-of-bndc",
+    "auto_approve": true,
+    "robustness": "standard",
+    "mode": "code",
+    "strict_notes": false,
+    "agent": "",
+    "profile": "thoughtful",
+    "phase_model": [
+      "plan=claude:low",
+      "prep=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "critique=claude:low",
+      "revise=claude:low",
+      "gate=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "finalize=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "execute=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "loop_plan=claude:low",
+      "loop_execute=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "review=claude:low",
+      "tiebreaker_researcher=claude:low",
+      "tiebreaker_challenger=claude:low",
+      "feedback=claude:low"
+    ]
+  },
+  "sessions": {},
+  "plan_versions": [],
+  "history": [
+    {
+      "step": "init",
+      "timestamp": "2026-05-14T22:51:51Z",
+      "duration_ms": 0,
+      "cost_usd": 0.0,
+      "result": "success",
+      "environment": {
+        "claude": true,
+        "codex": true
+      }
+    }
+  ],
+  "meta": {
+    "significant_counts": [],
+    "weighted_scores": [],
+    "plan_deltas": [],
+    "recurring_critiques": [],
+    "total_cost_usd": 0.0,
+    "overrides": [],
+    "notes": []
+  },
+  "last_gate": {}
+}
