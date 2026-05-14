@@ -10,6 +10,7 @@ from src.features.summarising.topic_editor import (
     TopicEditor,
     TOPIC_EDITOR_TOOLS,
     build_rejected_transition,
+    parse_optional_datetime,
     render_topic,
 )
 
@@ -998,6 +999,37 @@ def test_topic_editor_dispatch_allows_collision_override_and_dedupes_sources():
     assert [source[0]["message_id"] for source in db.sources] == ["100"]
     assert [transition[0]["action"] for transition in db.transitions] == ["watch", "override", "observation"]
     assert db.transitions[1][0]["payload"]["overridden_topic_id"] == "topic-existing"
+
+
+def test_watch_topic_ignores_natural_language_revisit_at():
+    block = SimpleNamespace(
+        type="tool_use",
+        id="tool-watch",
+        name="watch_topic",
+        input={
+            "proposed_key": "Future Comparison",
+            "headline": "Future comparison needs more testing",
+            "why_interesting": "Worth checking later.",
+            "revisit_when": "More comparison results emerge",
+            "source_message_ids": ["100"],
+        },
+    )
+    response = SimpleNamespace(content=[block], usage=SimpleNamespace(input_tokens=1, output_tokens=2))
+    db = FakeDB()
+    editor = TopicEditor(db_handler=db, llm_client=FakeClaude(response), guild_id=1, live_channel_id=2, environment="prod")
+
+    result = asyncio.run(editor.run_once("manual"))
+
+    assert result["outcomes"][0]["outcome"] == "accepted"
+    assert db.topics[0][0]["state"] == "watching"
+    assert db.topics[0][0]["revisit_at"] is None
+    assert db.topics[0][0]["summary"]["revisit_when"] == "More comparison results emerge"
+
+
+def test_watch_topic_accepts_iso_revisit_at():
+    assert parse_optional_datetime("2026-05-15") == "2026-05-15T00:00:00+00:00"
+    assert parse_optional_datetime("2026-05-15T12:34:56Z") == "2026-05-15T12:34:56+00:00"
+    assert parse_optional_datetime("tomorrow") is None
 
 
 def test_topic_editor_auto_shortlists_reaction_qualified_media(monkeypatch):

@@ -1911,6 +1911,10 @@ class TopicEditor:
                 collisions=unresolved,
             )
 
+        revisit_at = None
+        if state == "watching":
+            revisit_at = parse_optional_datetime(args.get("revisit_when"))
+
         topic = self.db.upsert_topic({
             "guild_id": context["guild_id"],
             "canonical_key": canonical_key,
@@ -1921,7 +1925,7 @@ class TopicEditor:
             "source_authors": source_authors,
             "parent_topic_id": args.get("parent_topic_id"),
             "publication_status": "pending" if state == "posted" else None,
-            "revisit_at": args.get("revisit_when") if state == "watching" else None,
+            "revisit_at": revisit_at,
             "source_message_ids": source_ids,
         }, environment=self.environment)
         topic_id = topic.get("topic_id") if topic else None
@@ -3450,7 +3454,10 @@ class TopicEditor:
                 summary["blocks"] = args["blocks"]
             return summary
         if tool_name == "watch_topic":
-            return {"why_interesting": args.get("why_interesting")}
+            return {
+                "why_interesting": args.get("why_interesting"),
+                "revisit_when": args.get("revisit_when"),
+            }
         return {"body": args.get("body"), "media": args.get("media") or []}
 
     def _resolve_guild_id(self) -> Optional[int]:
@@ -3600,6 +3607,30 @@ def unresolved_collisions(
         if item.get("topic_id")
     }
     return [collision for collision in collisions if collision.topic_id not in override_ids]
+
+
+def parse_optional_datetime(value: Any) -> Optional[str]:
+    """Return an ISO timestamp only for concrete date/time values.
+
+    Tool callers often use natural-language ``revisit_when`` strings such as
+    "tomorrow" or "when more results appear". The database column is a
+    timestamp, so prose must stay in the topic summary rather than being written
+    to ``revisit_at``.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        return f"{text}T00:00:00+00:00"
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.isoformat()
 
 
 def shape_transition_payload(
