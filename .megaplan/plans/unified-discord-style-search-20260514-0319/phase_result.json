@@ -1,0 +1,15 @@
+{
+  "phase": "execute",
+  "invocation_id": "d0c9f9df1b0343b0",
+  "exit_kind": "success",
+  "blocked_tasks": [],
+  "deviations": [],
+  "artifacts_written": [
+    "execution.json",
+    "execution_audit.json",
+    "finalize.json",
+    "final.md",
+    "review.json"
+  ],
+  "cli_provenance": {}
+}

@@ -1,0 +1,113 @@
+{
+  "checks": [
+    {
+      "id": "issue_hints",
+      "question": "Did the work fully address the issue hints, user notes, and approved plan requirements?",
+      "findings": [
+        {
+          "detail": "The plan directly covers the central requested behavior: `post_sectioned_topic` currently stores only `body` and loose `sections` in `TopicEditor._summary_for_tool`, `render_topic` currently emits one trimmed message with a raw `Source(s)` footer, and `_publish_topic` currently sends the rendered string list as-is. The proposed normalization, inline citations, publish units, media hydration, no-footer behavior, and block-by-block sending are aligned with the requested document-like TopicEditor change.",
+          "flagged": false
+        },
+        {
+          "detail": "Issue hints require media refs to resolve to attachment/embed URLs at publish time, but the plan leaves embed addressing unresolved in its questions and assumptions while still saying validation should resolve attachments/embeds. A schema with only `{message_id, attachment_index}` can address attachments, but it cannot unambiguously address embeds unless the implementation defines a combined namespace or adds a `{kind, index}` field.",
+          "flagged": true
+        }
+      ]
+    },
+    {
+      "id": "correctness",
+      "question": "Are the proposed changes technically correct?",
+      "findings": [
+        {
+          "detail": "Checked `_dispatch_create_topic_tool`: it currently derives `source_messages` and `source_authors` only from `context[\"messages\"]` via `_messages_by_id` before collision detection and post_simple validation. The plan says block sources may be accepted when resolved by DB lookup outside the current source window, but it does not explicitly require the resolved DB rows to feed `source_authors`, so simple-topic author limits and collision author-overlap checks could become wrong for archive-sourced blocks.",
+          "flagged": true
+        },
+        {
+          "detail": "Checked existing rendering behavior: `render_topic` returns a single trimmed message for sectioned topics and `_trim_discord_message` truncates beyond 2000 characters. The plan's separate publish-unit renderer and paragraph-aware chunking is technically compatible with this layout, provided `render_topic` stays as a legacy pure helper and `_publish_topic` moves to publish units only for structured `blocks` summaries.",
+          "flagged": false
+        }
+      ]
+    },
+    {
+      "id": "scope",
+      "question": "Search for related code that handles the same concept. Is the reported issue a symptom of something broader?",
+      "findings": [
+        {
+          "detail": "Searched TopicEditor media handling and found existing `_message_payload`, `_filter_source_messages`, `_dispatch_understand_media_tool`, and `_enrich_media_understandings` paths already work with `attachments`/`embeds` or attachment indices. The plan updates publishing hydration, but should also preserve or reuse these existing source-window media conventions so new `media_refs` do not diverge from the current `understand_media` tool's `{message_id, attachment_index}` contract.",
+          "flagged": true
+        },
+        {
+          "detail": "The broader storage wrappers already have `add_topic_source(s)` and the create dispatch writes one row per distinct `source_ids` item, so preserving `topic_sources` as the union of block-level sources is a scoped change in source collection rather than a new storage subsystem. This part of the plan appears appropriately bounded.",
+          "flagged": false
+        }
+      ]
+    },
+    {
+      "id": "all_locations",
+      "question": "Does the change touch all locations AND supporting infrastructure?",
+      "findings": [
+        {
+          "detail": "Checked `storage_handler.get_topic_editor_message_context`: it selects only `message_id,channel_id,author_id,content,created_at,reference_id,thread_id`, so archive/read-tool messages currently do not include `guild_id`, `attachments`, or `embeds`. The plan adds a publishing lookup with those fields, but it does not explicitly update the `get_message_context` read tool output that the agent would use to discover exact attachment indices for archive messages.",
+          "flagged": true
+        },
+        {
+          "detail": "Checked tool registration and dispatch: `WRITE_TOOL_NAMES` already includes `post_sectioned_topic`, the input schema lives in `TOPIC_EDITOR_TOOLS`, and `_dispatch_tool_call` routes `post_sectioned_topic` to `_dispatch_create_topic_tool`. The plan's schema/prompt and dispatch updates target the correct TopicEditor locations and do not need a new tool registration path.",
+          "flagged": false
+        }
+      ]
+    },
+    {
+      "id": "callers",
+      "question": "Find the callers of the changed function. What arguments do they actually pass? Does the fix handle all of them?",
+      "findings": [
+        {
+          "detail": "Grep shows tests monkeypatch `render_topic` and call `_publish_topic` with legacy topics, including partial-send behavior where `render_topic` returns two messages. The plan keeps `render_topic(topic)` pure for legacy tests and adds a new `render_topic_publish_units(...)` helper, which is the right caller-compatible shape if `_publish_topic` only switches to publish units for structured document summaries or preserves the same string-list behavior for legacy topics.",
+          "flagged": false
+        },
+        {
+          "detail": "Checked `_summary_for_tool` callers through `_dispatch_create_topic_tool`: all create tools currently pass raw tool args, and `post_sectioned_topic` currently rejects calls without `sections`. The plan says new `blocks` inputs should be accepted, but the dispatch rejection condition must be changed from `not args.get(\"sections\")` to allow valid `blocks`; otherwise new structured calls would be rejected before normalization.",
+          "flagged": true
+        }
+      ]
+    }
+  ],
+  "flags": [
+    {
+      "id": "FLAG-001",
+      "concern": "TopicEditor source resolution: archive-resolved block sources must feed source_authors and collision checks, not only validation/publishing hydration.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "`_dispatch_create_topic_tool` currently computes `source_messages = self._messages_by_id(context[\"messages\"], source_ids)` and `source_authors = self._source_authors(source_messages)` before post_simple validation and `detect_topic_collisions`; the plan allows source IDs outside the source window but does not state that DB-resolved messages replace/augment this author set."
+    },
+    {
+      "id": "FLAG-002",
+      "concern": "Media ref discovery: archive `get_message_context` output lacks attachments/embeds, so agents may not have enough metadata to produce stable media_refs for messages found through read tools.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "`storage_handler.get_topic_editor_message_context` selects `message_id,channel_id,author_id,content,created_at,reference_id,thread_id` only. The plan adds a publish-time lookup but does not explicitly enrich this read-tool response with attachment/embed counts or ref-addressable media metadata."
+    },
+    {
+      "id": "FLAG-003",
+      "concern": "Media ref schema: attachment-only `{message_id, attachment_index}` does not define how embed URLs are addressed despite the requirement to resolve attachment/embed URLs.",
+      "category": "completeness",
+      "severity_hint": "uncertain",
+      "evidence": "The plan asks whether embeds should share the attachment index namespace or use `{kind, index}`, while Step 3 says every `media_ref` has `message_id` and integer `attachment_index` and Step 4 says lookup returns attachments and embeds. Without resolving that plan question, embed media cannot be validated or published deterministically."
+    },
+    {
+      "id": "FLAG-004",
+      "concern": "Structured blocks acceptance: existing `post_sectioned_topic` rejection on missing `sections` must be relaxed for valid `blocks` payloads.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "`_dispatch_create_topic_tool` currently has `if call[\"name\"] == \"post_sectioned_topic\" and not args.get(\"sections\"):` returning `rejected_post_sectioned`. The plan's schema update allows `blocks`, but the execution steps do not call out this specific guard."
+    },
+    {
+      "id": "verifiability-0",
+      "concern": "Criterion 9: requires human verification (subjective_judgment).",
+      "category": "verifiability",
+      "severity_hint": "likely-minor",
+      "status": "open"
+    }
+  ],
+  "verified_flag_ids": [],
+  "disputed_flag_ids": []
+}

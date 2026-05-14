@@ -1,0 +1,127 @@
+{
+  "output": "All 4 batch-2 tasks (T2, T5, T9, T13) executed successfully. Added 16 normalization-helper tests to test_topic_editor_core.py (all pass). Updated post_sectioned_topic tool schema with blocks property and relaxed required array. Extended TOPIC_EDITOR_SYSTEM_PROMPT with Structured Document Topics guidance. Updated _summary_for_tool to store blocks alongside body/sections. Added render_topic_publish_units function with deterministic publish-unit ordering, inline per-block citations with Discord jump URLs, and no global Sources footer. Added _resolve_media_url_from_metadata helper. Updated _message_payload with compact media_refs_available and guild_id. Full test suite: 117 passed (71 topic_editor + 44 related + 2 vision_clients), 0 failures, 0 regressions.",
+  "files_changed": [
+    "src/features/summarising/topic_editor.py",
+    "tests/test_topic_editor_core.py",
+    ".megaplan/plans/structured-live-update-doc-publishing/execution_audit.json",
+    ".megaplan/plans/structured-live-update-doc-publishing/execution_batch_2.json"
+  ],
+  "commands_run": [
+    "pytest tests/test_topic_editor_core.py -q (30 passed)",
+    "pytest tests/test_topic_editor_core.py tests/test_topic_editor_runtime.py tests/test_topic_editor_media_understanding.py -q (71 passed)",
+    "pytest tests/test_live_update_editor_publishing.py tests/test_live_update_prompts.py tests/test_vision_clients.py -q (44 passed)",
+    "pytest tests/test_topic_editor_*.py tests/test_live_update_editor_*.py tests/test_live_update_prompts.py tests/test_vision_clients.py -q (117 passed)"
+  ],
+  "deviations": [
+    "Advisory quality: src/features/summarising/topic_editor.py grew by 242 lines (threshold 200).",
+    "Advisory quality: tests/test_topic_editor_core.py grew by 232 lines (threshold 200).",
+    "Auto-attributed 3 unclaimed file(s) to task T2 (worker reported empty files_changed): .megaplan/plans/structured-live-update-doc-publishing/execution_audit.json, .megaplan/plans/structured-live-update-doc-publishing/execution_batch_2.json, tests/test_topic_editor_core.py",
+    "Auto-attributed 3 unclaimed file(s) to task T5 (worker reported empty files_changed): .megaplan/plans/structured-live-update-doc-publishing/execution_audit.json, .megaplan/plans/structured-live-update-doc-publishing/execution_batch_2.json, tests/test_topic_editor_core.py",
+    "Auto-attributed 3 unclaimed file(s) to task T9 (worker reported empty files_changed): .megaplan/plans/structured-live-update-doc-publishing/execution_audit.json, .megaplan/plans/structured-live-update-doc-publishing/execution_batch_2.json, tests/test_topic_editor_core.py",
+    "Auto-attributed 3 unclaimed file(s) to task T13 (worker reported empty files_changed): .megaplan/plans/structured-live-update-doc-publishing/execution_audit.json, .megaplan/plans/structured-live-update-doc-publishing/execution_batch_2.json, tests/test_topic_editor_core.py",
+    "Auto-attribution ambiguous: 4 done tasks shared 3 unclaimed files",
+    "Advisory observation mismatch: git status/content hash delta found unclaimed files: .megaplan/plans/add-image-video-understanding-20260514-0055/.plan.lock, .megaplan/plans/add-image-video-understanding-20260514-0055/phase_result.json, .megaplan/plans/add-image-video-understanding-20260514-0055/plan_v1.md, .megaplan/plans/add-image-video-understanding-20260514-0055/plan_v1.meta.json, .megaplan/plans/add-image-video-understanding-20260514-0055/state.json, .megaplan/plans/add-image-video-understanding-20260514-0055/step_receipt_plan_v1.json, .megaplan/plans/extend-the-topic-editor-s-20260514-0315/.plan.lock, .megaplan/plans/extend-the-topic-editor-s-20260514-0315/critique_output.json, .megaplan/plans/extend-the-topic-editor-s-20260514-0315/critique_v1.json, .megaplan/plans/extend-the-topic-editor-s-20260514-0315/faults.json, .megaplan/plans/extend-the-topic-editor-s-20260514-0315/gate.json, .megaplan/plans/extend-the-topic-editor-s-20260514-0315/phase_result.json, .megaplan/plans/extend-the-topic-editor-s-20260514-0315/plan_v1.md, .megaplan/plans/extend-the-topic-editor-s-20260514-0315/plan_v1.meta.json, .megaplan/plans/extend-the-topic-editor-s-20260514-0315/plan_v2.md, .megaplan/plans/extend-the-topic-editor-s-20260514-0315/plan_v2.meta.json, .megaplan/plans/extend-the-topic-editor-s-20260514-0315/state.json, .megaplan/plans/extend-the-topic-editor-s-20260514-0315/step_receipt_critique_v1.json, .megaplan/plans/extend-the-topic-editor-s-20260514-0315/step_receipt_plan_v1.json, .megaplan/plans/extend-the-topic-editor-s-20260514-0315/step_receipt_revise_v2.json, .megaplan/plans/fresh-thoughtful-standard-20260514-0058/.plan.lock, .megaplan/plans/fresh-thoughtful-standard-20260514-0058/critique_output.json, .megaplan/plans/fresh-thoughtful-standard-20260514-0058/critique_v1.json, .megaplan/plans/fresh-thoughtful-standard-20260514-0058/execution.json, .megaplan/plans/fresh-thoughtful-standard-20260514-0058/execution_audit.json, .megaplan/plans/fresh-thoughtful-standard-20260514-0058/execution_batch_1.json, .megaplan/plans/fresh-thoughtful-standard-20260514-0058/execution_batch_2.json, .megaplan/plans/fresh-thoughtful-standard-20260514-0058/execution_batch_3.json, .megaplan/plans/fresh-thoughtful-standard-20260514-0058/execution_batch_4.json, .megaplan/plans/fresh-thoughtful-standard-20260514-0058/execution_batch_5.json, .megaplan/plans/fresh-thoughtful-standard-20260514-0058/execution_batch_6.json, .megaplan/plans/fresh-thoughtful-standard-20260514-0058/execution_batch_7.json, .megaplan/plans/fresh-thoughtful-standard-20260514-0058/execution_batch_8.json, .megaplan/plans/fresh-thoughtful-standard-20260514-0058/execution_batch_9.json, .megaplan/plans/fresh-thoughtful-standard-20260514-0058/faults.json, .megaplan/plans/fresh-thoughtful-standard-20260514-0058/final.md, .megaplan/plans/fresh-thoughtful-standard-20260514-0058/finalize.json, .megaplan/plans/fresh-thoughtful-standard-20260514-0058/finalize_output.json, .megaplan/plans/fresh-thoughtful-standard-20260514-0058/finalize_snapshot.json, .megaplan/plans/fresh-thoughtful-standard-20260514-0058/gate.json, .megaplan/plans/fresh-thoughtful-standard-20260514-0058/gate_signals_v1.json, .megaplan/plans/fresh-thoughtful-standard-20260514-0058/phase_result.json, .megaplan/plans/fresh-thoughtful-standard-20260514-0058/plan_v1.md, .megaplan/plans/fresh-thoughtful-standard-20260514-0058/plan_v1.meta.json, .megaplan/plans/fresh-thoughtful-standard-20260514-0058/review.json, .megaplan/plans/fresh-thoughtful-standard-20260514-0058/state.json, .megaplan/plans/fresh-thoughtful-standard-20260514-0058/step_receipt_critique_v1.json, .megaplan/plans/fresh-thoughtful-standard-20260514-0058/step_receipt_execute_v1.json, .megaplan/plans/fresh-thoughtful-standard-20260514-0058/step_receipt_finalize_v1.json, .megaplan/plans/fresh-thoughtful-standard-20260514-0058/step_receipt_gate_v1.json, .megaplan/plans/fresh-thoughtful-standard-20260514-0058/step_receipt_plan_v1.json, .megaplan/plans/fresh-thoughtful-standard-20260514-0058/step_receipt_review_v1.json, .megaplan/plans/fresh-thoughtful-standard-20260514-0058/user_actions.md, .megaplan/plans/structured-live-update-doc-publishing/.plan.lock, .megaplan/plans/structured-live-update-doc-publishing/critique_output.json, .megaplan/plans/structured-live-update-doc-publishing/critique_v1.json, .megaplan/plans/structured-live-update-doc-publishing/critique_v2.json, .megaplan/plans/structured-live-update-doc-publishing/execution_batch_1.json, .megaplan/plans/structured-live-update-doc-publishing/faults.json, .megaplan/plans/structured-live-update-doc-publishing/final.md, .megaplan/plans/structured-live-update-doc-publishing/finalize.json, .megaplan/plans/structured-live-update-doc-publishing/finalize_output.json, .megaplan/plans/structured-live-update-doc-publishing/finalize_snapshot.json, .megaplan/plans/structured-live-update-doc-publishing/gate.json, .megaplan/plans/structured-live-update-doc-publishing/gate_signals_v1.json, .megaplan/plans/structured-live-update-doc-publishing/gate_signals_v2.json, .megaplan/plans/structured-live-update-doc-publishing/phase_result.json, .megaplan/plans/structured-live-update-doc-publishing/plan_v1.md, .megaplan/plans/structured-live-update-doc-publishing/plan_v1.meta.json, .megaplan/plans/structured-live-update-doc-publishing/plan_v2.md, .megaplan/plans/structured-live-update-doc-publishing/plan_v2.meta.json, .megaplan/plans/structured-live-update-doc-publishing/state.json, .megaplan/plans/structured-live-update-doc-publishing/step_receipt_critique_v1.json, .megaplan/plans/structured-live-update-doc-publishing/step_receipt_critique_v2.json, .megaplan/plans/structured-live-update-doc-publishing/step_receipt_finalize_v2.json, .megaplan/plans/structured-live-update-doc-publishing/step_receipt_gate_v1.json, .megaplan/plans/structured-live-update-doc-publishing/step_receipt_gate_v2.json, .megaplan/plans/structured-live-update-doc-publishing/step_receipt_plan_v1.json, .megaplan/plans/structured-live-update-doc-publishing/step_receipt_revise_v2.json, .megaplan/plans/structured-live-update-doc-publishing/user_actions.md, .megaplan/plans/thoughtful-standard-codex-20260514-0055/.plan.lock, .megaplan/plans/thoughtful-standard-codex-20260514-0055/state.json, .megaplan/plans/unified-discord-style-search-20260514-0319/.plan.lock, .megaplan/plans/unified-discord-style-search-20260514-0319/critique_output.json, .megaplan/plans/unified-discord-style-search-20260514-0319/critique_v1.json, .megaplan/plans/unified-discord-style-search-20260514-0319/execution.json, .megaplan/plans/unified-discord-style-search-20260514-0319/execution_audit.json, .megaplan/plans/unified-discord-style-search-20260514-0319/execution_batch_1.json, .megaplan/plans/unified-discord-style-search-20260514-0319/execution_batch_2.json, .megaplan/plans/unified-discord-style-search-20260514-0319/execution_batch_3.json, .megaplan/plans/unified-discord-style-search-20260514-0319/execution_batch_4.json, .megaplan/plans/unified-discord-style-search-20260514-0319/execution_batch_5.json, .megaplan/plans/unified-discord-style-search-20260514-0319/faults.json, .megaplan/plans/unified-discord-style-search-20260514-0319/final.md, .megaplan/plans/unified-discord-style-search-20260514-0319/finalize.json, .megaplan/plans/unified-discord-style-search-20260514-0319/finalize_output.json, .megaplan/plans/unified-discord-style-search-20260514-0319/finalize_snapshot.json, .megaplan/plans/unified-discord-style-search-20260514-0319/gate.json, .megaplan/plans/unified-discord-style-search-20260514-0319/phase_result.json, .megaplan/plans/unified-discord-style-search-20260514-0319/plan_v1.md, .megaplan/plans/unified-discord-style-search-20260514-0319/plan_v1.meta.json, .megaplan/plans/unified-discord-style-search-20260514-0319/plan_v2.md, .megaplan/plans/unified-discord-style-search-20260514-0319/plan_v2.meta.json, .megaplan/plans/unified-discord-style-search-20260514-0319/review.json, .megaplan/plans/unified-discord-style-search-20260514-0319/state.json, .megaplan/plans/unified-discord-style-search-20260514-0319/step_receipt_critique_v1.json, .megaplan/plans/unified-discord-style-search-20260514-0319/step_receipt_execute_v2.json, .megaplan/plans/unified-discord-style-search-20260514-0319/step_receipt_finalize_v2.json, .megaplan/plans/unified-discord-style-search-20260514-0319/step_receipt_plan_v1.json, .megaplan/plans/unified-discord-style-search-20260514-0319/step_receipt_revise_v2.json, .megaplan/plans/unified-discord-style-search-20260514-0319/user_actions.md",
+    "Advisory audit finding: Sense check SC7 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC8 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC9 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC11 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC12 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC13 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC14 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC15 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC17 is missing an executor acknowledgment.",
+    "Advisory audit finding: Tasks left pending after execute (executor never started them): T6, T7, T8, T10, T11, T12, T14"
+  ],
+  "task_updates": [
+    {
+      "id": "T2",
+      "status": "done",
+      "executor_notes": "Added 16 tests in 5 test classes to test_topic_editor_core.py. TestNormalizeMediaRef: 10 tests covering shorthand\u2192canonical, canonical pass-through, embed refs, invalid kind, missing message_id, non-dict, non-integer indices. TestNormalizeDocumentBlocks: 8 tests covering legacy body\u2192intro, legacy sections\u2192section blocks, topic-level source fallback, new-style blocks preservation, invalid type skipping, body\u2192text fallback, empty summary. TestNormalizeTopicDocument, TestBlockHelpers, TestCollectDocumentSourceIds: coverage for wrapper, distinct union, order preservation. All pass.",
+      "reviewer_verdict": "",
+      "task_id": "T2",
+      "files_changed": [
+        ".megaplan/plans/structured-live-update-doc-publishing/execution_audit.json",
+        ".megaplan/plans/structured-live-update-doc-publishing/execution_batch_2.json",
+        "tests/test_topic_editor_core.py"
+      ],
+      "commands_run": [],
+      "auto_attributed_files": true
+    },
+    {
+      "id": "T5",
+      "status": "done",
+      "executor_notes": "Updated post_sectioned_topic tool schema: added blocks array property with {type, title, text, source_message_ids, media_refs} sub-schema; relaxed required array from [proposed_key, headline, body, sections, source_message_ids] to [proposed_key, headline, body, source_message_ids] (sections no longer required when blocks present). Updated tool description to document structured blocks usage, canonical media-ref shape, shorthand acceptance, no global footer rule. Extended TOPIC_EDITOR_SYSTEM_PROMPT with 'Structured Document Topics' section describing 6 rules: per-block sources, per-block media, canonical shape, no global footer, block types, stable refs. Updated _summary_for_tool to store blocks alongside body/sections when provided.",
+      "reviewer_verdict": "",
+      "task_id": "T5",
+      "files_changed": [
+        ".megaplan/plans/structured-live-update-doc-publishing/execution_audit.json",
+        ".megaplan/plans/structured-live-update-doc-publishing/execution_batch_2.json",
+        "tests/test_topic_editor_core.py"
+      ],
+      "commands_run": [],
+      "auto_attributed_files": true
+    },
+    {
+      "id": "T9",
+      "status": "done",
+      "executor_notes": "Added render_topic_publish_units(topic, source_metadata=None) function. Returns ordered units [{kind: 'text', content}, {kind: 'media', url, ref}]. Deterministic order: header+intro text with inline [[1]](url) citations \u2192 intro media \u2192 each section text with inline citations \u2192 that section media. Citations per block deduped and ordered by first appearance. Jump URLs use https://discord.com/channels/{guild_id}/{channel_id}/{message_id}. No global Sources footer. Falls back to legacy render_topic when no blocks present. Added _resolve_media_url_from_metadata helper for URL resolution from attachment/embed metadata. Existing render_topic unchanged.",
+      "reviewer_verdict": "",
+      "task_id": "T9",
+      "files_changed": [
+        ".megaplan/plans/structured-live-update-doc-publishing/execution_audit.json",
+        ".megaplan/plans/structured-live-update-doc-publishing/execution_batch_2.json",
+        "tests/test_topic_editor_core.py"
+      ],
+      "commands_run": [],
+      "auto_attributed_files": true
+    },
+    {
+      "id": "T13",
+      "status": "done",
+      "executor_notes": "Updated _message_payload to include compact media_refs_available (matching get_topic_editor_message_context output shape) with {kind, index, url_present, content_type, filename} for both attachments and embeds. Added guild_id field to payload. Payload remains bounded (no raw URLs in media_refs_available). Embeds indexed with kind='embed'; attachments with kind='attachment'. Existing media_urls field preserved for backwards compatibility.",
+      "reviewer_verdict": "",
+      "task_id": "T13",
+      "files_changed": [
+        ".megaplan/plans/structured-live-update-doc-publishing/execution_audit.json",
+        ".megaplan/plans/structured-live-update-doc-publishing/execution_batch_2.json",
+        "tests/test_topic_editor_core.py"
+      ],
+      "commands_run": [],
+      "auto_attributed_files": true
+    }
+  ],
+  "sense_check_acknowledgments": [
+    {
+      "id": "SC3",
+      "task_id": "T2",
+      "question": "Do tests cover both shorthand {message_id, attachment_index} and canonical {message_id, kind, index} media refs?",
+      "verdict": "PASS. test_shorthand_attachment_index_converts_to_canonical and test_shorthand_with_string_index cover shorthand\u2192canonical conversion. test_canonical_attachment_ref_passes_through and test_canonical_embed_ref_passes_through cover canonical pass-through for both attachment and embed kinds.",
+      "sense_check_id": "SC3",
+      "executor_note": "(not provided)"
+    },
+    {
+      "id": "SC6",
+      "task_id": "T5",
+      "question": "Does the updated tool schema accept blocks input and does the required array allow blocks as alternative to sections?",
+      "verdict": "PASS. The post_sectioned_topic input_schema now includes a blocks property with {type, title, text, source_message_ids, media_refs} sub-schema. The required array is [proposed_key, headline, body, source_message_ids] \u2014 sections is no longer required, allowing blocks-only calls through.",
+      "sense_check_id": "SC6",
+      "executor_note": "(not provided)"
+    },
+    {
+      "id": "SC10",
+      "task_id": "T9",
+      "question": "Does render_topic_publish_units produce ordered units with inline citations per block and no global Sources footer?",
+      "verdict": "PASS. render_topic_publish_units produces ordered [{kind: 'text', content}, {kind: 'media', ...}] units. Intro block gets header prefix, section blocks get title if present. Each block's text content is followed by inline [[1]](url) citations (deduped per block, ordered by first appearance). Media units follow immediately after their owning block's text. No 'Source:' or 'Sources:' suffix is appended anywhere in the function.",
+      "sense_check_id": "SC10",
+      "executor_note": "(not provided)"
+    },
+    {
+      "id": "SC16",
+      "task_id": "T13",
+      "question": "Does _message_payload output include media_refs_available with {kind, index, url_present, content_type, filename} for attachments and embeds?",
+      "verdict": "PASS. _message_payload now builds media_refs_available as a list of compact dicts. Attachments get {kind: 'attachment', index: idx, url_present: bool, content_type, filename}. Embeds get {kind: 'embed', index: embed_idx, url_present: bool, content_type: None, filename: None}. Shape matches get_topic_editor_message_context output.",
+      "sense_check_id": "SC16",
+      "executor_note": "(not provided)"
+    }
+  ]
+}

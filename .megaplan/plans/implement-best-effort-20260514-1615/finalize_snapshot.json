@@ -1,0 +1,498 @@
+{
+  "tasks": [
+    {
+      "id": "T1",
+      "description": "Create src/common/external_media.py with shared pure helpers: extract_external_urls(), domain safelist (from curator.py:133 plus canonical domains), platform-policy lookup (short-form=lazy-resolve, long-form=fallback-link-only), URL normalisation, cache-key creation, content-hash calculation, content-type classification, Discord upload compatibility checks, and URL sanitisation for logs. The extract_external_urls helper must deterministically scan message content/clean_content first, then embed URL/thumbnail/image/video fields in a stable order.",
+      "depends_on": [],
+      "status": "pending",
+      "executor_notes": "",
+      "reviewer_verdict": "",
+      "kind": "code",
+      "watch_items": [
+        "Must not import from src.features.* \u2014 common cannot depend on features",
+        "Safelist must include both curator mirror domains (fixupx, fxtwitter, vxtwitter, twittpr, ddinstagram, rxddit) and canonical domains (reddit.com, x.com, twitter.com, instagram.com)",
+        "Platform policy: youtube.com/youtu.be, vimeo.com, twitch.tv \u2192 fallback-link-only; reddit.com, x.com, twitter.com, instagram.com, tiktok.com, streamable.com \u2192 eligible for lazy resolution",
+        "extract_external_urls must be deterministic \u2014 same ordering regardless of caller"
+      ],
+      "sense_checks": [
+        {
+          "id": "SC1",
+          "task_id": "T1",
+          "question": "Does extract_external_urls return identical results when called from _message_payload and from StorageHandler.get_topic_editor_message_context for the same input message?",
+          "verdict": ""
+        }
+      ]
+    },
+    {
+      "id": "T2",
+      "description": "Create src/features/summarising/external_media_resolver.py with two-tier safety: (1) source-provenance check using T1 safelist before yt-dlp or HTTP, (2) platform-policy respect (skip yt-dlp for fallback-link-only domains), (3) yt-dlp --dump-json metadata-only with injectable subprocess runner and hard timeout, (4) download only from CDN URLs whose original source passed safelist AND content passes content-type/byte-cap/streaming-limit/timeout/Discord-upload checks, (5) configurable byte cap defaulting to practical Discord bot limits, (6) structured outcome enums (cache_hit, downloaded, skipped_domain, fallback_only_platform, metadata_failed, download_failed, oversize, unsupported_content_type, not_discord_upload_compatible), (7) file storage under configurable cache dir with URL-key+content-hash filename, (8) sanitized logging.",
+      "depends_on": [
+        "T1"
+      ],
+      "status": "pending",
+      "executor_notes": "",
+      "reviewer_verdict": "",
+      "kind": "code",
+      "watch_items": [
+        "Keep side-effectful functions (subprocess, HTTP, filesystem) as separate injectable functions, not mixed with pure logic",
+        "Never log raw URLs containing query tokens \u2014 use T1 sanitise helpers",
+        "yt-dlp CDN host must NOT be trusted standalone \u2014 source provenance from safelisted domain required",
+        "Downloads must use streaming byte-limit enforcement, not just post-download size check",
+        "Resolved file path must include content_hash to avoid collisions"
+      ],
+      "sense_checks": [
+        {
+          "id": "SC2",
+          "task_id": "T2",
+          "question": "Does the resolver reject a safelisted source URL whose yt-dlp-resolved CDN URL points to a non-image/non-video content type, and does it return a structured fallback outcome (not an exception)?",
+          "verdict": ""
+        }
+      ]
+    },
+    {
+      "id": "T3",
+      "description": "Add get_external_media_cache(url_key) and upsert_external_media_cache(row) to db_handler.py (sync wrappers using _run_async_in_thread pattern, placed near the existing message_media_understandings wrappers) and corresponding async methods to storage_handler.py. Row shape: url_key, source_url_sanitized, source_domain, status, content_hash, media_kind, content_type, byte_size, file_path, resolved_url_sanitized, failure_reason, metadata, created_at, updated_at.",
+      "depends_on": [],
+      "status": "pending",
+      "executor_notes": "",
+      "reviewer_verdict": "",
+      "kind": "code",
+      "watch_items": [
+        "Follow existing pattern: db_handler.py sync method \u2192 _run_async_in_thread \u2192 storage_handler.py async method",
+        "Table name: external_media_cache",
+        "get returns None on cache miss (not an exception)",
+        "upsert uses ON CONFLICT (url_key) DO UPDATE pattern"
+      ],
+      "sense_checks": [
+        {
+          "id": "SC3",
+          "task_id": "T3",
+          "question": "Does get_external_media_cache return None (not raise) when the storage_handler is None or when Supabase returns no rows?",
+          "verdict": ""
+        }
+      ]
+    },
+    {
+      "id": "T4",
+      "description": "Create .migrations_staging/20260514160000_external_media_cache.sql with CREATE TABLE IF NOT EXISTS external_media_cache (url_key TEXT PRIMARY KEY, source_url_sanitized TEXT, source_domain TEXT, status TEXT NOT NULL, content_hash TEXT, media_kind TEXT, content_type TEXT, byte_size BIGINT, file_path TEXT, resolved_url_sanitized TEXT, failure_reason TEXT, metadata JSONB DEFAULT '{}', created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now()) and CREATE INDEX idx_external_media_cache_status ON external_media_cache(status).",
+      "depends_on": [],
+      "status": "pending",
+      "executor_notes": "",
+      "reviewer_verdict": "",
+      "kind": "code",
+      "watch_items": [
+        "Use CREATE TABLE IF NOT EXISTS for idempotency",
+        "url_key is the primary key (content-hash of the original URL)",
+        "metadata JSONB defaults to '{}' not NULL",
+        "The migration staging directory must be created if it doesn't already exist"
+      ],
+      "sense_checks": [
+        {
+          "id": "SC4",
+          "task_id": "T4",
+          "question": "Does the SQL migration use IF NOT EXISTS for both the table and index to be safe for re-run?",
+          "verdict": ""
+        }
+      ]
+    },
+    {
+      "id": "T5",
+      "description": "Extend normalize_media_ref at topic_editor.py:3387 to accept kind='external' with {message_id, kind: 'external', index}. Preserve existing shorthand attachment behavior exactly. Update prompt text around line 110-115 and tool schema enum at line 263 to include 'external' as a valid kind. Update the 'Canonical media-ref shape' docstring to say kind can be 'attachment'|'embed'|'external'. Also update the tool schema description at ~line 257 so agents know external refs are secondary and block-bound.",
+      "depends_on": [
+        "T1"
+      ],
+      "status": "pending",
+      "executor_notes": "",
+      "reviewer_verdict": "",
+      "kind": "code",
+      "watch_items": [
+        "Existing shorthand {message_id, attachment_index} must continue to normalize to {kind: 'attachment', index}",
+        "Invalid kinds other than attachment/embed/external must still raise ValueError",
+        "The new kind must appear in the JSON schema enum at ~line 263",
+        "Do not change the existing default-kinds-to-attachment behavior for legacy callers"
+      ],
+      "sense_checks": [
+        {
+          "id": "SC5",
+          "task_id": "T5",
+          "question": "Does normalize_media_ref({message_id: '123', kind: 'external', index: 0}) return {message_id: '123', kind: 'external', index: 0} while normalize_media_ref({message_id: '123', attachment_index: 0}) still returns {message_id: '123', kind: 'attachment', index: 0} unchanged?",
+          "verdict": ""
+        }
+      ]
+    },
+    {
+      "id": "T6",
+      "description": "Wire extract_external_urls from T1 into TopicEditor._message_payload at ~line 3056 and StorageHandler.get_topic_editor_message_context at ~line 1341. In _message_payload: after attachment and embed entries, append external entries using extract_external_urls(message). In get_topic_editor_message_context: after attachment and embed media_refs_available, append external entries using the same helper. External entries use compact shape: {kind: 'external', index: N, domain: 'x.com', url_present: true, source: 'content'|'embed'}. Both callers must use the exact same helper so external index N is identical in both payloads.",
+      "depends_on": [
+        "T1",
+        "T5"
+      ],
+      "status": "pending",
+      "executor_notes": "",
+      "reviewer_verdict": "",
+      "kind": "code",
+      "watch_items": [
+        "Both _message_payload and get_topic_editor_message_context must call the same extract_external_urls helper \u2014 do not duplicate URL detection logic",
+        "Compact entries must NOT include raw URLs \u2014 only sanitized/display fields",
+        "External entries go AFTER attachment/embed entries so Discord media gets priority indexing",
+        "Do not auto-shortlist external links \u2014 reaction-qualified auto-shortlisting is attachment/embed only"
+      ],
+      "sense_checks": [
+        {
+          "id": "SC6",
+          "task_id": "T6",
+          "question": "If a message has 2 attachments, 1 embed, and 3 safelisted external URLs, does _message_payload produce media_refs_available with indices 0-1 (attachment), 2 (embed), 3-5 (external) in that exact order?",
+          "verdict": ""
+        }
+      ]
+    },
+    {
+      "id": "T7",
+      "description": "Update three areas in topic_editor.py: (1) Block-level media-ref validation at ~line 1621: add explicit elif kind == 'external' branch that validates source message exists and extract_external_urls(ref_msg)[index] exists and is source-domain safelisted; reject out-of-range/blocked-domain refs with auditable transitions; never call resolver here. (2) _resolve_media_url_from_metadata at ~line 3703: add explicit elif kind == 'external' branch that calls extract_external_urls(meta)[index] and returns the original URL as deterministic fallback (no extraction/download). (3) render_topic_publish_units at ~line 3687: for external refs, build media units carrying kind/external, the original URL as url, and the ref; do not resolve. (4) _summarize_source_media_counts at ~line 2878: add external_links count (separate from resolvable_media) using extract_external_urls; do not silently inflate existing attachment/embed counts.",
+      "depends_on": [
+        "T1",
+        "T5"
+      ],
+      "status": "pending",
+      "executor_notes": "",
+      "reviewer_verdict": "",
+      "kind": "code",
+      "watch_items": [
+        "The else: # embed branch at line 1680 must become elif kind == 'embed': with an else: raise/reject for unknown kinds",
+        "_resolve_media_url_from_metadata external branch must remain pure \u2014 no subprocess/network/disk calls",
+        "Existing attachment and embed counts must return identical values after this change",
+        "external_links count in source media counts is a new key, not merged into resolvable_media"
+      ],
+      "sense_checks": [
+        {
+          "id": "SC7",
+          "task_id": "T7",
+          "question": "After this change, does _summarize_source_media_counts return the same attachments/embeds/resolvable_media counts for current test inputs, with the new external_links key reporting external URLs separately?",
+          "verdict": ""
+        }
+      ]
+    },
+    {
+      "id": "T8",
+      "description": "Replace flat string-only send loop in _publish_topic structured path (lines 2750-2831) with explicit send units. Introduce local send-unit model: text units (send_kind: 'text', content), URL fallback units (send_kind: 'url', content, ref), and file units (send_kind: 'file', file_path, filename, fallback_url, ref, trace). Build send units from publish_units while preserving suppressed-mode output (flat_messages, media_indices, media_count, flat_message_count). For external file units, lazily call T2 resolver before sending; on cache hit or download success, send discord.File; on any failure, send fallback URL text. Each send unit produces one Discord message ID. Status is 'sent' when all units send, 'partial' when some send, 'failed' when none send. Track per-unit publish traces for external media (cache hit/downloaded/skipped/fallback). Leave simple-topic (non-blocks) path unchanged.",
+      "depends_on": [
+        "T2",
+        "T7"
+      ],
+      "status": "pending",
+      "executor_notes": "",
+      "reviewer_verdict": "",
+      "kind": "code",
+      "watch_items": [
+        "Suppressed mode must still return publish_units, flat_messages, media_indices, source_media_counts, media_count, flat_message_count in same shape",
+        "sent_ids must append one entry per successful send unit (text, fallback URL, or file)",
+        "If discord.File send fails, send the fallback URL text instead and continue \u2014 never abort the batch",
+        "Simple-topic (non-blocks) publish path at lines 2833-2876 must remain unchanged",
+        "Per-unit traces must use sanitized URLs \u2014 no query tokens in logs"
+      ],
+      "sense_checks": [
+        {
+          "id": "SC8",
+          "task_id": "T8",
+          "question": "When publishing a structured topic with one text block and one external media ref where the resolver succeeds: does suppressed mode return flat_messages containing the text content plus the URL (not file path), with media_indices pointing to the URL position, and does actual send produce two Discord messages (one text, one file attachment) with two sent_ids?",
+          "verdict": ""
+        }
+      ]
+    },
+    {
+      "id": "T9",
+      "description": "Create tests/test_external_media_resolver.py with unit tests for: (1) extract_external_urls deterministic ordering across content+embeds, (2) safelisted/blocked source domains, (3) URL sanitization with query tokens, (4) cache-key stability, (5) content-type classification, (6) Discord upload compatibility, (7) oversize detection, (8) metadata JSON parsing, (9) two-tier safety (safelisted source + valid CDN passes, non-safelisted source rejects before yt-dlp, wrong content-type CDN falls back), (10) platform policy (YouTube/Vimeo/Twitch return fallback_only_platform, Reddit/X proceed). Stub subprocess and download; no real network/yt-dlp calls.",
+      "depends_on": [
+        "T1",
+        "T2"
+      ],
+      "status": "pending",
+      "executor_notes": "",
+      "reviewer_verdict": "",
+      "kind": "test",
+      "watch_items": [
+        "All tests must use stubs/monkeypatch for subprocess, HTTP, and filesystem \u2014 no real network/youtube-dl calls",
+        "Cover both content URLs and embed URL fields (url, thumbnail, image, video)",
+        "Cover the platform policy explicitly: long-form domains must return fallback_only_platform without invoking resolver"
+      ],
+      "sense_checks": [
+        {
+          "id": "SC9",
+          "task_id": "T9",
+          "question": "Does a test case confirm that extract_external_urls returns the same results for the same message regardless of which caller invokes it?",
+          "verdict": ""
+        }
+      ]
+    },
+    {
+      "id": "T10",
+      "description": "Extend tests/test_topic_editor_core.py: (1) add TestNormalizeMediaRef tests for kind='external' acceptance, rejection of out-of-range external index, and rejection of unknown kinds, (2) add tests for _resolve_media_url_from_metadata with kind='external' returning original URL, (3) add tests for render_topic_publish_units with external media refs producing media units with kind/external and original URL, (4) add tests for _summarize_source_media_counts returning separate external_links count, (5) add tests for block_media_refs with external refs. All existing attachment/embed tests must continue to pass identically.",
+      "depends_on": [
+        "T5",
+        "T6",
+        "T7"
+      ],
+      "status": "pending",
+      "executor_notes": "",
+      "reviewer_verdict": "",
+      "kind": "test",
+      "watch_items": [
+        "Must not break existing TestNormalizeMediaRef tests \u2014 they must pass without modification",
+        "New tests must use only pure functions from topic_editor \u2014 no Discord/network/DB dependencies",
+        "Test that else-branch rejects unknown kinds after external is added"
+      ],
+      "sense_checks": [
+        {
+          "id": "SC10",
+          "task_id": "T10",
+          "question": "Do all existing TestNormalizeMediaRef tests pass unchanged alongside the new external-ref tests?",
+          "verdict": ""
+        }
+      ]
+    },
+    {
+      "id": "T11",
+      "description": "Extend tests/test_topic_editor_runtime.py: (1) add test for suppressed-mode structured publish with external refs returning correct flat_messages/media_indices/media_count/flat_message_count shape, (2) add test for resolver success sending discord.File in correct block position, (3) add test for resolver failure falling back to original link text, (4) add test for oversize/unsupported media falling back, (5) add test for file-send failure falling back to URL text and continuing, (6) add regression test confirming reaction-qualified auto-shortlist still creates watching topics and does not direct-post at 5 reactions, (7) add test for partial status when mixed text/file units succeed/fail. Use monkeypatch/stubs for resolver, channel.send, discord.File, and cache.",
+      "depends_on": [
+        "T3",
+        "T8"
+      ],
+      "status": "pending",
+      "executor_notes": "",
+      "reviewer_verdict": "",
+      "kind": "test",
+      "watch_items": [
+        "All tests must stub resolver, channel.send, discord.File \u2014 no real Discord or network calls",
+        "Must follow existing runtime test pattern (use monkeypatch, FakeDB/stubs)",
+        "Regression test must explicitly assert no direct auto-post at reaction threshold"
+      ],
+      "sense_checks": [
+        {
+          "id": "SC11",
+          "task_id": "T11",
+          "question": "Does the resolver-failure test confirm that text blocks before and after the failed external ref are still published (the batch continues)?",
+          "verdict": ""
+        }
+      ]
+    },
+    {
+      "id": "T12",
+      "description": "Run the full test suite to verify all changes: pytest tests/test_external_media_resolver.py tests/test_topic_editor_core.py tests/test_topic_editor_runtime.py -v. Fix any failures. Then run the broader regression suite: pytest tests/test_live_top_creations.py tests/test_live_runtime_wiring.py -v. Write a throwaway smoke script that exercises extract_external_urls against sample Reddit/Twitter messages, verifies deterministic ordering, then delete the script. Confirm all existing tests pass.",
+      "depends_on": [
+        "T9",
+        "T10",
+        "T11"
+      ],
+      "status": "pending",
+      "executor_notes": "",
+      "reviewer_verdict": "",
+      "kind": "test",
+      "watch_items": [
+        "If any pre-existing test fails, diagnose whether it's a regression from our changes",
+        "The throwaway script must be deleted after the smoke test confirms the fix",
+        "Run with -x to stop on first failure for efficient debugging"
+      ],
+      "sense_checks": [
+        {
+          "id": "SC12",
+          "task_id": "T12",
+          "question": "Do all tests pass (including pre-existing) with zero failures and zero errors?",
+          "verdict": ""
+        }
+      ]
+    }
+  ],
+  "watch_items": [
+    "Staged migration must be applied to production Supabase before deploying code that reads/writes external_media_cache",
+    "EXTERNAL_MEDIA_CACHE_DIR and byte cap must be configured in production before resolver can persist downloads",
+    "Long-form domains (YouTube, Vimeo, Twitch) are fallback-link-only \u2014 executor must not attempt yt-dlp for them",
+    "Never make external extraction failure block text publishing",
+    "Keep secrets out of logs \u2014 sanitize all URLs that may contain tokens",
+    "Do not reintroduce direct auto-posting at five reactions",
+    "All new functions must be pure/testable following existing stateless patterns",
+    "Every media-kind branch must be explicit attachment/embed/external \u2014 no implicit fallthrough"
+  ],
+  "sense_checks": [
+    {
+      "id": "SC1",
+      "task_id": "T1",
+      "question": "Does extract_external_urls return identical results when called from _message_payload and from StorageHandler.get_topic_editor_message_context for the same input message?",
+      "verdict": ""
+    },
+    {
+      "id": "SC2",
+      "task_id": "T2",
+      "question": "Does the resolver reject a safelisted source URL whose yt-dlp-resolved CDN URL points to a non-image/non-video content type, and does it return a structured fallback outcome (not an exception)?",
+      "verdict": ""
+    },
+    {
+      "id": "SC3",
+      "task_id": "T3",
+      "question": "Does get_external_media_cache return None (not raise) when the storage_handler is None or when Supabase returns no rows?",
+      "verdict": ""
+    },
+    {
+      "id": "SC4",
+      "task_id": "T4",
+      "question": "Does the SQL migration use IF NOT EXISTS for both the table and index to be safe for re-run?",
+      "verdict": ""
+    },
+    {
+      "id": "SC5",
+      "task_id": "T5",
+      "question": "Does normalize_media_ref({message_id: '123', kind: 'external', index: 0}) return {message_id: '123', kind: 'external', index: 0} while normalize_media_ref({message_id: '123', attachment_index: 0}) still returns {message_id: '123', kind: 'attachment', index: 0} unchanged?",
+      "verdict": ""
+    },
+    {
+      "id": "SC6",
+      "task_id": "T6",
+      "question": "If a message has 2 attachments, 1 embed, and 3 safelisted external URLs, does _message_payload produce media_refs_available with indices 0-1 (attachment), 2 (embed), 3-5 (external) in that exact order?",
+      "verdict": ""
+    },
+    {
+      "id": "SC7",
+      "task_id": "T7",
+      "question": "After this change, does _summarize_source_media_counts return the same attachments/embeds/resolvable_media counts for current test inputs, with the new external_links key reporting external URLs separately?",
+      "verdict": ""
+    },
+    {
+      "id": "SC8",
+      "task_id": "T8",
+      "question": "When publishing a structured topic with one text block and one external media ref where the resolver succeeds: does suppressed mode return flat_messages containing the text content plus the URL (not file path), with media_indices pointing to the URL position, and does actual send produce two Discord messages (one text, one file attachment) with two sent_ids?",
+      "verdict": ""
+    },
+    {
+      "id": "SC9",
+      "task_id": "T9",
+      "question": "Does a test case confirm that extract_external_urls returns the same results for the same message regardless of which caller invokes it?",
+      "verdict": ""
+    },
+    {
+      "id": "SC10",
+      "task_id": "T10",
+      "question": "Do all existing TestNormalizeMediaRef tests pass unchanged alongside the new external-ref tests?",
+      "verdict": ""
+    },
+    {
+      "id": "SC11",
+      "task_id": "T11",
+      "question": "Does the resolver-failure test confirm that text blocks before and after the failed external ref are still published (the batch continues)?",
+      "verdict": ""
+    },
+    {
+      "id": "SC12",
+      "task_id": "T12",
+      "question": "Do all tests pass (including pre-existing) with zero failures and zero errors?",
+      "verdict": ""
+    }
+  ],
+  "user_actions": [
+    {
+      "id": "U1",
+      "description": "Apply .migrations_staging/20260514160000_external_media_cache.sql to production Supabase before deploying code that reads/writes the external_media_cache table. Run: psql or Supabase dashboard SQL editor to execute the migration.",
+      "phase": "after_execute",
+      "rationale": "The migration creates the external_media_cache table. Code in T3 that reads/writes this table will fail at runtime if the table does not exist. This is a deployment follow-up, not a blocker for local implementation.",
+      "blocks_task_ids": []
+    },
+    {
+      "id": "U2",
+      "description": "Configure EXTERNAL_MEDIA_CACHE_DIR in production environment (default is a local temp directory). Set to a durable path with adequate disk space for cached media downloads. Also configure EXTERNAL_MEDIA_MAX_BYTES if the default (aligned with Discord bot upload limit, ~25MB) is not appropriate. Apply via .env or deployment config.",
+      "phase": "after_execute",
+      "rationale": "The resolver stores downloaded files under the cache directory. Without a durable path, cached files are lost on restart. The byte cap should be tuned to the specific Discord bot's upload limits. This is a deployment follow-up.",
+      "blocks_task_ids": []
+    },
+    {
+      "id": "U3",
+      "description": "After code and schema are deployed to production, run a manual smoke test: publish a structured topic containing a Reddit or X external media ref and verify either an attached file or fallback link appears in the correct block position on Discord.",
+      "phase": "after_execute",
+      "rationale": "This is the only way to validate end-to-end behavior with real yt-dlp and Discord. Requires physical access to the production Discord server.",
+      "requires_human_only_reason": "Requires a human to visually inspect the published Discord message and confirm the attached media or fallback link appears correctly."
+    }
+  ],
+  "meta_commentary": "Execution order is T1 \u2192 (T2, T5 in parallel) \u2192 (T3, T4, T6, T7 in parallel, but T6 after T5, T7 after T5) \u2192 T8 \u2192 (T9, T10 in parallel) \u2192 T11 \u2192 T12. The most critical correctness invariant is that extract_external_urls is the single source of truth for external URL extraction and indexing \u2014 every caller must use it. When updating the validation else-branch at line 1680, change 'else: # embed' to 'elif kind == \"embed\":' and add a new 'else:' that rejects with an explicit error; this prevents any future kind from silently falling into embed logic. The publisher refactoring (T8) is the highest-risk change because it alters the send loop \u2014 keep suppressed-mode output shape identical and preserve simple-topic path verbatim. Write the throwaway smoke script in T12 to exercise the full extraction \u2192 normalization \u2192 rendering pipeline with sample Reddit/Twitter messages before deleting it.",
+  "validation": {
+    "plan_steps_covered": [
+      {
+        "plan_step_summary": "Step 1: Add shared deterministic external URL helpers in src/common/external_media.py",
+        "finalize_item_ids": [
+          "T1"
+        ]
+      },
+      {
+        "plan_step_summary": "Step 2: Implement resolver side effects with two-tier safety in src/features/summarising/external_media_resolver.py",
+        "finalize_item_ids": [
+          "T2"
+        ]
+      },
+      {
+        "plan_step_summary": "Step 3: Add cache wrappers in db_handler.py/storage_handler.py and staged migration SQL",
+        "finalize_item_ids": [
+          "T3",
+          "T4"
+        ]
+      },
+      {
+        "plan_step_summary": "Step 4: Extend normalize_media_ref, prompt/tool schema text, and explicit media-kind branching",
+        "finalize_item_ids": [
+          "T5"
+        ]
+      },
+      {
+        "plan_step_summary": "Step 5: Expose external refs in source payloads with stable indexes via shared extract_external_urls",
+        "finalize_item_ids": [
+          "T6"
+        ]
+      },
+      {
+        "plan_step_summary": "Step 6: Validate external refs without requiring extraction success",
+        "finalize_item_ids": [
+          "T7"
+        ]
+      },
+      {
+        "plan_step_summary": "Step 7: Keep rendering pure \u2014 extend _resolve_media_url_from_metadata, render_topic_publish_units, _summarize_source_media_counts",
+        "finalize_item_ids": [
+          "T7"
+        ]
+      },
+      {
+        "plan_step_summary": "Step 8: Replace flat string-only publishing with explicit send units (text/url/file)",
+        "finalize_item_ids": [
+          "T8"
+        ]
+      },
+      {
+        "plan_step_summary": "Step 9: Add resolver unit tests in tests/test_external_media_resolver.py",
+        "finalize_item_ids": [
+          "T9"
+        ]
+      },
+      {
+        "plan_step_summary": "Step 10: Extend TopicEditor core and runtime tests",
+        "finalize_item_ids": [
+          "T10",
+          "T11"
+        ]
+      },
+      {
+        "plan_step_summary": "Deployment Follow-Up: Apply migration and configure env vars",
+        "finalize_item_ids": [
+          "U1",
+          "U2"
+        ]
+      },
+      {
+        "plan_step_summary": "Validation Order: Run test suites",
+        "finalize_item_ids": [
+          "T12"
+        ]
+      }
+    ],
+    "orphan_tasks": [],
+    "completeness_notes": "All 10 plan steps and the deployment follow-up items are mapped. T7 covers both Steps 6 and 7 because validation, resolution, rendering, and counting are tightly coupled in the same set of functions. Steps 7 and 8 from the plan (which are really plan Phases: 'Phase 4: Pure Rendering' step 7 and step 8) are covered by T7 and T8 respectively. Plan Step 9 'Add resolver unit tests' maps to T9, and Step 10 'Extend TopicEditor core/runtime tests' maps to T10+T11. The deployment follow-up items map to U1-U3. T12 maps to the Validation Order section. No tasks are orphaned \u2014 every task implements a specific plan step.",
+    "coverage_complete": true
+  },
+  "baseline_test_failures": [],
+  "baseline_test_command": "pytest --tb=no -q --no-header",
+  "baseline_test_note": "Run this before starting implementation to capture the baseline. All existing tests should pass. If any pre-existing failures exist, note them here so T12 can distinguish regressions from pre-existing issues."
+}

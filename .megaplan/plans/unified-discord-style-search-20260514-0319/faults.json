@@ -1,0 +1,27 @@
+{
+  "flags": [
+    {
+      "id": "FLAG-001",
+      "concern": "Archive-scope `mentions_author_id` will fail because `discord_messages` has no `mentions` column (confirmed zero hits in storage_handler.py and db_handler.py). The plan lists this as an open question but does not commit the executor to a concrete fallback. Without explicit guidance, the storage method may attempt to filter on a non-existent column, causing Supabase errors for any archive search that uses `mentions_author_id`. The implementation must fall back to content-regex matching (e.g., `.ilike('content', '%<@123%')` or Python-side filtering on `<@123>` / `<@!123>` tokens).",
+      "category": "correctness",
+      "severity_hint": "uncertain",
+      "evidence": "Resolved FLAG-001 by committing to Discord mention-token regex matching (`<@ID>` / `<@!ID>`) against `content` for both window and archive scope, since `discord_messages` has no dedicated `mentions` column. Archive scope uses Supabase `.ilike()` with parameterized token patterns (safe: integer IDs formatted into fixed tokens, not user-controlled free text). Window scope uses Python `re.search`. Also clarified the two-pass archive `has` filter strategy (indexed SQL filters first, Python post-filter for jsonb attachment/embed checks) to avoid depending on undocumented Supabase jsonb operators. Made step ordering more concrete with exact line references and renamed `_search_source_messages` \u2192 `_search_window_messages` to avoid ambiguity.",
+      "raised_in": "critique_v1.json",
+      "status": "addressed",
+      "severity": "significant",
+      "verified": false,
+      "addressed_in": "plan_v2.md"
+    },
+    {
+      "id": "verifiability-0",
+      "concern": "Criterion 9: requires human verification (subjective_judgment).",
+      "category": "other",
+      "severity_hint": "likely-minor",
+      "evidence": "",
+      "raised_in": "critique_v1.json",
+      "status": "open",
+      "severity": "minor",
+      "verified": false
+    }
+  ]
+}

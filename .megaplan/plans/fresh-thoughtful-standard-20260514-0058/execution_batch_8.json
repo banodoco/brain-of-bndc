@@ -1,0 +1,65 @@
+{
+  "output": "Batch 8 completed successfully. T9: Updated TOPIC_EDITOR_SYSTEM_PROMPT with media-understanding guidance paragraph. T11: Created tests/test_topic_editor_media_understanding.py with 6 tests covering cache-first, cross-message dedup, payload enrichment, budget-cap, and budget-not-deducted-on-cache-hit. Full test suite: 39 passed, 0 failed.",
+  "files_changed": [
+    "src/features/summarising/topic_editor.py",
+    "tests/test_topic_editor_media_understanding.py"
+  ],
+  "commands_run": [
+    "python -m pytest tests/test_topic_editor_media_understanding.py -v --tb=long",
+    "python -m pytest tests/test_vision_clients.py tests/test_topic_editor_runtime.py tests/test_live_storage_wrappers.py tests/test_topic_editor_media_understanding.py -v --tb=short"
+  ],
+  "deviations": [
+    "Advisory quality: tests/test_topic_editor_media_understanding.py grew by 516 lines (threshold 200).",
+    "Advisory quality: tests/test_topic_editor_media_understanding.py has similar functions get_archived_messages_after_checkpoint and get_topics (100% similarity).",
+    "Advisory quality: tests/test_topic_editor_media_understanding.py has similar functions get_archived_messages_after_checkpoint and get_topic_aliases (100% similarity).",
+    "Advisory quality: tests/test_topic_editor_media_understanding.py has similar functions get_archived_messages_after_checkpoint and search_topic_editor_topics (100% similarity).",
+    "Advisory quality: tests/test_topic_editor_media_understanding.py has similar functions get_topics and get_topic_aliases (100% similarity).",
+    "Advisory quality: tests/test_topic_editor_media_understanding.py has similar functions get_topics and search_topic_editor_topics (100% similarity).",
+    "Advisory quality: tests/test_topic_editor_media_understanding.py has similar functions get_topic_aliases and search_topic_editor_topics (100% similarity).",
+    "Advisory quality: src/features/summarising/topic_editor.py adds unused imports: hashlib.",
+    "Advisory quality: tests/test_topic_editor_media_understanding.py adds unused imports: pytest.",
+    "Advisory audit finding: Executor claimed changed files not present in git status: ../supabase/migrations/20260514010000_message_media_understandings.sql, .migrations_staging/20260514010000_message_media_understandings.sql",
+    "Advisory audit finding: Sense check SC12 is missing an executor acknowledgment.",
+    "Advisory audit finding: Tasks left pending after execute (executor never started them): T12"
+  ],
+  "task_updates": [
+    {
+      "id": "T9",
+      "status": "done",
+      "executor_notes": "Updated TOPIC_EDITOR_SYSTEM_PROMPT (lines 64-73) with a paragraph appended after the finalize_run paragraph. The new paragraph explains: (1) media-bearing messages may include pre-computed media_understandings cached from prior runs, surfaced in the media_understandings list per source message; (2) for uncached media, call understand_image or understand_video; (3) use kind to discriminate \u2014 skip workflow_graph items entirely, consider generation items with aesthetic_quality >= 6, and cite technical_signal and subject when writing about media-backed topics. All existing 18 runtime tests still pass.",
+      "files_changed": [
+        "src/features/summarising/topic_editor.py"
+      ],
+      "task_id": "T9",
+      "commands_run": []
+    },
+    {
+      "id": "T11",
+      "status": "done",
+      "executor_notes": "Created tests/test_topic_editor_media_understanding.py with 6 tests: (1) test_cache_first_second_call_no_api \u2014 verifies second same-PK call returns cached without API; (2) test_cross_message_dedup_via_content_hash \u2014 same bytes, different message_id, first API call, second hash-dedup persists new PK row; (3) test_payload_enrichment_surfaces_cached_understandings \u2014 seeds cache, calls _build_initial_user_payload, verifies media_understandings with kind/subject/aesthetic_quality present; (4) test_budget_cap_returns_budget_exceeded \u2014 budget=0.001 returns budget_exceeded without API call; (5) test_budget_not_deducted_on_cache_hit \u2014 pre-cached PK hit leaves vision_cost_usd=0.0; (6) test_vision_tool_schemas_are_registered \u2014 smoke check for tool schemas. All vision_clients stubbed via monkeypatch.setattr on src.common.vision_clients module; requests.get stubbed via monkeypatch.setattr on imported requests module. Zero real API calls. Full suite: 39 passed (10 vision + 18 runtime + 5 storage + 6 new), zero failures.",
+      "files_changed": [
+        "tests/test_topic_editor_media_understanding.py"
+      ],
+      "task_id": "T11",
+      "commands_run": []
+    }
+  ],
+  "sense_check_acknowledgments": [
+    {
+      "id": "SC9",
+      "task_id": "T9",
+      "verdict": "PASS",
+      "note": "System prompt mentions: media_understandings (pre-computed, cached, surfaced in source message payloads), understand_image/understand_video (for uncached media affecting editorial judgment), kind-based discrimination (skip workflow_graph, consider generation with aesthetic_quality >= 6), and citation guidance (cite technical_signal and subject when writing about media-backed topics). All four requirements met.",
+      "sense_check_id": "SC9",
+      "executor_note": "System prompt mentions: media_understandings (pre-computed, cached, surfaced in source message payloads), understand_image/understand_video (for uncached media affecting editorial judgment), kind-based discrimination (skip workflow_graph, consider generation with aesthetic_quality >= 6), and citation guidance (cite technical_signal and subject when writing about media-backed topics). All four requirements met."
+    },
+    {
+      "id": "SC11",
+      "task_id": "T11",
+      "verdict": "PASS",
+      "note": "All 6 new tests pass: cache-first, cross-message dedup, payload enrichment, budget-cap, budget-not-deducted-on-cache-hit, and tool schemas. vision_clients stubbed via monkeypatch \u2014 zero real API calls. Full regression suite: 18 runtime + 5 storage tests all pass. Grand total: 39 passed, 0 failed.",
+      "sense_check_id": "SC11",
+      "executor_note": "All 6 new tests pass: cache-first, cross-message dedup, payload enrichment, budget-cap, budget-not-deducted-on-cache-hit, and tool schemas. vision_clients stubbed via monkeypatch \u2014 zero real API calls. Full regression suite: 18 runtime + 5 storage tests all pass. Grand total: 39 passed, 0 failed."
+    }
+  ]
+}

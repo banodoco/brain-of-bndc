@@ -66,6 +66,23 @@ class StorageHandler:
         except Exception as e:
             logger.error(f"Failed to initialize Supabase client: {e}", exc_info=True)
             raise
+
+    @staticmethod
+    def _normalize_attachment_list(attachments: Any) -> List[Dict[str, Any]]:
+        """Return attachment/embed rows as a list from list, dict, or JSON string inputs."""
+        if attachments is None:
+            return []
+        if isinstance(attachments, list):
+            return attachments
+        if isinstance(attachments, dict):
+            return [attachments]
+        if isinstance(attachments, str):
+            try:
+                parsed = json.loads(attachments)
+            except (json.JSONDecodeError, TypeError):
+                return []
+            return StorageHandler._normalize_attachment_list(parsed)
+        return []
     
     async def store_messages_to_supabase(self, messages: List[Dict]) -> int:
         """
@@ -929,7 +946,12 @@ class StorageHandler:
                 # so any competing runner that wins the post-expiry race blocks this insert.
                 await asyncio.to_thread(
                     self.supabase_client.table('topic_editor_runs')
-                    .update({'status': 'expired', 'metadata': metadata})
+                    .update({
+                        'status': 'failed',
+                        'error_message': 'stale running lease expired by a later run',
+                        'completed_at': now,
+                        'metadata': metadata,
+                    })
                     .eq('run_id', stale.get('run_id'))
                     .eq('environment', environment)
                     .eq('status', 'running')
@@ -937,7 +959,7 @@ class StorageHandler:
                     .execute
                 )
         except Exception as e:
-            logger.error(f"Error expiring stale topic_editor_runs lease: {e}", exc_info=True)
+            logger.error(f"Error failing stale topic_editor_runs lease: {e}", exc_info=True)
             return None
 
         return await self._insert_live_row('topic_editor_runs', self._clean_payload({
@@ -1261,7 +1283,7 @@ class StorageHandler:
         try:
             query = (
                 self.supabase_client.table('discord_messages')
-                .select('message_id,channel_id,author_id,content,created_at,reference_id,thread_id')
+                .select('message_id,channel_id,author_id,content,attachments,embeds,created_at,reference_id,thread_id')
                 .in_('message_id', ids)
                 .eq('is_deleted', False)
             )
@@ -1289,6 +1311,51 @@ class StorageHandler:
                 except (TypeError, ValueError):
                     author_id = None
                 snapshot = snapshots.get(author_id, {})
+
+                # ── Build media_refs_available with attachment, embed, external entries ──
+                media_refs_available: List[Dict[str, Any]] = []
+                attachments = self._normalize_attachment_list(row.get('attachments'))
+                for idx, att in enumerate(attachments):
+                    media_refs_available.append({
+                        'kind': 'attachment',
+                        'index': idx,
+                        'url_present': bool(
+                            (isinstance(att, dict) and (att.get('url') or att.get('proxy_url')))
+                            if isinstance(att, dict) else False
+                        ),
+                        'content_type': att.get('content_type') if isinstance(att, dict) else None,
+                        'filename': att.get('filename') if isinstance(att, dict) else None,
+                    })
+
+                embeds = self._normalize_attachment_list(row.get('embeds'))
+                for embed_idx, embed in enumerate(embeds if isinstance(embeds, list) else []):
+                    media_refs_available.append({
+                        'kind': 'embed',
+                        'index': embed_idx,
+                        'url_present': (
+                            isinstance(embed, dict) and bool(
+                                (isinstance(embed.get('url'), dict) and (embed['url'].get('url') or embed['url'].get('proxy_url')))
+                                or (isinstance(embed.get('thumbnail'), dict) and (embed['thumbnail'].get('url') or embed['thumbnail'].get('proxy_url')))
+                                or (isinstance(embed.get('image'), dict) and (embed['image'].get('url') or embed['image'].get('proxy_url')))
+                                or (isinstance(embed.get('video'), dict) and (embed['video'].get('url') or embed['video'].get('proxy_url')))
+                            )
+                        ),
+                        'content_type': None,
+                        'filename': None,
+                    })
+
+                # External linked media refs (after attachment/embed for priority indexing)
+                # Uses the shared extract_external_urls helper from src.common.external_media
+                from src.common.external_media import extract_external_urls
+                for external_entry in extract_external_urls(row):
+                    media_refs_available.append({
+                        'kind': external_entry['kind'],
+                        'index': external_entry['index'],
+                        'domain': external_entry['domain'],
+                        'url_present': external_entry['url_present'],
+                        'source': external_entry['source'],
+                    })
+
                 compacted.append({
                     'message_id': str(row.get('message_id')),
                     'channel_name': row.get('channel_name'),
@@ -1302,6 +1369,7 @@ class StorageHandler:
                     'created_at': row.get('created_at'),
                     'reply_to_message_id': row.get('reference_id'),
                     'thread_id': row.get('thread_id'),
+                    'media_refs_available': media_refs_available,
                 })
             return compacted
         except Exception as e:
@@ -1816,6 +1884,126 @@ class StorageHandler:
             logger.warning("Could not search live-update messages: %s", e, exc_info=True)
             return []
 
+    async def search_messages_unified(
+        self,
+        *,
+        scope: str = "archive",
+        guild_id: Optional[int] = None,
+        environment: str = "prod",
+        query: Optional[str] = None,
+        from_author_id: Optional[int] = None,
+        in_channel_id: Optional[int] = None,
+        mentions_author_id: Optional[int] = None,
+        has: Optional[List[str]] = None,
+        after: Optional[str] = None,
+        before: Optional[str] = None,
+        is_reply: Optional[bool] = None,
+        limit: int = 20,
+    ) -> Dict[str, Any]:
+        """Search archived Discord messages with Discord-style filters."""
+        if not self.supabase_client:
+            return {"messages": [], "truncated": False}
+
+        safe_limit = max(1, min(int(limit or 20), 50))
+        fetch_limit = min(max(safe_limit * 5, 50), 250)
+        select_columns = (
+            'message_id,guild_id,channel_id,author_id,content,created_at,'
+            'attachments,embeds,reaction_count,thread_id,reference_id'
+        )
+
+        def parse_time_bound(value: Optional[str]) -> Optional[str]:
+            if not value:
+                return None
+            raw = str(value).strip()
+            if not raw:
+                return None
+            unit = raw[-1].lower()
+            number = raw[:-1]
+            try:
+                amount = float(number)
+            except ValueError:
+                return raw
+            if unit == "h":
+                return (datetime.utcnow() - timedelta(hours=amount)).isoformat()
+            if unit == "d":
+                return (datetime.utcnow() - timedelta(days=amount)).isoformat()
+            if unit == "m":
+                return (datetime.utcnow() - timedelta(minutes=amount)).isoformat()
+            return raw
+
+        def attachment_kind(row: Dict[str, Any], wanted: str) -> bool:
+            content = str(row.get('content') or '').lower()
+            attachments = self._as_json_array(row.get('attachments'))
+            embeds = self._as_json_array(row.get('embeds'))
+            if wanted == "embed":
+                return bool(embeds)
+            if wanted == "link":
+                return "http://" in content or "https://" in content or bool(embeds)
+            if wanted == "file":
+                return bool(attachments)
+            for attachment in attachments:
+                if not isinstance(attachment, dict):
+                    continue
+                content_type = str(attachment.get('content_type') or '').lower()
+                filename = str(attachment.get('filename') or '').lower()
+                if wanted == "image" and (content_type.startswith("image/") or filename.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp"))):
+                    return True
+                if wanted == "video" and (content_type.startswith("video/") or filename.endswith((".mp4", ".mov", ".webm", ".mkv"))):
+                    return True
+                if wanted == "audio" and (content_type.startswith("audio/") or filename.endswith((".mp3", ".wav", ".m4a", ".ogg", ".flac"))):
+                    return True
+            return False
+
+        try:
+            builder = (
+                self.supabase_client.table('discord_messages')
+                .select(select_columns)
+                .eq('is_deleted', False)
+                .order('created_at', desc=True)
+                .limit(fetch_limit)
+            )
+            if guild_id is not None:
+                builder = builder.eq('guild_id', guild_id)
+            if from_author_id is not None:
+                builder = builder.eq('author_id', from_author_id)
+            if in_channel_id is not None:
+                builder = builder.eq('channel_id', in_channel_id)
+            parsed_after = parse_time_bound(after)
+            if parsed_after:
+                builder = builder.gte('created_at', parsed_after)
+            parsed_before = parse_time_bound(before)
+            if parsed_before:
+                builder = builder.lte('created_at', parsed_before)
+            if query:
+                builder = builder.ilike('content', f"%{str(query)[:120]}%")
+            result = await asyncio.to_thread(builder.execute)
+            rows = result.data or []
+            if is_reply is True:
+                rows = [row for row in rows if row.get('reference_id')]
+            elif is_reply is False:
+                rows = [row for row in rows if not row.get('reference_id')]
+            wanted_kinds = [str(item).lower() for item in (has or []) if item]
+            if mentions_author_id is not None:
+                mention_variants = [
+                    f"<@{mentions_author_id}>",
+                    f"<@!{mentions_author_id}>",
+                    str(mentions_author_id),
+                ]
+                rows = [
+                    row for row in rows
+                    if any(variant in str(row.get('content') or '') for variant in mention_variants)
+                ]
+            for wanted in wanted_kinds:
+                rows = [row for row in rows if attachment_kind(row, wanted)]
+
+            truncated = len(rows) > safe_limit
+            rows = rows[:safe_limit]
+            rows = await self._attach_channel_context_and_filter_nsfw(rows)
+            return {"messages": self._compact_live_context_messages(rows), "truncated": truncated}
+        except Exception as e:
+            logger.warning("Could not search archived messages: %s", e, exc_info=True)
+            return {"messages": [], "truncated": False}
+
     async def get_live_update_context_for_message_ids(
         self,
         message_ids: List[str],
@@ -2103,6 +2291,67 @@ class StorageHandler:
             if int_id not in ids:
                 ids.append(int_id)
         return ids
+
+    async def get_reply_chain(
+        self,
+        message_id: str,
+        guild_id: Optional[int] = None,
+        environment: str = 'prod',
+        max_depth: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """Walk ancestor replies for a Discord message and return them root-first."""
+        if not self.supabase_client or not message_id:
+            return []
+
+        try:
+            depth_limit = max(1, min(int(max_depth or 5), 15))
+        except (TypeError, ValueError):
+            depth_limit = 5
+
+        select_columns = (
+            'message_id,guild_id,channel_id,author_id,content,created_at,'
+            'attachments,embeds,reaction_count,thread_id,reference_id'
+        )
+
+        async def fetch_message(target_message_id: str) -> Optional[Dict[str, Any]]:
+            query = (
+                self.supabase_client.table('discord_messages')
+                .select(select_columns)
+                .eq('message_id', str(target_message_id))
+                .eq('is_deleted', False)
+                .limit(1)
+            )
+            if guild_id is not None:
+                query = query.eq('guild_id', guild_id)
+            result = await asyncio.to_thread(query.execute)
+            rows = result.data or []
+            return rows[0] if rows else None
+
+        try:
+            ancestors: List[Dict[str, Any]] = []
+            seen = {str(message_id)}
+            current = await fetch_message(str(message_id))
+            for _ in range(depth_limit):
+                if not current:
+                    break
+                parent_id = current.get('reference_id')
+                if not parent_id:
+                    break
+                parent_id = str(parent_id)
+                if parent_id in seen:
+                    break
+                seen.add(parent_id)
+                parent = await fetch_message(parent_id)
+                if not parent:
+                    break
+                ancestors.append(parent)
+                current = parent
+
+            rows = await self._attach_channel_context_and_filter_nsfw(ancestors)
+            return list(reversed(self._compact_live_context_messages(rows)))
+        except Exception as e:
+            logger.warning("Could not fetch reply chain for live-update message %s: %s", message_id, e)
+            return []
 
     async def _get_response_messages_for_source(
         self,
@@ -2814,7 +3063,182 @@ class StorageHandler:
         file_data = await self.download_file(source_url)
         if not file_data:
             return None
-        
+
         return await self.upload_bytes_to_storage(
             file_data['bytes'], storage_path, file_data['content_type'], bucket_name
         )
+
+    # ---------- message_media_understandings ----------------------
+
+    async def get_message_media_understanding(
+        self,
+        message_id: int,
+        attachment_index: int = 0,
+        model: str = '',
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch a single media understanding row by primary key."""
+        if not self.supabase_client:
+            logger.error("Supabase client not initialized")
+            return None
+        try:
+            result = await asyncio.to_thread(
+                self.supabase_client.table('message_media_understandings')
+                .select('*')
+                .eq('message_id', message_id)
+                .eq('attachment_index', attachment_index)
+                .eq('model', model)
+                .limit(1)
+                .execute
+            )
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error(
+                "Error fetching media understanding for message_id=%s "
+                "attachment_index=%s model=%s: %s",
+                message_id, attachment_index, model, e,
+                exc_info=True,
+            )
+            return None
+
+    async def get_message_media_understanding_by_hash(
+        self,
+        content_hash: str,
+        model: Optional[str] = None,
+        media_kind: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch a media understanding by content_hash, newest first."""
+        if not self.supabase_client:
+            logger.error("Supabase client not initialized")
+            return None
+        try:
+            query = (
+                self.supabase_client.table('message_media_understandings')
+                .select('*')
+                .eq('content_hash', content_hash)
+                .order('created_at', desc=True)
+                .limit(1)
+            )
+            if model is not None:
+                query = query.eq('model', model)
+            if media_kind is not None:
+                query = query.eq('media_kind', media_kind)
+            result = await asyncio.to_thread(query.execute)
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error(
+                "Error fetching media understanding by hash %s: %s",
+                content_hash, e,
+                exc_info=True,
+            )
+            return None
+
+    async def upsert_message_media_understanding(
+        self,
+        row: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Upsert a media understanding row by PK (message_id, attachment_index, model)."""
+        if not self.supabase_client:
+            logger.error("Supabase client not initialized")
+            return None
+        try:
+            payload = {
+                'message_id': row.get('message_id'),
+                'attachment_index': row.get('attachment_index', 0),
+                'media_url': row.get('media_url'),
+                'media_kind': row.get('media_kind'),
+                'content_hash': row.get('content_hash'),
+                'model': row.get('model'),
+                'understanding': self._as_json_object(row.get('understanding')),
+            }
+            result = await asyncio.to_thread(
+                self.supabase_client.table('message_media_understandings')
+                .upsert(
+                    self._clean_payload(payload),
+                    on_conflict='message_id,attachment_index,model',
+                )
+                .execute
+            )
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error(
+                "Error upserting media understanding for message_id=%s: %s",
+                row.get('message_id'), e,
+                exc_info=True,
+            )
+            return None
+
+    # ---------- external_media_cache -----------------------------------
+
+    async def get_external_media_cache(
+        self,
+        url_key: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch a cached external-media resolution row by url_key.
+
+        Returns None on cache miss (not an exception).
+        """
+        if not self.supabase_client:
+            logger.error("Supabase client not initialized")
+            return None
+        try:
+            result = await asyncio.to_thread(
+                self.supabase_client.table('external_media_cache')
+                .select('*')
+                .eq('url_key', url_key)
+                .limit(1)
+                .execute
+            )
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error(
+                "Error fetching external_media_cache for url_key=%s: %s",
+                url_key, e,
+                exc_info=True,
+            )
+            return None
+
+    async def upsert_external_media_cache(
+        self,
+        row: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Upsert an external-media cache row by PK (url_key).
+
+        Uses ON CONFLICT (url_key) DO UPDATE so repeated resolver runs
+        update the same row rather than inserting duplicates.
+        """
+        if not self.supabase_client:
+            logger.error("Supabase client not initialized")
+            return None
+        try:
+            payload = {
+                'url_key': row.get('url_key'),
+                'source_url_sanitized': row.get('source_url_sanitized'),
+                'source_domain': row.get('source_domain'),
+                'status': row.get('status'),
+                'content_hash': row.get('content_hash'),
+                'media_kind': row.get('media_kind'),
+                'content_type': row.get('content_type'),
+                'byte_size': row.get('byte_size'),
+                'file_path': row.get('file_path'),
+                'resolved_url_sanitized': row.get('resolved_url_sanitized'),
+                'failure_reason': row.get('failure_reason'),
+                'metadata': self._as_json_object(row.get('metadata')),
+                'created_at': row.get('created_at'),
+                'updated_at': row.get('updated_at'),
+            }
+            result = await asyncio.to_thread(
+                self.supabase_client.table('external_media_cache')
+                .upsert(
+                    self._clean_payload(payload),
+                    on_conflict='url_key',
+                )
+                .execute
+            )
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error(
+                "Error upserting external_media_cache for url_key=%s: %s",
+                row.get('url_key'), e,
+                exc_info=True,
+            )
+            return None

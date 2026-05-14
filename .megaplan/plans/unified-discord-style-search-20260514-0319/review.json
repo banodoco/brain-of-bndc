@@ -1,0 +1,86 @@
+{
+  "review_verdict": "approved",
+  "checks": [],
+  "pre_check_flags": [],
+  "verified_flag_ids": [],
+  "disputed_flag_ids": [],
+  "criteria": [
+    {
+      "name": "`TOPIC_EDITOR_TOOLS` exposes exactly one `search_messages` read tool using the unified filter schema and includes a separate `get_reply_chain` tool with required `message_id` and optional `max_depth`.",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "Light robustness: auto-approved."
+    },
+    {
+      "name": "The old topic-editor `search_messages` parameters `author_id`, `channel_id`, and `hours_back` are no longer part of that tool schema, and equivalent behavior is available through `from_author_id`, `in_channel_id`, `after`, and default `scope='window'`.",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "Light robustness: auto-approved."
+    },
+    {
+      "name": "Window-scope `search_messages` AND-combines query, from_author, in_channel, mentions_author (via `<@ID>` / `<@!ID>` regex in content), has, time, reply-status, and limit filters against `dispatcher_context['messages']`.",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "Light robustness: auto-approved."
+    },
+    {
+      "name": "Archive-scope `search_messages` calls a storage-backed `search_messages_unified` path scoped by `guild_id` and `environment`, with parameterized content matching, mention-token `.ilike()` patterns, and compact result rows with `content_preview` \u2264200 chars.",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "Light robustness: auto-approved."
+    },
+    {
+      "name": "Malformed `after` or `before` values (not ISO timestamp, not relative `Nd`/`Nh`) produce a `tool_error` outcome rather than being silently ignored.",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "Light robustness: auto-approved."
+    },
+    {
+      "name": "`get_reply_chain` walks `discord_messages.reference_id` iteratively, clamps `max_depth` to 1\u201315 (default 5), detects cycles via a `seen` set, and returns compact ancestor rows root-first.",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "Light robustness: auto-approved."
+    },
+    {
+      "name": "The topic-editor system prompt documents the unified search examples and `get_reply_chain` usage without modifying `src/features/summarising/live_update_editor.py` or `src/features/summarising/live_update_prompts.py`.",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "Light robustness: auto-approved."
+    },
+    {
+      "name": "Focused topic-editor tests pass after updating existing `search_messages` tests (param rename: `author_id`\u2192`from_author_id`, `channel_id`\u2192`in_channel_id`) and adding coverage for archive dispatch, filter combinations, reply-chain walking, and cycle detection.",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "Light robustness: auto-approved."
+    },
+    {
+      "name": "No guarded flows are changed: `finalize_run`, the agent loop, override-collision, idempotency, lease-expiry, force-close, vision tools, and `live_update_editor.py` / `live_update_prompts.py` remain outside the diff except incidental import/schema list updates if required.",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "Light robustness: auto-approved."
+    },
+    {
+      "name": "Archive `mentions_author_id` filtering uses `.ilike()` on `content` with `<@ID>` and `<@!ID>` token patterns \u2014 NO reference to a non-existent `mentions` column.",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "Light robustness: auto-approved."
+    },
+    {
+      "name": "Implementation keeps search/reply helpers parameterized: no raw SQL string interpolation for user-provided search text; mention-token patterns use integer IDs formatted into fixed strings.",
+      "priority": "should",
+      "pass": "deferred_human",
+      "evidence": "Requires human verification capabilities."
+    },
+    {
+      "name": "Result payloads remain compact enough for the existing ~2KB tool-result cap; `content_preview` capped at 200 characters per message; list-level `truncated: true` flag when rows are trimmed.",
+      "priority": "should",
+      "pass": "pass",
+      "evidence": "Light robustness: auto-approved."
+    }
+  ],
+  "issues": [],
+  "rework_items": [],
+  "summary": "Light robustness: review skipped; stub written for artifact parity.",
+  "task_verdicts": [],
+  "sense_check_verdicts": []
+}

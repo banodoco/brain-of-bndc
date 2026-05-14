@@ -332,6 +332,6 @@ def test_dev_live_loops_run_hourly_without_env(monkeypatch):
     )
 
     assert cog.live_updates_enabled is True
-    assert cog.live_top_creations_enabled is True
+    assert cog.live_top_creations_enabled is False
     assert cog.run_live_pass.started is True
     assert cog.run_live_pass.interval_minutes == 60

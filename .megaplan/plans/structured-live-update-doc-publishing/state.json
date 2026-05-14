@@ -1,0 +1,282 @@
+{
+  "name": "structured-live-update-doc-publishing",
+  "idea": "Implement structured editable live-update documents for the TopicEditor. Current behavior: post_sectioned_topic stores a body plus loose sections and topic-level source_message_ids; render_topic emits one big Discord message with a Sources footer of raw message IDs; section media is dropped or model-copied into simple-topic media; publisher sends a single rendered string and trims at 2000 chars. Desired behavior: the agent creates a document-like draft in topics.summary with ordered blocks/sections. Each intro/section block carries its own source_message_ids and media_refs. Source citations render inline in brackets at the relevant block, not as an overall footer. Media refs bind by stable reference such as message_id plus attachment_index, not copied CDN URLs. Publisher resolves source IDs to Discord jump URLs using message metadata and resolves media refs to attachment/embed URLs at publish time. Publish order should be deterministic: header, intro text with inline linked sources, intro media, each section text with inline linked sources, that section media, one block at a time. Text chunking should be paragraph-aware only when a block exceeds Discord limits; normal sectioned topics should send one section per message. Add validation so media_refs must resolve to source messages/attachments and unknown refs do not silently disappear. Preserve existing topic_sources storage as the union of all block-level source IDs for audit/search. Update prompts/tool schemas so the agent is conscientious: every factual block gets its own sources; media is attached only to the relevant block; no global source footer. Keep backwards compatibility for old summaries with body/sections/source_message_ids as much as reasonable. Add focused tests covering section-level sources, media refs sent after relevant sections, no footer, source link hydration, chunking, and existing simple topic behavior.",
+  "current_state": "finalized",
+  "iteration": 2,
+  "created_at": "2026-05-14T10:10:13Z",
+  "config": {
+    "project_dir": "/Users/peteromalley/Documents/banodoco-workspace/brain-of-bndc",
+    "auto_approve": true,
+    "robustness": "standard",
+    "mode": "code",
+    "strict_notes": false,
+    "agent": "",
+    "profile": "thoughtful",
+    "vendor": "codex",
+    "depth": "medium",
+    "phase_model": [
+      "plan=codex:medium",
+      "prep=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "critique=codex:low",
+      "revise=codex:medium",
+      "gate=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "finalize=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "execute=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "loop_plan=codex:medium",
+      "loop_execute=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "review=codex:low",
+      "tiebreaker_researcher=codex:medium",
+      "tiebreaker_challenger=codex:medium",
+      "feedback=claude:low"
+    ]
+  },
+  "sessions": {
+    "codex_planner": {
+      "id": "019e25f7-2480-7181-b59e-b3bb27fd0166",
+      "mode": "persistent",
+      "created_at": "2026-05-14T10:12:07Z",
+      "last_used_at": "2026-05-14T10:16:41Z",
+      "refreshed": false
+    },
+    "codex_critic": {
+      "id": "019e25f8-e763-7431-bba7-ac45ccd5d139",
+      "mode": "persistent",
+      "created_at": "2026-05-14T10:14:22Z",
+      "last_used_at": "2026-05-14T10:18:33Z",
+      "refreshed": false
+    },
+    "hermes_gatekeeper": {
+      "id": "ce9f69b5-cb9a-4e01-8025-6d1de99e0d90",
+      "mode": "persistent",
+      "created_at": "2026-05-14T10:15:14Z",
+      "last_used_at": "2026-05-14T10:20:41Z",
+      "refreshed": false
+    },
+    "hermes_finalizer": {
+      "id": "940a6ac4-14df-43ef-bea3-dd52062abce5",
+      "mode": "persistent",
+      "created_at": "2026-05-14T10:28:51Z",
+      "last_used_at": "2026-05-14T10:28:51Z",
+      "refreshed": false
+    }
+  },
+  "plan_versions": [
+    {
+      "version": 1,
+      "file": "plan_v1.md",
+      "hash": "sha256:ca2a6adb9fdab466bedb5c411d6d5caeb5ddd67cd5422dc31d4cef8f674b436a",
+      "timestamp": "2026-05-14T10:12:07Z"
+    },
+    {
+      "version": 2,
+      "file": "plan_v2.md",
+      "hash": "sha256:43b25c858fcb1f59f4940598c6f842e8be5c8844e925efa7be6cb1314d4d35fd",
+      "timestamp": "2026-05-14T10:16:41Z"
+    }
+  ],
+  "history": [
+    {
+      "step": "init",
+      "timestamp": "2026-05-14T10:10:13Z",
+      "duration_ms": 0,
+      "cost_usd": 0.0,
+      "result": "success",
+      "environment": {
+        "claude": true,
+        "codex": true
+      }
+    },
+    {
+      "step": "plan",
+      "timestamp": "2026-05-14T10:12:07Z",
+      "duration_ms": 113790,
+      "cost_usd": 0.847667,
+      "result": "success",
+      "prompt_tokens": 526495,
+      "completion_tokens": 5172,
+      "total_tokens": 531667,
+      "session_mode": "persistent",
+      "session_id": "019e25f7-2480-7181-b59e-b3bb27fd0166",
+      "agent": "codex",
+      "output_file": "plan_v1.md",
+      "artifact_hash": "sha256:ca2a6adb9fdab466bedb5c411d6d5caeb5ddd67cd5422dc31d4cef8f674b436a"
+    },
+    {
+      "step": "critique",
+      "timestamp": "2026-05-14T10:14:22Z",
+      "duration_ms": 133382,
+      "cost_usd": 0.718227,
+      "result": "success",
+      "prompt_tokens": 484905,
+      "completion_tokens": 6541,
+      "total_tokens": 491446,
+      "session_mode": "persistent",
+      "session_id": "019e25f8-e763-7431-bba7-ac45ccd5d139",
+      "agent": "codex",
+      "output_file": "critique_v1.json",
+      "artifact_hash": "sha256:909cf9a4842f70a3cd82dd6a5640582397302eff87b887193c388f67a2aa9cc6",
+      "flags_count": 10
+    },
+    {
+      "step": "gate",
+      "timestamp": "2026-05-14T10:15:14Z",
+      "duration_ms": 49363,
+      "cost_usd": 0.04486938000000001,
+      "result": "success",
+      "prompt_tokens": 21313,
+      "completion_tokens": 2237,
+      "total_tokens": 23550,
+      "session_mode": "persistent",
+      "session_id": "7aeaf515-230a-4bc7-bd07-165e4be38e9a",
+      "agent": "hermes",
+      "output_file": "gate.json",
+      "artifact_hash": "sha256:eb973d9bef61bfc45289ce42a28c1f0577aee73993e5af3d36e98a229a85081a",
+      "recommendation": "ITERATE"
+    },
+    {
+      "step": "revise",
+      "timestamp": "2026-05-14T10:16:41Z",
+      "duration_ms": 85037,
+      "cost_usd": 1.434721,
+      "result": "success",
+      "prompt_tokens": 636533,
+      "completion_tokens": 9684,
+      "total_tokens": 646217,
+      "session_mode": "persistent",
+      "session_id": "019e25f7-2480-7181-b59e-b3bb27fd0166",
+      "agent": "codex",
+      "output_file": "plan_v2.md",
+      "artifact_hash": "sha256:43b25c858fcb1f59f4940598c6f842e8be5c8844e925efa7be6cb1314d4d35fd",
+      "flags_addressed": [
+        "FLAG-001",
+        "FLAG-002",
+        "FLAG-003",
+        "FLAG-004",
+        "issue_hints",
+        "correctness",
+        "scope",
+        "all_locations",
+        "callers"
+      ]
+    },
+    {
+      "step": "critique",
+      "timestamp": "2026-05-14T10:18:33Z",
+      "duration_ms": 110021,
+      "cost_usd": 1.456982,
+      "result": "success",
+      "prompt_tokens": 993496,
+      "completion_tokens": 12257,
+      "total_tokens": 1005753,
+      "session_mode": "persistent",
+      "session_id": "019e25f8-e763-7431-bba7-ac45ccd5d139",
+      "agent": "codex",
+      "output_file": "critique_v2.json",
+      "artifact_hash": "sha256:574d3a025a8dedf8a79f224ecfb8c9982f33c9d121141dc456a6262328006735",
+      "flags_count": 3
+    },
+    {
+      "step": "gate",
+      "timestamp": "2026-05-14T10:20:41Z",
+      "duration_ms": 126293,
+      "cost_usd": 0.13542246,
+      "result": "success",
+      "prompt_tokens": 69517,
+      "completion_tokens": 4156,
+      "total_tokens": 73673,
+      "session_mode": "persistent",
+      "session_id": "ce9f69b5-cb9a-4e01-8025-6d1de99e0d90",
+      "agent": "hermes",
+      "output_file": "gate.json",
+      "artifact_hash": "sha256:a78b791494fffe1fec949154f10472524a042c0645a3756829bb1197206d5e14",
+      "recommendation": "PROCEED"
+    },
+    {
+      "step": "finalize",
+      "timestamp": "2026-05-14T10:28:51Z",
+      "duration_ms": 479137,
+      "cost_usd": 1.82615784,
+      "result": "success",
+      "prompt_tokens": 1025142,
+      "completion_tokens": 12187,
+      "total_tokens": 1037329,
+      "session_mode": "persistent",
+      "session_id": "940a6ac4-14df-43ef-bea3-dd52062abce5",
+      "agent": "hermes",
+      "output_file": "finalize.json",
+      "artifact_hash": "sha256:3702a879110e6d7557ebc4ee13d2907b5503cc49f9119ac1bade1b2e8d2f4ded"
+    }
+  ],
+  "meta": {
+    "significant_counts": [
+      9,
+      6
+    ],
+    "weighted_scores": [
+      12.5,
+      8.5
+    ],
+    "plan_deltas": [
+      83.54
+    ],
+    "recurring_critiques": [
+      [],
+      []
+    ],
+    "total_cost_usd": 6.464046,
+    "overrides": [
+      {
+        "action": "add-note",
+        "timestamp": "2026-05-14T12:02:41Z",
+        "note": "Additional formatting requirement from user: rendered Discord output should use Markdown hierarchy. The full live-update/news item header should render as a level-2 Markdown header, e.g. '## Update: Kijai Assesses HiDream-O1-Image...'. Section/sub-point headers should render as bold text, e.g. '**Dev Model vs. Base Model**', followed by that section body with inline bracketed source links and section-owned media. Do not use one flat bold title plus plain section headers for structured documents.",
+        "source": "user"
+      }
+    ],
+    "notes": [
+      {
+        "timestamp": "2026-05-14T12:02:41Z",
+        "note": "Additional formatting requirement from user: rendered Discord output should use Markdown hierarchy. The full live-update/news item header should render as a level-2 Markdown header, e.g. '## Update: Kijai Assesses HiDream-O1-Image...'. Section/sub-point headers should render as bold text, e.g. '**Dev Model vs. Base Model**', followed by that section body with inline bracketed source links and section-owned media. Do not use one flat bold title plus plain section headers for structured documents.",
+        "source": "user"
+      }
+    ],
+    "current_invocation_id": "f5d79b693f704da4",
+    "user_approved_gate": true
+  },
+  "last_gate": {
+    "recommendation": "PROCEED",
+    "rationale": "Plan v2 resolves all six blocking flags. The two remaining 'open' flags (correctness, FLAG-005) both concern the 10-message cap on `get_topic_editor_message_context`. Plan Step 3 explicitly specifies a new method `get_topic_editor_source_messages(..., limit=50)` that returns `guild_id`, `attachments`, and `embeds` \u2014 it does not reuse the capped path. The four 'addressed' flags (issue_hints, scope, all_locations, callers) were resolved in v2 by adding the canonical `{kind, index}` media-ref schema, requiring compact `media_refs_available` in read-tool output, relaxing the missing-sections guard, and preserving `understand_media` shorthand conventions. Score trajectory improved (12.5 \u2192 8.5), plan delta is substantial (83.5%), no recurring critiques from this plan's own flags, and preflight checks pass. Execution should proceed.",
+    "reprompted": false,
+    "signals_assessment": "Weighted score improved from 12.5 to 8.5 after plan v2 addressed 4 of 6 significant flags. The two remaining open flags (correctness, FLAG-005) share the same root concern about a 10-message cap, which plan v2 explicitly resolves with `limit=50` on a new resolver method. No flag group shows the reopened-across-iterations pattern that would trigger TIEBREAKER. Preflight posture is clean (project dir exists, writable, criteria present, both Claude and Codex available).",
+    "warnings": [
+      "Plan question remains open: should new structured writes store only `blocks` or preserve legacy `body`/`sections` alongside? Settle during implementation \u2014 `blocks`-only is cleaner but preserving both fields costs little and aids rollback.",
+      "The `topic_sources` union derivation in Step 6.1 uses merged current-window + archive rows. Ensure the implementation does not silently truncate source IDs beyond the archive resolver's limit (50). If a structured document legitimately exceeds 50 distinct source IDs, either raise the limit or explicitly reject with a clear error rather than silently omitting sources."
+    ],
+    "settled_decisions": [
+      "Canonical media refs use `{message_id, kind: 'attachment'|'embed', index}`. Shorthand `{message_id, attachment_index}` normalizes to `{kind: 'attachment', index: attachment_index}` for backwards compatibility with `understand_media` tool.",
+      "Structured topics use `summary.blocks` as canonical storage. Legacy `body`/`sections`/`source_message_ids` are normalized into blocks at render/publish time but legacy simple-topic rendering behavior is preserved when `summary.blocks` is absent.",
+      "Archive-resolved source message rows feed all of: validation, source-author derivation, collision detection, citation link hydration, and media URL hydration \u2014 using one resolver to prevent drift.",
+      "Paragraph-aware chunking splits only when a single block exceeds Discord's limit; normal sectioned topics send one message per block."
+    ],
+    "passed": true,
+    "preflight_results": {
+      "project_dir_exists": true,
+      "project_dir_writable": true,
+      "success_criteria_present": true,
+      "claude_available": true,
+      "codex_available": true
+    },
+    "orchestrator_guidance": "Plan passed gate and preflight. Proceed to finalize. Verify unresolved flags against the plan and project code before accepting."
+  },
+  "active_step": {
+    "step": "execute",
+    "agent": "hermes",
+    "mode": "persistent",
+    "run_id": "2a618c8d-3240-4a23-9103-87570329dc00",
+    "started_at": "2026-05-14T11:31:18Z",
+    "attempt": 1,
+    "last_activity_at": "2026-05-14T12:02:33Z",
+    "last_activity_kind": "stderr",
+    "model": "fireworks:accounts/fireworks/models/deepseek-v4-pro",
+    "last_activity_detail": "[tool] \u266a(\u00b4\u03b5` ) \ud83d\udcbb cd /Users/peteromalley/Docu..."
+  }
+}

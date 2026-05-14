@@ -1,0 +1,300 @@
+{
+  "review_verdict": "needs_rework",
+  "checks": [],
+  "pre_check_flags": [
+    {
+      "id": "PRECHECK-DIFF_SIZE_SANITY",
+      "check": "diff_size_sanity",
+      "detail": "Diff size looks larger than expected: changed_lines=9796, expected\u224810, ratio=979.60, files=20, hunks=100.",
+      "severity": "significant",
+      "evidence_file": ".gitignore"
+    }
+  ],
+  "verified_flag_ids": [
+    "FLAG-001",
+    "issue_hints",
+    "correctness-1",
+    "correctness-2",
+    "all_locations",
+    "DEBT-045",
+    "DEBT-046",
+    "DEBT-048",
+    "callers-1",
+    "callers-2",
+    "FLAG-005",
+    "FLAG-006",
+    "correctness"
+  ],
+  "disputed_flag_ids": [
+    "scope",
+    "DEBT-047"
+  ],
+  "criteria": [
+    {
+      "name": "Existing attachment/embed behavior preserved",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "Targeted suite ran with 194 passed and one executor-identified pre-existing lease-status failure unrelated to media refs. Core tests include existing attachment/embed normalize/render behavior."
+    },
+    {
+      "name": "normalize_media_ref external support",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "src/features/summarising/topic_editor.py accepts kind values attachment/embed/external and preserves attachment_index shorthand in normalize_media_ref."
+    },
+    {
+      "name": "Shared deterministic external URL helper used everywhere",
+      "priority": "must",
+      "pass": "fail",
+      "evidence": "src/common/external_media.py defines extract_external_urls and most callers use it, but _resolve_media_url_from_metadata re-scans using duplicated _resolve_external_url_by_index in src/features/summarising/topic_editor.py. That duplicate already diverges/bugs out for embed string URLs."
+    },
+    {
+      "name": "Source payloads expose compact external refs",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "TopicEditor._message_payload and StorageHandler.get_topic_editor_message_context append compact external entries after attachment/embed entries using extract_external_urls."
+    },
+    {
+      "name": "Explicit attachment/embed/external branches",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "Validation and _resolve_media_url_from_metadata now branch explicitly on attachment, embed, and external rather than treating non-attachment as embed."
+    },
+    {
+      "name": "Resolver safety controls",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "external_media_resolver enforces safelisted source provenance, long-form fallback policy, yt-dlp metadata-first flow, download size/content-type/Discord compatibility checks, and sanitized URLs."
+    },
+    {
+      "name": "yt-dlp metadata first and nonblocking failures",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "ExternalMediaResolver.resolve runs _run_yt_dlp before download; failure outcomes return ResolverResult and TopicEditor falls back to URL text."
+    },
+    {
+      "name": "Stable cache by URL key/content hash",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "Resolver uses make_cache_key(source_url), stores final files with content hash, and DB/storage wrappers plus staged migration add external_media_cache."
+    },
+    {
+      "name": "Structured send units preserve publish accounting",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "_build_send_units creates text/url/file units; _publish_topic preserves flat_messages, media_indices, media_count, flat_message_count, sent_ids, partial/failed/sent semantics."
+    },
+    {
+      "name": "Publisher fallback continues after failures",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "_send_one_unit sends fallback_url on resolver/file-send failure and runtime tests cover continuation around failed external refs."
+    },
+    {
+      "name": "Source media counts do not inflate resolvable_media",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "_summarize_source_media_counts adds external_links separately and tests assert external links are not merged into resolvable_media."
+    },
+    {
+      "name": "No direct auto-post at five reactions",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "Runtime regression test asserts reaction-qualified media creates watching state and not sent publication status."
+    },
+    {
+      "name": "Sanitized logs/trace metadata",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "Resolver and publisher traces use sanitise_url_for_logs for URL-bearing logs/traces."
+    },
+    {
+      "name": "Publish-time fallback URL de-duplication",
+      "priority": "must",
+      "pass": "fail",
+      "evidence": "New runtime finding required skipping fallback-link-only/external media units when the URL already appears in associated block text or was already sent. render_topic_publish_units only dedupes media URLs against emitted_media_keys and does not check block_content/block_text, so duplicate Discord unfurls can still occur."
+    },
+    {
+      "name": "Pure helpers separated from side effects",
+      "priority": "should",
+      "pass": "pass",
+      "evidence": "Pure parsing/safety helpers live in src/common/external_media.py; side-effectful yt-dlp/download/filesystem orchestration is in external_media_resolver."
+    },
+    {
+      "name": "Tests use stubs/fakes",
+      "priority": "should",
+      "pass": "pass",
+      "evidence": "Resolver/runtime tests use monkeypatch/fakes for yt-dlp, download, Discord channel sends, and discord.File."
+    },
+    {
+      "name": "Manual production smoke test",
+      "priority": "info",
+      "pass": "waived",
+      "evidence": "Requires deployed Discord/Supabase environment and human visual inspection; listed as deployment follow-up."
+    }
+  ],
+  "issues": [
+    "_resolve_media_url_from_metadata duplicates external URL lookup instead of relying on the shared helper and crashes for string-valued embed URLs.",
+    "Publish-time URL de-duplication for external/fallback links in block text is missing, so duplicate Discord previews can still be sent."
+  ],
+  "rework_items": [
+    {
+      "task_id": "T7",
+      "issue": "External fallback lookup duplicates extract_external_urls logic and crashes on embed URL string fields.",
+      "expected": "A single shared helper should provide stable external index lookup, including returning the original URL for index N, and _resolve_media_url_from_metadata should use it without duplicate scanner drift. String-valued embed URLs should resolve normally.",
+      "actual": "_resolve_media_url_from_metadata calls extract_external_urls only for bounds, then calls _resolve_external_url_by_index, which reimplements scanning and returns an undefined local variable for string embed URL fields. Repro: meta={'embeds':[{'url':'https://x.com/u/status/1'}]} with kind external index 0 raises UnboundLocalError.",
+      "evidence_file": "src/features/summarising/topic_editor.py:4068",
+      "flag_id": "DEBT-047",
+      "source": "review_flag_reverify"
+    },
+    {
+      "task_id": "T8",
+      "issue": "Publish-time URL de-duplication for external fallback URLs is not implemented.",
+      "expected": "If an external/fallback URL already appears in the associated block text, or has already been sent as a media URL for the topic, do not emit an extra bare URL/file/fallback media unit. This is especially required for long-form fallback-only links such as YouTube/Vimeo/Twitch to avoid duplicate Discord unfurls.",
+      "actual": "render_topic_publish_units appends external media units after the text block whenever _resolve_media_url_from_metadata returns a URL, and only dedupes against prior media URLs. It does not check whether the URL is already present in block_content/block_text.",
+      "evidence_file": "src/features/summarising/topic_editor.py:3963",
+      "flag_id": null,
+      "source": "user_runtime_finding"
+    }
+  ],
+  "summary": "Needs rework. Most of the external media implementation is present, but two hard requirements are not met: the external fallback URL lookup is not actually a single shared index source and has a real crash for embed string URLs, and the requested publish-time URL de-duplication for fallback/external links is missing.",
+  "task_verdicts": [
+    {
+      "task_id": "T1",
+      "reviewer_verdict": "Pass. Shared common helper exists with safelist, platform policy, URL normalization, cache keys, content checks, and sanitization.",
+      "evidence_files": [
+        "src/common/external_media.py"
+      ]
+    },
+    {
+      "task_id": "T2",
+      "reviewer_verdict": "Pass. Resolver implements metadata-first yt-dlp flow, source provenance, fallback-only long-form policy, cache, size/content-type checks, and structured outcomes.",
+      "evidence_files": [
+        "src/features/summarising/external_media_resolver.py"
+      ]
+    },
+    {
+      "task_id": "T3",
+      "reviewer_verdict": "Pass. DB/storage cache wrappers are present and return None on missing handler/cache miss.",
+      "evidence_files": [
+        "src/common/db_handler.py",
+        "src/common/storage_handler.py"
+      ]
+    },
+    {
+      "task_id": "T4",
+      "reviewer_verdict": "Pass. Staged migration exists with IF NOT EXISTS table/index and expected external_media_cache columns.",
+      "evidence_files": [
+        ".migrations_staging/20260514160000_external_media_cache.sql"
+      ]
+    },
+    {
+      "task_id": "T5",
+      "reviewer_verdict": "Pass. normalize_media_ref accepts external and preserves legacy attachment shorthand.",
+      "evidence_files": [
+        "src/features/summarising/topic_editor.py",
+        "tests/test_topic_editor_core.py"
+      ]
+    },
+    {
+      "task_id": "T6",
+      "reviewer_verdict": "Pass. Payload/context exposure uses extract_external_urls and appends compact external entries after Discord media entries.",
+      "evidence_files": [
+        "src/features/summarising/topic_editor.py",
+        "src/common/storage_handler.py"
+      ]
+    },
+    {
+      "task_id": "T7",
+      "reviewer_verdict": "Needs rework. Validation/counting branches are mostly correct, but external fallback URL lookup duplicates the shared extractor and crashes on string-valued embed URLs.",
+      "evidence_files": [
+        "src/features/summarising/topic_editor.py"
+      ]
+    },
+    {
+      "task_id": "T8",
+      "reviewer_verdict": "Needs rework. Send-unit model exists, but the required URL de-duplication against block text and previously sent fallback URLs is missing.",
+      "evidence_files": [
+        "src/features/summarising/topic_editor.py"
+      ]
+    },
+    {
+      "task_id": "T9",
+      "reviewer_verdict": "Pass with coverage gap. Resolver tests are extensive but missed the embed string URL crash in TopicEditor fallback lookup.",
+      "evidence_files": [
+        "tests/test_external_media_resolver.py"
+      ]
+    },
+    {
+      "task_id": "T10",
+      "reviewer_verdict": "Needs expanded coverage. Core tests cover external content URLs but did not catch string-valued embed URL fallback lookup or block-text de-duplication.",
+      "evidence_files": [
+        "tests/test_topic_editor_core.py"
+      ]
+    },
+    {
+      "task_id": "T11",
+      "reviewer_verdict": "Needs expanded coverage. Runtime tests cover resolver fallback/send failures but not duplicate URL suppression when block text already contains the external URL.",
+      "evidence_files": [
+        "tests/test_topic_editor_runtime.py"
+      ]
+    },
+    {
+      "task_id": "T12",
+      "reviewer_verdict": "Pass for executed commands except known failure. Targeted suite reports 194 passed and one executor-identified pre-existing lease status failure; broader regression passed per executor evidence.",
+      "evidence_files": [
+        "tests/test_topic_editor_runtime.py"
+      ]
+    }
+  ],
+  "sense_check_verdicts": [
+    {
+      "sense_check_id": "SC1",
+      "verdict": "Confirmed for extraction determinism, but downstream fallback lookup still duplicates scanning and can drift."
+    },
+    {
+      "sense_check_id": "SC2",
+      "verdict": "Confirmed. Unsupported content type returns structured resolver outcome."
+    },
+    {
+      "sense_check_id": "SC3",
+      "verdict": "Confirmed. Cache miss/no handler returns None."
+    },
+    {
+      "sense_check_id": "SC4",
+      "verdict": "Confirmed. Migration uses IF NOT EXISTS."
+    },
+    {
+      "sense_check_id": "SC5",
+      "verdict": "Confirmed. External normalize and attachment shorthand both work."
+    },
+    {
+      "sense_check_id": "SC6",
+      "verdict": "Confirmed in spirit. External entries are appended after attachment/embed entries, with kind-local indices."
+    },
+    {
+      "sense_check_id": "SC7",
+      "verdict": "Confirmed. external_links is separate from resolvable_media."
+    },
+    {
+      "sense_check_id": "SC8",
+      "verdict": "Partially confirmed. Send units and fallback exist, but duplicate fallback suppression is missing."
+    },
+    {
+      "sense_check_id": "SC9",
+      "verdict": "Confirmed for extract_external_urls itself."
+    },
+    {
+      "sense_check_id": "SC10",
+      "verdict": "Confirmed for existing normalize tests."
+    },
+    {
+      "sense_check_id": "SC11",
+      "verdict": "Confirmed. Runtime test covers fallback continuation."
+    },
+    {
+      "sense_check_id": "SC12",
+      "verdict": "Partially confirmed. Targeted tests ran with one reported pre-existing failure; however missing tests allowed the two review findings through."
+    }
+  ]
+}

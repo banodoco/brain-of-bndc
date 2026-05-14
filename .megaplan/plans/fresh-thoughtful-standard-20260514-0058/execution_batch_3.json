@@ -1,0 +1,48 @@
+{
+  "output": "Successfully added three async methods to StorageHandler in src/common/storage_handler.py:\n\n1. `get_message_media_understanding(message_id, attachment_index, model)` \u2014 selects a single row by the composite PK (message_id, attachment_index, model). Returns dict or None.\n\n2. `get_message_media_understanding_by_hash(content_hash, model=None, media_kind=None)` \u2014 selects where content_hash matches, ordered by created_at DESC (newest first), returns first row or None. Optional model/media_kind filters.\n\n3. `upsert_message_media_understanding(row)` \u2014 upserts using Supabase's native .upsert() with on_conflict='message_id,attachment_index,model'. No guild_gating \u2014 the table intentionally has no guild_id column. understanding is normalized via existing _as_json_object helper.\n\nAll three methods are async, follow existing codebase patterns (asyncio.to_thread, .eq/.order/.limit chains, _clean_payload). Syntax validated. Module imports cleanly. All 23 existing tests continue to pass with zero regressions.",
+  "files_changed": [
+    "src/common/storage_handler.py"
+  ],
+  "commands_run": [
+    "python -c \"import ast; ast.parse(open('src/common/storage_handler.py').read()); print('Syntax OK')\"",
+    "python -m pytest tests/test_topic_editor_runtime.py tests/test_live_storage_wrappers.py --tb=short -q --no-header",
+    "python -c \"import inspect; ... verify all three methods are coroutine functions\""
+  ],
+  "deviations": [
+    "Advisory quality: code changes lacked test updates: src/common/storage_handler.py.",
+    "Advisory audit finding: Executor claimed changed files not present in git status: ../supabase/migrations/20260514010000_message_media_understandings.sql, .migrations_staging/20260514010000_message_media_understandings.sql",
+    "Advisory audit finding: Sense check SC3 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC4 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC5 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC6 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC7 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC8 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC9 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC10 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC11 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC12 is missing an executor acknowledgment.",
+    "Advisory audit finding: Tasks left pending after execute (executor never started them): T3, T4, T5, T6, T7, T8, T9, T10, T11, T12"
+  ],
+  "task_updates": [
+    {
+      "id": "T2",
+      "status": "done",
+      "executor_notes": "Added three async methods to StorageHandler class in src/common/storage_handler.py (lines 2755\u20132850): get_message_media_understanding (select by PK: message_id, attachment_index, model), get_message_media_understanding_by_hash (select by content_hash, ordered by created_at desc, optional model/media_kind filters), upsert_message_media_understanding (upsert via supabase .upsert() with on_conflict='message_id,attachment_index,model'). No guild_id column \u2014 no guild gating. understanding normalized through existing _as_json_object helper. Syntax verified clean, module imports correctly, all 23 existing tests continue to pass (0 regressions).",
+      "files_changed": [
+        "src/common/storage_handler.py"
+      ],
+      "task_id": "T2",
+      "commands_run": []
+    }
+  ],
+  "sense_check_acknowledgments": [
+    {
+      "id": "SC2",
+      "task_id": "T2",
+      "verdict": "PASS",
+      "detail": "All three methods are async (verified via inspect.iscoroutinefunction). upsert_message_media_understanding has NO guild_id column in payload and no guild filtering \u2014 confirms skip guild gating. get_message_media_understanding_by_hash uses .order('created_at', desc=True) at line 2800. understanding normalized via self._as_json_object() matching existing pattern.",
+      "sense_check_id": "SC2",
+      "executor_note": "(not provided)"
+    }
+  ]
+}

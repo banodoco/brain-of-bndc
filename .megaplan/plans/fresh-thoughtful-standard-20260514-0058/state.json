@@ -1,0 +1,251 @@
+{
+  "name": "fresh-thoughtful-standard-20260514-0058",
+  "idea": "[fresh thoughtful/standard @codex retry \u2014 hermes deps confirmed installed]\nAdd image/video understanding to the BNDC topic editor so the agent can discriminate compelling generations from low-value media (e.g. Comfy workflow screenshots) before sharing. Persist understandings so the same media is never re-described twice across runs.\n\n# Reference implementation\n\nThe Astrid project at `/Users/peteromalley/Documents/reigh-workspace/Astrid/` has the exact patterns to port:\n\n- **Image understanding** \u2014 `astrid/packs/builtin/visual_understand/run.py`. OpenAI Responses API (`/v1/responses`), models: `gpt-4o-mini` (fast) / `gpt-5.4` (best). Single image or numbered frame-sheet via base64, JSON response constrained by prompt.\n- **Video understanding** \u2014 `astrid/packs/builtin/video_understand/run.py`. Gemini SDK (`google-genai`), models: `gemini-2.5-flash` (fast) / `gemini-2.5-pro` (best). Upload via `files.upload`, poll until `ACTIVE`, then `generate_content` with sanitized `response_schema` (`_sanitize_gemini_schema` drops `additionalProperties` which Gemini rejects).\n- **Shared helpers** \u2014 `astrid/utilities/llm_clients.py` has `build_gemini_client`, retry-on-transient, base64 materialization, debug logging.\n\nAPI keys (already in brain-of-bndc `.env`): `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`.\n\nDo NOT depend on Astrid at runtime \u2014 distill the helpers into a new `src/common/vision_clients.py` (~200-300 LOC). Drop Astrid's debug-logging boilerplate; keep retry + base64 + schema-sanitize.\n\n# Deliverables\n\n## 1. New migration\n\n`.migrations_staging/` + `../supabase/migrations/` (mirror to both per existing convention):\n\n```sql\nCREATE TABLE IF NOT EXISTS public.message_media_understandings (\n  message_id          bigint NOT NULL,\n  attachment_index    int NOT NULL DEFAULT 0,\n  media_url           text NOT NULL,\n  media_kind          text NOT NULL,        -- image | video | audio\n  content_hash        text,                  -- sha256 of media bytes\n  model               text NOT NULL,         -- e.g. gpt-4o-mini, gemini-2.5-flash\n  understanding       jsonb NOT NULL,\n  created_at          timestamptz NOT NULL DEFAULT now(),\n  PRIMARY KEY (message_id, attachment_index, model)\n);\nCREATE INDEX IF NOT EXISTS message_media_understandings_hash_idx\n  ON public.message_media_understandings (content_hash)\n  WHERE content_hash IS NOT NULL;\nCREATE INDEX IF NOT EXISTS message_media_understandings_kind_quality_idx\n  ON public.message_media_understandings (media_kind, ((understanding->>'aesthetic_quality')::int));\n```\n\n## 2. New module `src/common/vision_clients.py`\n\nTwo functions:\n- `describe_image(image_bytes_or_url: ..., model: str, query: str | None) -> dict` \u2014 calls OpenAI Responses API\n- `describe_video(video_path_or_bytes: ..., model: str) -> dict` \u2014 calls Gemini, upload+poll+generate\n\nBoth return structured JSON. Image schema: `{kind: enum(\"generation\"|\"screenshot\"|\"meme\"|\"workflow_graph\"|\"chart\"|\"other\"), subject: str, technical_signal: str, aesthetic_quality: int(0-10), discriminator_notes: str}`. Video schema: port Astrid's existing schema verbatim (`summary, visual_read, audio_read, edit_value, highlight_score, energy, pacing, production_quality, boundary_notes, cautions`) + add `kind` enum like the image one.\n\nLazy SDK imports (don't fail import-time when openai/google-genai aren't installed; fail at call-time with a clear message). Retry once on transient errors. No debug-logging boilerplate.\n\n## 3. Cache-first wrappers in `db_handler.py` + `storage_handler.py`\n\n`get_message_media_understanding(message_id, attachment_index, model) -> Optional[dict]` and `upsert_message_media_understanding(...)`. The vision tools (#4 below) check cache first by `(message_id, attachment_index, model)`, fall back to content_hash lookup, then call the API and persist.\n\n## 4. Two new read tools in `src/features/summarising/topic_editor.py`\n\n`understand_image(message_id, attachment_index=0, mode=\"fast\")` and `understand_video(message_id, attachment_index=0, mode=\"fast\")`. Add to `TOPIC_EDITOR_TOOLS`. Dispatcher cases route through the cache-first wrapper.\n\nThe mode parameter picks model preset: `\"fast\"` \u2192 `gpt-4o-mini` / `gemini-2.5-flash`, `\"best\"` \u2192 `gpt-5.4` / `gemini-2.5-pro`. Default fast.\n\nAdd an env-var-controlled cost cap (`TOPIC_EDITOR_VISION_BUDGET_PER_RUN`, default `1.0`) tracked in dispatcher_context; once exceeded, further vision calls return `{\"outcome\": \"budget_exceeded\"}` without hitting the API.\n\n## 5. Source-payload enrichment in `_build_initial_user_payload`\n\nFor each source message with media attachments, look up the cache and inline any existing understandings. Payload shape:\n\n```python\n{\n  \"message_id\": \"...\",\n  \"content\": \"...\",\n  \"media_urls\": [...],\n  \"media_understandings\": [\n    {\"attachment_index\": 0, \"kind\": \"generation\", \"subject\": \"...\", \"technical_signal\": \"...\", \"aesthetic_quality\": 7, \"model\": \"gemini-2.5-flash\"}\n  ],\n  ...\n}\n```\n\nThis way the agent sees cached understandings for free and only needs to call the tools for messages without one cached.\n\n## 6. System prompt update\n\nAdd a paragraph teaching the agent: media-bearing messages may have pre-computed understandings; for those without, call `understand_image`/`understand_video`; use `kind` to discriminate (skip `workflow_graph`, consider `generation` with `aesthetic_quality >= 6`); cite `technical_signal` and `subject` in any editorial framing.\n\n## 7. Tests\n\n- Stub OpenAI Responses + Gemini SDKs in fixtures (don't hit real APIs)\n- Test cache-first: second call to `understand_image(same_message_id)` returns cached without hitting the stub API\n- Test cross-message dedup via `content_hash`\n- Test payload enrichment surfaces cached understandings\n- Test budget cap kicks in once threshold is crossed\n\n# Hard scope guards\n\n- Do NOT modify `src/features/summarising/live_update_editor.py` or `live_update_prompts.py` (legacy editor is decoupled)\n- Do NOT change the existing `finalize_run`, override-collision, idempotency, lease-expiry, or force-close logic \u2014 those landed in the prior codex fanout and must remain green\n- Existing tests in `tests/test_topic_editor_runtime.py` and `tests/test_live_storage_wrappers.py` must remain passing\n- Don't depend on Astrid at runtime \u2014 copy/distill the patterns, don't import",
+  "current_state": "done",
+  "iteration": 1,
+  "created_at": "2026-05-13T22:58:59Z",
+  "config": {
+    "project_dir": "/Users/peteromalley/Documents/banodoco-workspace/brain-of-bndc",
+    "auto_approve": true,
+    "robustness": "standard",
+    "mode": "code",
+    "strict_notes": false,
+    "agent": "",
+    "profile": "thoughtful",
+    "vendor": "codex",
+    "from_doc": "docs/live-update-editor-sprint-plan.md",
+    "phase_model": [
+      "plan=codex:low",
+      "prep=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "critique=codex:low",
+      "revise=codex:low",
+      "gate=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "finalize=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "execute=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "loop_plan=codex:low",
+      "loop_execute=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "review=codex:low",
+      "tiebreaker_researcher=codex:low",
+      "tiebreaker_challenger=codex:low",
+      "feedback=claude:low"
+    ]
+  },
+  "sessions": {
+    "codex_planner": {
+      "id": "019e2390-b4ab-7782-8444-6c0eba3aba35",
+      "mode": "persistent",
+      "created_at": "2026-05-13T23:00:56Z",
+      "last_used_at": "2026-05-13T23:00:56Z",
+      "refreshed": false
+    },
+    "codex_critic": {
+      "id": "019e2392-6a82-7ea1-95fc-5b91ee2203ae",
+      "mode": "persistent",
+      "created_at": "2026-05-13T23:03:56Z",
+      "last_used_at": "2026-05-13T23:03:56Z",
+      "refreshed": false
+    },
+    "hermes_gatekeeper": {
+      "id": "e78d759d-0261-4046-9767-10b3c60deb33",
+      "mode": "persistent",
+      "created_at": "2026-05-13T23:05:48Z",
+      "last_used_at": "2026-05-13T23:05:48Z",
+      "refreshed": false
+    },
+    "hermes_finalizer": {
+      "id": "f39e569c-a394-438e-b061-c09b477c3a5f",
+      "mode": "persistent",
+      "created_at": "2026-05-13T23:08:54Z",
+      "last_used_at": "2026-05-13T23:08:54Z",
+      "refreshed": false
+    },
+    "hermes_executor": {
+      "id": "020e2cd0-7f80-4365-95b4-ae3c956b1814",
+      "mode": "persistent",
+      "created_at": "2026-05-13T23:10:13Z",
+      "last_used_at": "2026-05-13T23:43:35Z",
+      "refreshed": false
+    },
+    "codex_reviewer": {
+      "id": "019e23b9-7776-7c80-99fa-afc72a332426",
+      "mode": "persistent",
+      "created_at": "2026-05-13T23:45:58Z",
+      "last_used_at": "2026-05-13T23:45:58Z",
+      "refreshed": false
+    }
+  },
+  "plan_versions": [
+    {
+      "version": 1,
+      "file": "plan_v1.md",
+      "hash": "sha256:cccfce191717298efa8ae6b03f99977f257d257cfd436406dcfdc453151ea97d",
+      "timestamp": "2026-05-13T23:00:56Z"
+    }
+  ],
+  "history": [
+    {
+      "step": "init",
+      "timestamp": "2026-05-13T22:58:59Z",
+      "duration_ms": 0,
+      "cost_usd": 0.0,
+      "result": "success",
+      "environment": {
+        "claude": true,
+        "codex": true
+      }
+    },
+    {
+      "step": "plan",
+      "timestamp": "2026-05-13T23:00:56Z",
+      "duration_ms": 110420,
+      "cost_usd": 0.694658,
+      "result": "success",
+      "prompt_tokens": 360028,
+      "completion_tokens": 5429,
+      "total_tokens": 365457,
+      "session_mode": "persistent",
+      "session_id": "019e2390-b4ab-7782-8444-6c0eba3aba35",
+      "agent": "codex",
+      "output_file": "plan_v1.md",
+      "artifact_hash": "sha256:cccfce191717298efa8ae6b03f99977f257d257cfd436406dcfdc453151ea97d"
+    },
+    {
+      "step": "critique",
+      "timestamp": "2026-05-13T23:03:56Z",
+      "duration_ms": 178196,
+      "cost_usd": 1.15619,
+      "result": "success",
+      "prompt_tokens": 1025668,
+      "completion_tokens": 7947,
+      "total_tokens": 1033615,
+      "session_mode": "persistent",
+      "session_id": "019e2392-6a82-7ea1-95fc-5b91ee2203ae",
+      "agent": "codex",
+      "output_file": "critique_v1.json",
+      "artifact_hash": "sha256:0c0729a619879fb604a42b1710a4fd5fa755cbaf6242b32a201ec7cf84d98398",
+      "flags_count": 11
+    },
+    {
+      "step": "gate",
+      "timestamp": "2026-05-13T23:05:48Z",
+      "duration_ms": 109304,
+      "cost_usd": 0.05158578,
+      "result": "success",
+      "prompt_tokens": 23245,
+      "completion_tokens": 3201,
+      "total_tokens": 26446,
+      "session_mode": "persistent",
+      "session_id": "e78d759d-0261-4046-9767-10b3c60deb33",
+      "agent": "hermes",
+      "output_file": "gate.json",
+      "artifact_hash": "sha256:ef7a4cccdd58a707235ee05671be9351ca0643c816a8d9a62f21a5b1b4472d87",
+      "recommendation": "PROCEED"
+    },
+    {
+      "step": "finalize",
+      "timestamp": "2026-05-13T23:08:54Z",
+      "duration_ms": 179717,
+      "cost_usd": 1.80359874,
+      "result": "success",
+      "prompt_tokens": 1017671,
+      "completion_tokens": 9440,
+      "total_tokens": 1027111,
+      "session_mode": "persistent",
+      "session_id": "f39e569c-a394-438e-b061-c09b477c3a5f",
+      "agent": "hermes",
+      "output_file": "finalize.json",
+      "artifact_hash": "sha256:64a504a2a36236fe29726036e3d94789a973ef87f4637be7c17e479fa3b2e180"
+    },
+    {
+      "step": "execute",
+      "timestamp": "2026-05-13T23:43:35Z",
+      "duration_ms": 2076690,
+      "cost_usd": 13.3142625,
+      "result": "success",
+      "session_mode": "persistent",
+      "session_id": "020e2cd0-7f80-4365-95b4-ae3c956b1814",
+      "agent": "hermes",
+      "output_file": "execution.json",
+      "artifact_hash": "sha256:8afef03b0669e927329d744fa45d432557f5af2c28513860414b20f46a144302",
+      "finalize_hash": "sha256:708d9e8f36144ace0993d34c47022672883969fa04bfa08fc5b35e981861e4c0",
+      "approval_mode": "auto_approve"
+    },
+    {
+      "step": "review",
+      "timestamp": "2026-05-13T23:45:58Z",
+      "duration_ms": 140420,
+      "cost_usd": 1.290328,
+      "result": "success",
+      "prompt_tokens": 697496,
+      "completion_tokens": 6864,
+      "total_tokens": 704360,
+      "session_mode": "persistent",
+      "session_id": "019e23b9-7776-7c80-99fa-afc72a332426",
+      "agent": "codex",
+      "output_file": "review.json",
+      "artifact_hash": "sha256:8e6d4ac55208f230066ea6b7b3258bc8421d33a3f1d417ff90adb2739c51c0f2",
+      "finalize_hash": "sha256:53f972bc4c911eebefd93da9f6c9781e1bdd95d7acb8005bce2cdaaadf6cc3af"
+    }
+  ],
+  "meta": {
+    "significant_counts": [
+      8
+    ],
+    "weighted_scores": [
+      10.0
+    ],
+    "plan_deltas": [],
+    "recurring_critiques": [
+      []
+    ],
+    "total_cost_usd": 18.310623,
+    "overrides": [],
+    "notes": [],
+    "imported_decisions": [],
+    "current_invocation_id": "dc60054684af4a81",
+    "user_approved_gate": true
+  },
+  "last_gate": {
+    "recommendation": "PROCEED",
+    "rationale": "The eight unresolved flags are all first-iteration concerns \u2014 none have been reopened across iterations (Iteration Pressure Analysis confirms zero reopens across every group). Each flag identifies a real implementation-level detail (async download bridging, write-gating bypass, enrichment model presets, test assertion updates) that the plan explicitly acknowledges and for which it provides resolution guidance. No flag reveals a fundamental plan-design flaw or missing deliverable. The plan is comprehensive, the preflight checks pass, and all success criteria are clearly mapped to verification steps. Proceeding with the flagged items resolved as implementation decisions is the correct action.",
+    "reprompted": false,
+    "signals_assessment": "Single iteration at weighted score 10.0 with 8 significant flags, all first-occurrence with no reopen history. Preflight confirms writable workspace, available codex/claude, and success criteria presence. Flags are clustered around implementation correctness (async/sync bridging, write gating, SDK collision, test assertion updates) rather than plan architecture defects \u2014 the plan already names each concern and provides a resolution path.",
+    "warnings": [
+      "When implementing the vision tool dispatcher, ensure media bytes are downloaded synchronously (not via the async db_handler.download_file) \u2014 use a sync requests/http call or bridge through _run_async_in_thread as the plan suggests.",
+      "The new upsert_message_media_understanding wrapper must bypass _live_write_allowed (this table intentionally lacks guild_id/environment columns) \u2014 do not copy the nearby live-editor write pattern verbatim.",
+      "Verify that test assertions in test_topic_editor_runtime.py use READ_TOOL_NAMES rather than a hardcoded tool-name set, so new understand_image/understand_video tools don't break existing compaction tests.",
+      "When enriching _build_initial_user_payload, prefer either (a) a new all-understandings-for-message DB helper, or (b) explicitly note that only fast/best presets are surfaced until that helper lands. The plan defaults to (b) \u2014 flag issue_hints is accepted on that basis."
+    ],
+    "settled_decisions": [
+      {
+        "decision": "Media-understanding write wrappers bypass _live_write_allowed",
+        "rationale": "The message_media_understandings table has no guild_id or environment column by design (it's a content-addressed media cache, not guild-scoped live-editor state). Write wrappers will call storage_handler directly without the guild gating check."
+      },
+      {
+        "decision": "Vision tools resolve media from context['messages'] first; get_message_context enrichment deferred",
+        "rationale": "The initial source window (archived messages) includes attachments. Messages discovered only through get_message_context will not have vision tool support until that read tool is separately enriched \u2014 this is tracked as accepted scope for this change."
+      },
+      {
+        "decision": "Payload enrichment loops over known fast/best model presets rather than a full all-understandings query",
+        "rationale": "Sufficient for initial delivery. A broader all-understandings-for-message helper can be added in a follow-up without schema changes."
+      },
+      {
+        "decision": "Media bytes are downloaded via a sync HTTP call in the vision dispatcher, not via the async db_handler.download_file",
+        "rationale": "The dispatch path is synchronous; passing a coroutine as bytes would break hashing and API calls. The implementation will use requests or an inline _run_async_in_thread bridge."
+      },
+      {
+        "decision": "google-genai is added alongside google-generativeai but isolated inside vision_clients.py via lazy import",
+        "rationale": "The brief requires the google-genai SDK for Gemini file upload/poll/generate_content patterns. The existing google-generativeai wrapper in src/common/llm/gemini_client.py is not touched and the two SDKs operate in separate modules."
+      }
+    ],
+    "passed": true,
+    "preflight_results": {
+      "project_dir_exists": true,
+      "project_dir_writable": true,
+      "success_criteria_present": true,
+      "claude_available": true,
+      "codex_available": true
+    },
+    "orchestrator_guidance": "First iteration; follow gate recommendation: PROCEED. Verify unresolved flags against the plan and project code before accepting."
+  }
+}

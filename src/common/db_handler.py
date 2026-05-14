@@ -531,6 +531,90 @@ class DatabaseHandler:
             )
         )
 
+    def get_topic_editor_source_messages(
+        self,
+        message_ids: List[str],
+        guild_id: Optional[int] = None,
+        environment: str = 'prod',
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """Resolve source messages by ID for validation, author derivation,
+        citation hydration, and media URL hydration (limit=50).
+
+        Separate from get_topic_editor_message_context whose cap is 10.
+        """
+        if not self.storage_handler:
+            return []
+        return self._run_async_in_thread(
+            self.storage_handler.get_topic_editor_source_messages(
+                message_ids=message_ids,
+                guild_id=guild_id,
+                environment=environment,
+                limit=limit,
+            )
+        )
+
+    def search_messages_unified(
+        self,
+        *,
+        scope: str = "archive",
+        guild_id: Optional[int] = None,
+        environment: str = "prod",
+        query: Optional[str] = None,
+        from_author_id: Optional[int] = None,
+        in_channel_id: Optional[int] = None,
+        mentions_author_id: Optional[int] = None,
+        has: Optional[List[str]] = None,
+        after: Optional[str] = None,
+        before: Optional[str] = None,
+        is_reply: Optional[bool] = None,
+        limit: int = 20,
+    ) -> Dict[str, Any]:
+        """Search discord_messages archive with Discord-style filters.
+
+        Returns {"messages": [...], "truncated": bool}.
+        """
+        if not self.storage_handler:
+            return {"messages": [], "truncated": False}
+        return self._run_async_in_thread(
+            self.storage_handler.search_messages_unified(
+                scope=scope,
+                guild_id=guild_id,
+                environment=environment,
+                query=query,
+                from_author_id=from_author_id,
+                in_channel_id=in_channel_id,
+                mentions_author_id=mentions_author_id,
+                has=has,
+                after=after,
+                before=before,
+                is_reply=is_reply,
+                limit=limit,
+            )
+        )
+
+    def get_reply_chain(
+        self,
+        message_id: str,
+        guild_id: Optional[int] = None,
+        environment: str = "prod",
+        max_depth: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """Walk the reply chain backwards from *message_id*.
+
+        Returns ancestor messages root-first.
+        """
+        if not self.storage_handler:
+            return []
+        return self._run_async_in_thread(
+            self.storage_handler.get_reply_chain(
+                message_id=message_id,
+                guild_id=guild_id,
+                environment=environment,
+                max_depth=max_depth,
+            )
+        )
+
     def store_topic_transition(self, transition: Dict[str, Any], environment: str = 'prod') -> Optional[Dict[str, Any]]:
         guild_id = transition.get('guild_id')
         if not self._live_write_allowed(guild_id) or not self.storage_handler:
@@ -642,6 +726,88 @@ class DatabaseHandler:
             return {}
         return self._run_async_in_thread(
             self.storage_handler.get_author_context_snapshots(author_ids, guild_id=guild_id)
+        )
+
+    # ── message_media_understandings (content-addressed — no guild gating) ──
+
+    def get_message_media_understanding(
+        self,
+        message_id: int,
+        attachment_index: int = 0,
+        model: str = '',
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch a media understanding by PK (message_id, attachment_index, model)."""
+        if not self.storage_handler:
+            return None
+        return self._run_async_in_thread(
+            self.storage_handler.get_message_media_understanding(
+                message_id=message_id,
+                attachment_index=attachment_index,
+                model=model,
+            )
+        )
+
+    def get_message_media_understanding_by_hash(
+        self,
+        content_hash: str,
+        model: Optional[str] = None,
+        media_kind: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch a media understanding by content_hash (newest first)."""
+        if not self.storage_handler:
+            return None
+        return self._run_async_in_thread(
+            self.storage_handler.get_message_media_understanding_by_hash(
+                content_hash=content_hash,
+                model=model,
+                media_kind=media_kind,
+            )
+        )
+
+    def upsert_message_media_understanding(
+        self,
+        row: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Upsert a media understanding row.
+        ⚠️ Bypasses _live_write_allowed — this table is content-addressed,
+        not guild-scoped, and has no guild_id column."""
+        if not self.storage_handler:
+            return None
+        return self._run_async_in_thread(
+            self.storage_handler.upsert_message_media_understanding(row)
+        )
+
+    # ── external_media_cache (content-addressed — no guild gating) ──
+
+    def get_external_media_cache(
+        self,
+        url_key: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch a cached external-media resolution row by url_key (content-hash of the original URL).
+
+        Returns None on cache miss (not an exception).
+        """
+        if not self.storage_handler:
+            return None
+        return self._run_async_in_thread(
+            self.storage_handler.get_external_media_cache(url_key=url_key)
+        )
+
+    def upsert_external_media_cache(
+        self,
+        row: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Upsert an external-media cache row.
+
+        Uses ON CONFLICT (url_key) DO UPDATE so repeated resolver runs update
+        the same row rather than inserting duplicates.
+        ⚠️ Bypasses _live_write_allowed — this table is content-addressed,
+        not guild-scoped, and has no guild_id column.
+        """
+        if not self.storage_handler:
+            return None
+        return self._run_async_in_thread(
+            self.storage_handler.upsert_external_media_cache(row)
         )
 
     def get_live_update_context_for_messages(

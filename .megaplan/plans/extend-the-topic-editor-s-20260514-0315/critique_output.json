@@ -1,0 +1,14 @@
+{
+  "checks": [],
+  "flags": [
+    {
+      "id": "FLAG-001",
+      "concern": "tests/test_topic_editor_runtime.py:273 hardcodes `assert len(llm_call[\"tools\"]) == 13`. Adding 3 new tools increases TOPIC_EDITOR_TOOLS to 16 items, so this assertion will fail. The plan must update the expected count to 16 (or remove the redundant hardcoded count since the preceding line already asserts `llm_call[\"tools\"] == TOPIC_EDITOR_TOOLS`).",
+      "category": "correctness",
+      "severity_hint": "must",
+      "evidence": "tests/test_topic_editor_runtime.py:272-273; current TOPIC_EDITOR_TOOLS has 13 entries (4 existing read tools + 2 vision tools + 7 write tools). Adding 3 new read tools makes 16."
+    }
+  ],
+  "verified_flag_ids": [],
+  "disputed_flag_ids": []
+}

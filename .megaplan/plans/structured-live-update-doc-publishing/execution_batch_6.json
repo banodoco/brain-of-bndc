@@ -1,0 +1,68 @@
+{
+  "output": "Successfully implemented T12: Added 14 runtime creation and publishing tests for structured block-level topic documents in test_topic_editor_runtime.py. All 49 tests (35 existing + 14 new) pass. The broader test suite (145 tests across core, runtime, publishing, and prompts) passes with no regressions.\n\nTests added:\n(a) test_post_sectioned_topic_with_blocks_no_sections_accepted_and_stored\n(b) test_structured_topic_stores_blocks_union_sources_and_rows_per_distinct_id\n(c) test_archive_resolved_sources_feed_source_authors_and_collision_detection, test_archive_resolved_source_triggers_collision_with_same_author\n(d) test_get_message_context_includes_media_refs_available\n(e) test_invalid_block_source_id_rejects_with_auditable_transition, test_unresolved_media_ref_message_rejects, test_media_ref_index_out_of_range_rejects, test_media_ref_missing_url_rejects\n(f) test_publishing_enabled_sends_structured_blocks_in_order (verifies header\u2192intro text\u2192intro media\u2192section text\u2192section media order)\n(g) test_publishing_suppressed_returns_would_publish_sequence, test_publishing_suppressed_includes_no_media_indices_when_no_media\n(h) test_simple_topic_publishing_unchanged_with_structured_changes, test_simple_topic_suppressed_still_returns_messages\n\nFakeDB extended with get_topic_editor_source_messages and enriched get_topic_editor_message_context with media_refs_available passthrough.",
+  "files_changed": [
+    "tests/test_topic_editor_runtime.py"
+  ],
+  "commands_run": [
+    "python -m pytest tests/test_topic_editor_runtime.py -q --tb=short",
+    "python -m pytest tests/test_topic_editor_core.py tests/test_topic_editor_runtime.py tests/test_live_update_editor_publishing.py tests/test_live_update_prompts.py -q --tb=short",
+    "python -m pytest tests/test_topic_editor_*.py tests/test_live_update_editor_*.py tests/test_live_update_prompts.py -q --tb=short"
+  ],
+  "deviations": [
+    "Patch tool corrupted the file with escaped backslashes and *** tokens; had to manually fix via Python script before proceeding. This was a tool artifact, not a code issue.",
+    "Tests initially assumed extra dict was nested under payload.extra; fixed to access extra keys directly at payload top-level since shape_transition_payload uses payload.update(extra).",
+    "Advisory quality: tests/test_topic_editor_runtime.py grew by 797 lines (threshold 200).",
+    "Advisory audit finding: Sense check SC17 is missing an executor acknowledgment.",
+    "Advisory audit finding: Tasks left pending after execute (executor never started them): T14"
+  ],
+  "task_updates": [
+    {
+      "id": "T12",
+      "status": "done",
+      "executor_notes": "Added 14 runtime creation and publishing tests in test_topic_editor_runtime.py covering all requirements (a)-(h). Extended FakeDB with get_topic_editor_source_messages method (resolves against source_message_rows) and enriched get_topic_editor_message_context with media_refs_available passthrough. Added three helper factories (_make_editor_with_source_rows, _make_source_context, _sample_source_message_rows, _sample_context_messages). All 49 tests pass (35 existing + 14 new). Broader suite (145 tests) passes with no regressions. Existing test_render_topic_is_pure_and_handles_simple_sectioned_and_story_update still passes.",
+      "reviewer_verdict": "",
+      "kind": "test",
+      "watch_items": [
+        "FakeDB extended with get_topic_editor_source_messages (resolves from self.source_message_rows) and get_topic_editor_message_context now enriches rows with media_refs_available fallback",
+        "publish tests verify message send order: intro text -> intro media -> section text -> section media",
+        "suppressed mode returns publish_units, flat_messages, and media_indices",
+        "test_render_topic_is_pure_and_handles_simple_sectioned_and_story_update still passes"
+      ],
+      "sense_checks": [
+        {
+          "id": "SC14",
+          "task_id": "T12",
+          "question": "Does the runtime test verify that publishing enabled sends header -> intro text -> intro media -> section text -> section media in order?",
+          "verdict": "Yes \u2014 test_publishing_enabled_sends_structured_blocks_in_order verifies channel.sent[0] contains header+intro text+[[1]] citation, channel.sent[1] is intro media URL, channel.sent[2] contains section title+text, channel.sent[3] is section media URL. Also verifies discord_message_ids are [9101, 9102, 9103, 9104]."
+        },
+        {
+          "id": "SC15",
+          "task_id": "T12",
+          "question": "Do tests cover both success and rejection paths for blocks with invalid source IDs and invalid media refs?",
+          "verdict": "Yes \u2014 Success paths: test_post_sectioned_topic_with_blocks_no_sections_accepted_and_stored, test_structured_topic_stores_blocks_union_sources_and_rows_per_distinct_id, test_archive_resolved_sources_feed_source_authors_and_collision_detection. Rejection paths: test_invalid_block_source_id_rejects_with_auditable_transition (unresolved source ID), test_unresolved_media_ref_message_rejects (unresolved media ref message), test_media_ref_index_out_of_range_rejects (index out of range), test_media_ref_missing_url_rejects (attachment missing URL)."
+        }
+      ],
+      "files_changed": [
+        "tests/test_topic_editor_runtime.py"
+      ],
+      "task_id": "T12",
+      "commands_run": []
+    }
+  ],
+  "sense_check_acknowledgments": [
+    {
+      "id": "SC14",
+      "task_id": "T12",
+      "verdict": "Yes \u2014 test_publishing_enabled_sends_structured_blocks_in_order verifies channel.sent[0] contains header+intro text+[[1]] citation, channel.sent[1] is intro media URL, channel.sent[2] contains section title+text, channel.sent[3] is section media URL. Also verifies discord_message_ids are [9101, 9102, 9103, 9104].",
+      "sense_check_id": "SC14",
+      "executor_note": "(not provided)"
+    },
+    {
+      "id": "SC15",
+      "task_id": "T12",
+      "verdict": "Yes \u2014 Success paths: test_post_sectioned_topic_with_blocks_no_sections_accepted_and_stored, test_structured_topic_stores_blocks_union_sources_and_rows_per_distinct_id, test_archive_resolved_sources_feed_source_authors_and_collision_detection. Rejection paths: test_invalid_block_source_id_rejects_with_auditable_transition (unresolved source ID), test_unresolved_media_ref_message_rejects (unresolved media ref message), test_media_ref_index_out_of_range_rejects (index out of range), test_media_ref_missing_url_rejects (attachment missing URL).",
+      "sense_check_id": "SC15",
+      "executor_note": "(not provided)"
+    }
+  ]
+}

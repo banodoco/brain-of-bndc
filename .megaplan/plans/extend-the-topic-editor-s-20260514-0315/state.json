@@ -1,0 +1,158 @@
+{
+  "name": "extend-the-topic-editor-s-20260514-0315",
+  "idea": "Extend the topic editor's read tools so the agent can investigate context beyond the current source window. Today the read tools (`search_messages`, `get_author_profile`, `get_message_context`) are scoped to the in-memory source window built at run start. The agent can't ask \"what was this a reply to?\" or \"what has this author been working on for the past week?\" unless the relevant messages happen to fall in the current hour.\n\n# Three new capabilities\n\nAdd THREE new read tools to `TOPIC_EDITOR_TOOLS` in `src/features/summarising/topic_editor.py`. Keep the four existing read tools as-is.\n\n## 1. `search_archive_messages`\n\nA full-archive variant of `search_messages` \u2014 queries `discord_messages` directly, not the source window.\n\n```python\n{\n    \"name\": \"search_archive_messages\",\n    \"description\": \"Search archived Discord messages across the full archive (not limited to the current source window). Use when you need broader context \u2014 e.g. 'all messages mentioning Wan 2.5 from this author in the past 7 days', or 'what was discussed in #animatediff yesterday'.\",\n    \"input_schema\": {\n        \"type\": \"object\",\n        \"properties\": {\n            \"query\": {\"type\": \"string\"},\n            \"channel_id\": {\"type\": \"integer\"},\n            \"author_id\": {\"type\": \"integer\"},\n            \"hours_back\": {\"type\": \"integer\", \"description\": \"default 168 (1 week), max 720 (30 days)\"},\n            \"limit\": {\"type\": \"integer\", \"description\": \"default 20, max 50\"},\n        },\n        \"required\": [\"query\"],\n    },\n}\n```\n\nImplementation: new storage method `search_archive_messages(query, *, guild_id, environment, channel_id, author_id, hours_back, limit)` that ILIKEs `content` in `discord_messages`, filters by guild + optional channel/author, time-windowed via `created_at >= NOW() - INTERVAL '{hours_back} hours'`. Cap limit at 50, hours_back at 720. Return `[{message_id, channel_id, channel_name, author_id, author_name, content_preview, created_at, reply_to_message_id}]`.\n\n## 2. `get_reply_chain`\n\nWalks `reply_to_message_id` from a given message back to the chain root (or until `max_depth` is hit). Useful for \"what was this generation a reply to?\"\n\n```python\n{\n    \"name\": \"get_reply_chain\",\n    \"description\": \"Walk the reply chain backwards from a message. Returns the ancestor messages in order from root to direct-parent. Stops at chain root or max_depth.\",\n    \"input_schema\": {\n        \"type\": \"object\",\n        \"properties\": {\n            \"message_id\": {\"type\": \"string\"},\n            \"max_depth\": {\"type\": \"integer\", \"description\": \"default 5, max 15\"},\n        },\n        \"required\": [\"message_id\"],\n    },\n}\n```\n\nImplementation: iterative loop following `reply_to_message_id` in `discord_messages`, with cycle detection (track seen IDs in a set, abort if revisit). Cap at 15. Each step is one query \u2014 fine at depth 5. Return `[{message_id, author_id, author_name, channel_id, content_preview, created_at}]` ordered root-first.\n\n## 3. `get_author_recent_messages`\n\nAuthor timeline from the full archive \u2014 recent activity to ground \"they've been iterating on X.\"\n\n```python\n{\n    \"name\": \"get_author_recent_messages\",\n    \"description\": \"Fetch an author's recent messages across the full archive (not limited to the current source window). Use to understand what they've been working on, what threads they're in, what tools/techniques they've been testing.\",\n    \"input_schema\": {\n        \"type\": \"object\",\n        \"properties\": {\n            \"author_id\": {\"type\": \"integer\"},\n            \"hours_back\": {\"type\": \"integer\", \"description\": \"default 168 (1 week), max 720\"},\n            \"limit\": {\"type\": \"integer\", \"description\": \"default 20, max 50\"},\n            \"channel_id\": {\"type\": \"integer\", \"description\": \"optional, filter to a specific channel\"},\n        },\n        \"required\": [\"author_id\"],\n    },\n}\n```\n\nImplementation: storage method `get_author_recent_messages(author_id, *, guild_id, environment, hours_back, limit, channel_id)`. Query `discord_messages` ordered by `created_at DESC`, time-windowed, optional channel filter. Return same shape as `search_archive_messages` results.\n\n# Plumbing\n\nFor all three:\n- Add to `TOPIC_EDITOR_TOOLS` (the existing list)\n- Add dispatcher cases in `_dispatch_read_tool` \u2014 same shape as the existing read tools, JSON-encoded result capped at ~2KB so tool_result doesn't blow up token budget\n- Add storage methods (async) in `src/common/storage_handler.py`\n- Add db_handler wrappers (sync via `_run_async_in_thread`) in `src/common/db_handler.py`\n- Tests in `tests/test_topic_editor_runtime.py` exercising each new tool with the fake store\n\n# Update the system prompt\n\nAdd a paragraph teaching the agent these three tools exist and when to use them:\n- `search_archive_messages` when \"the in-window search doesn't have what I need\"\n- `get_reply_chain` whenever a source message has `reply_to_message_id` set and the context matters\n- `get_author_recent_messages` whenever sharing a generation \u2014 to ground the \"what they've been working on\" framing\n\n# Hard scope guards\n\n- Do NOT modify the four existing read tools (`search_topics`, `search_messages`, `get_author_profile`, `get_message_context`) \u2014 those stay scoped to the source window\n- Do NOT touch `src/features/summarising/live_update_editor.py` or `live_update_prompts.py`\n- Don't change `finalize_run`, the agent loop, override-collision, idempotency, lease-expiry, force-close, vision tools, or any prior subagent's work\n- Existing tests must remain green",
+  "current_state": "gated",
+  "iteration": 2,
+  "created_at": "2026-05-14T01:15:16Z",
+  "config": {
+    "project_dir": "/Users/peteromalley/Documents/banodoco-workspace/brain-of-bndc",
+    "auto_approve": true,
+    "robustness": "light",
+    "mode": "code",
+    "strict_notes": false,
+    "agent": "",
+    "profile": "led",
+    "vendor": "codex",
+    "from_doc": "docs/live-update-editor-sprint-plan.md",
+    "phase_model": [
+      "plan=codex:low",
+      "prep=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "critique=hermes:fireworks:accounts/fireworks/models/kimi-k2p6",
+      "revise=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "gate=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "finalize=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "execute=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "loop_plan=codex:low",
+      "loop_execute=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "review=hermes:fireworks:accounts/fireworks/models/kimi-k2p6",
+      "tiebreaker_researcher=codex:low",
+      "tiebreaker_challenger=codex:low",
+      "feedback=claude:low"
+    ]
+  },
+  "sessions": {
+    "codex_planner": {
+      "id": "019e240d-75fe-7023-b3df-cf56463bea0b",
+      "mode": "persistent",
+      "created_at": "2026-05-14T01:17:05Z",
+      "last_used_at": "2026-05-14T01:17:05Z",
+      "refreshed": false
+    },
+    "hermes_critic": {
+      "id": "019eaec1-0a6b-469a-bb5d-e5ae1043487b",
+      "mode": "persistent",
+      "created_at": "2026-05-14T01:18:53Z",
+      "last_used_at": "2026-05-14T01:18:53Z",
+      "refreshed": false
+    },
+    "hermes_planner": {
+      "id": "4819c8e1-34e1-448a-8c9e-47d422c31aff",
+      "mode": "persistent",
+      "created_at": "2026-05-14T01:21:23Z",
+      "last_used_at": "2026-05-14T01:21:23Z",
+      "refreshed": false
+    }
+  },
+  "plan_versions": [
+    {
+      "version": 1,
+      "file": "plan_v1.md",
+      "hash": "sha256:7a1cb42b43378227c444094a52ca882c932a01413de633a7514ad9a6c5c86570",
+      "timestamp": "2026-05-14T01:17:05Z"
+    },
+    {
+      "version": 2,
+      "file": "plan_v2.md",
+      "hash": "sha256:d80cb59251ee7772e6aebcd0acee55b54f2401002fc48bf8bed1e53995df8b07",
+      "timestamp": "2026-05-14T01:21:23Z"
+    }
+  ],
+  "history": [
+    {
+      "step": "init",
+      "timestamp": "2026-05-14T01:15:16Z",
+      "duration_ms": 0,
+      "cost_usd": 0.0,
+      "result": "success",
+      "environment": {
+        "claude": true,
+        "codex": true
+      }
+    },
+    {
+      "step": "plan",
+      "timestamp": "2026-05-14T01:17:05Z",
+      "duration_ms": 102906,
+      "cost_usd": 0.633145,
+      "result": "success",
+      "prompt_tokens": 316223,
+      "completion_tokens": 4881,
+      "total_tokens": 321104,
+      "session_mode": "persistent",
+      "session_id": "019e240d-75fe-7023-b3df-cf56463bea0b",
+      "agent": "codex",
+      "output_file": "plan_v1.md",
+      "artifact_hash": "sha256:7a1cb42b43378227c444094a52ca882c932a01413de633a7514ad9a6c5c86570"
+    },
+    {
+      "step": "critique",
+      "timestamp": "2026-05-14T01:18:53Z",
+      "duration_ms": 106160,
+      "cost_usd": 0.52094055,
+      "result": "success",
+      "prompt_tokens": 511369,
+      "completion_tokens": 8785,
+      "total_tokens": 520154,
+      "session_mode": "persistent",
+      "session_id": "019eaec1-0a6b-469a-bb5d-e5ae1043487b",
+      "agent": "hermes",
+      "output_file": "critique_v1.json",
+      "artifact_hash": "sha256:e8cdfc13ac45ea9945e8359d36866e86c5e2f174426d8510b88b0a073985a375",
+      "flags_count": 2
+    },
+    {
+      "step": "revise",
+      "timestamp": "2026-05-14T01:21:23Z",
+      "duration_ms": 146758,
+      "cost_usd": 0.63748728,
+      "result": "success",
+      "prompt_tokens": 350640,
+      "completion_tokens": 7866,
+      "total_tokens": 358506,
+      "session_mode": "persistent",
+      "session_id": "4819c8e1-34e1-448a-8c9e-47d422c31aff",
+      "agent": "hermes",
+      "output_file": "plan_v2.md",
+      "artifact_hash": "sha256:d80cb59251ee7772e6aebcd0acee55b54f2401002fc48bf8bed1e53995df8b07",
+      "flags_addressed": [
+        "FLAG-001"
+      ]
+    }
+  ],
+  "meta": {
+    "significant_counts": [
+      1
+    ],
+    "weighted_scores": [],
+    "plan_deltas": [
+      37.0
+    ],
+    "recurring_critiques": [
+      []
+    ],
+    "total_cost_usd": 1.791573,
+    "overrides": [
+      {
+        "action": "abort",
+        "timestamp": "2026-05-14T01:19:02Z",
+        "reason": "switching to unified Discord-style search shape"
+      }
+    ],
+    "notes": [],
+    "imported_decisions": [],
+    "current_invocation_id": "3b5876f6d65b4955"
+  },
+  "last_gate": {
+    "recommendation": "ITERATE"
+  }
+}

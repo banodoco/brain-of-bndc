@@ -1,0 +1,361 @@
+{
+  "passed": true,
+  "criteria_check": {
+    "count": 12,
+    "items": [
+      {
+        "criterion": "A mirrored Supabase migration creates `public.message_media_understandings` with the requested columns, primary key, hash index, and kind/quality expression index in both migration directories.",
+        "priority": "must",
+        "requires": [
+          "read_files",
+          "parse_diff"
+        ]
+      },
+      {
+        "criterion": "`src/common/vision_clients.py` provides `describe_image` and `describe_video`, performs lazy SDK imports, returns structured dictionaries, retries once on transient errors, base64-materializes image bytes, uploads/polls Gemini videos, and sanitizes Gemini schemas without importing Astrid.",
+        "priority": "must",
+        "requires": [
+          "read_files",
+          "parse_diff",
+          "run_tests"
+        ]
+      },
+      {
+        "criterion": "`db_handler.py` and `storage_handler.py` expose cache read/upsert wrappers plus a content-hash lookup path used by the topic editor.",
+        "priority": "must",
+        "requires": [
+          "read_files",
+          "parse_diff",
+          "run_tests"
+        ]
+      },
+      {
+        "criterion": "`understand_image` and `understand_video` are present in `TOPIC_EDITOR_TOOLS`, dispatch as read tools, select fast/best model presets correctly, check primary cache then content-hash cache before API calls, persist new understandings, and return `budget_exceeded` without API calls after the vision budget is exceeded.",
+        "priority": "must",
+        "requires": [
+          "read_files",
+          "parse_diff",
+          "run_tests"
+        ]
+      },
+      {
+        "criterion": "`_build_initial_user_payload` includes `media_urls` and cached `media_understandings` for source messages with media attachments without removing existing payload fields.",
+        "priority": "must",
+        "requires": [
+          "read_files",
+          "run_tests"
+        ]
+      },
+      {
+        "criterion": "The topic editor system prompt instructs the agent how to use cached understandings and when to call media understanding tools, including the requested `workflow_graph` and `aesthetic_quality >= 6` guidance.",
+        "priority": "must",
+        "requires": [
+          "read_files",
+          "parse_diff"
+        ]
+      },
+      {
+        "criterion": "Tests stub OpenAI and Gemini SDK/API behavior and do not perform real external API calls.",
+        "priority": "must",
+        "requires": [
+          "read_files",
+          "run_tests"
+        ]
+      },
+      {
+        "criterion": "Cache-first, cross-message content-hash deduplication, payload enrichment, and budget-cap behavior are covered by automated tests.",
+        "priority": "must",
+        "requires": [
+          "read_files",
+          "run_tests"
+        ]
+      },
+      {
+        "criterion": "Existing regression tests `tests/test_topic_editor_runtime.py` and `tests/test_live_storage_wrappers.py` pass after the change.",
+        "priority": "must",
+        "requires": [
+          "run_tests"
+        ]
+      },
+      {
+        "criterion": "No changes are made to `src/features/summarising/live_update_editor.py` or `src/features/summarising/live_update_prompts.py`.",
+        "priority": "must",
+        "requires": [
+          "parse_diff"
+        ]
+      },
+      {
+        "criterion": "The new vision client module remains roughly within the requested 200-300 LOC target and avoids debug logging boilerplate.",
+        "priority": "should",
+        "requires": [
+          "read_files",
+          "subjective_judgment"
+        ]
+      },
+      {
+        "criterion": "Attachment normalization is small, deterministic, and tolerant of the stored Discord attachment shape (`url`, `filename`) without broad unrelated media parsing.",
+        "priority": "should",
+        "requires": [
+          "read_files",
+          "subjective_judgment"
+        ]
+      }
+    ]
+  },
+  "preflight_results": {
+    "project_dir_exists": true,
+    "project_dir_writable": true,
+    "success_criteria_present": true,
+    "claude_available": true,
+    "codex_available": true
+  },
+  "unresolved_flags": [
+    {
+      "id": "FLAG-001",
+      "concern": "Media understanding persistence: new cache upsert wrappers could be accidentally blocked by existing live-write guild gating because the proposed table has no guild_id/environment columns.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "`DatabaseHandler._live_write_allowed` rejects missing guild ids; nearby write wrappers call it before storage writes, while the planned `message_media_understandings` row shape contains only message_id, attachment_index, media_url, media_kind, content_hash, model, understanding, and created_at.",
+      "raised_in": "critique_v1.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "FLAG-002",
+      "concern": "Media discovery outside the initial source window: `get_message_context` currently returns no attachments, so vision tools that only resolve media from `context['messages']` will not work for media-bearing messages discovered by that read tool.",
+      "category": "completeness",
+      "severity_hint": "uncertain",
+      "evidence": "`storage_handler.get_topic_editor_message_context` selects `message_id,channel_id,author_id,content,created_at,reference_id,thread_id`; the plan routes vision tool resolution through the run's `context['messages']` rather than extending message-context rows with attachment data.",
+      "raised_in": "critique_v1.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "issue_hints",
+      "concern": "Did the work fully address the issue hints, user notes, and approved plan requirements?: The brief requires source-payload enrichment to inline any existing media understandings. The plan only guarantees looping over known fast/best model presets unless a new all-understandings helper is added, so cached rows created by another valid model string or a future preset could be omitted from `_build_initial_user_payload` even though the data already exists.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "The brief requires source-payload enrichment to inline any existing media understandings. The plan only guarantees looping over known fast/best model presets unless a new all-understandings helper is added, so cached rows created by another valid model string or a future preset could be omitted from `_build_initial_user_payload` even though the data already exists.",
+      "raised_in": "critique_v1.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "correctness-1",
+      "concern": "Are the proposed changes technically correct?: Checked `src/common/db_handler.py` write-wrapper patterns: live/editor writes call `_live_write_allowed(guild_id)`, which rejects missing guild ids. The new `message_media_understandings` schema intentionally has no `guild_id` or `environment`; if the new upsert wrapper copies nearby write-wrapper gating instead of bypassing it for this table, every cache persist will be blocked because there is no guild id to pass.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "Checked `src/common/db_handler.py` write-wrapper patterns: live/editor writes call `_live_write_allowed(guild_id)`, which rejects missing guild ids. The new `message_media_understandings` schema intentionally has no `guild_id` or `environment`; if the new upsert wrapper copies nearby write-wrapper gating instead of bypassing it for this table, every cache persist will be blocked because there is no guild id to pass.",
+      "raised_in": "critique_v1.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "correctness-2",
+      "concern": "Are the proposed changes technically correct?: Checked the media download path in `src/common/db_handler.py`: `download_file` is an async method, while `_dispatch_read_tool` and the proposed vision dispatcher in `topic_editor.py` are synchronous. The plan notices this as 'if unsuitable' and allows a small sync download helper, but the implementation must not directly call `self.db.download_file(...)` without awaiting or bridging or it will hash/pass a coroutine instead of bytes.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "Checked the media download path in `src/common/db_handler.py`: `download_file` is an async method, while `_dispatch_read_tool` and the proposed vision dispatcher in `topic_editor.py` are synchronous. The plan notices this as 'if unsuitable' and allows a small sync download helper, but the implementation must not directly call `self.db.download_file(...)` without awaiting or bridging or it will hash/pass a coroutine instead of bytes.",
+      "raised_in": "critique_v1.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "scope",
+      "concern": "Search for related code that handles the same concept. Is the reported issue a symptom of something broader?: Checked related LLM dependency code: `requirements.txt` currently has `openai` and `google-generativeai`, and `src/common/llm/gemini_client.py` appears internally confused by expecting `google.generativeai` to expose `genai.Client`. The plan's decision to add `google-genai` for the new video path is likely necessary, but it creates a second Gemini SDK alongside an already brittle older wrapper and should be isolated carefully to avoid import/name collisions.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "Checked related LLM dependency code: `requirements.txt` currently has `openai` and `google-generativeai`, and `src/common/llm/gemini_client.py` appears internally confused by expecting `google.generativeai` to expose `genai.Client`. The plan's decision to add `google-genai` for the new video path is likely necessary, but it creates a second Gemini SDK alongside an already brittle older wrapper and should be isolated carefully to avoid import/name collisions.",
+      "raised_in": "critique_v1.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "all_locations",
+      "concern": "Does the change touch all locations AND supporting infrastructure?: Checked archived message selection in `storage_handler.py`: `get_archived_messages_after_checkpoint` selects `*` and current compact live-context helpers include `attachments` and `embeds`, but `get_topic_editor_message_context` selects only text/reply/thread fields. The plan resolves vision tools from `context['messages']`, so initial-window attachments are covered; however, if an agent discovers a media-bearing message only through `get_message_context`, that returned context will not include attachments unless this read tool is also enriched.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "Checked archived message selection in `storage_handler.py`: `get_archived_messages_after_checkpoint` selects `*` and current compact live-context helpers include `attachments` and `embeds`, but `get_topic_editor_message_context` selects only text/reply/thread fields. The plan resolves vision tools from `context['messages']`, so initial-window attachments are covered; however, if an agent discovers a media-bearing message only through `get_message_context`, that returned context will not include attachments unless this read tool is also enriched.",
+      "raised_in": "critique_v1.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false
+    },
+    {
+      "id": "callers",
+      "concern": "Find the callers of the changed function. What arguments do they actually pass? Does the fix handle all of them?: Grep found `_tool_result_content` is called from the run loop and directly by tests in `tests/test_topic_editor_runtime.py`. The plan says to update it for the new read tools, but tests that currently assert read-tool compaction may need to include the new tool names or use `READ_TOOL_NAMES` rather than the hardcoded old set.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "Grep found `_tool_result_content` is called from the run loop and directly by tests in `tests/test_topic_editor_runtime.py`. The plan says to update it for the new read tools, but tests that currently assert read-tool compaction may need to include the new tool names or use `READ_TOOL_NAMES` rather than the hardcoded old set.",
+      "raised_in": "critique_v1.json",
+      "status": "open",
+      "severity": "significant",
+      "verified": false
+    }
+  ],
+  "recommendation": "PROCEED",
+  "rationale": "The eight unresolved flags are all first-iteration concerns \u2014 none have been reopened across iterations (Iteration Pressure Analysis confirms zero reopens across every group). Each flag identifies a real implementation-level detail (async download bridging, write-gating bypass, enrichment model presets, test assertion updates) that the plan explicitly acknowledges and for which it provides resolution guidance. No flag reveals a fundamental plan-design flaw or missing deliverable. The plan is comprehensive, the preflight checks pass, and all success criteria are clearly mapped to verification steps. Proceeding with the flagged items resolved as implementation decisions is the correct action.",
+  "signals_assessment": "Single iteration at weighted score 10.0 with 8 significant flags, all first-occurrence with no reopen history. Preflight confirms writable workspace, available codex/claude, and success criteria presence. Flags are clustered around implementation correctness (async/sync bridging, write gating, SDK collision, test assertion updates) rather than plan architecture defects \u2014 the plan already names each concern and provides a resolution path.",
+  "warnings": [
+    "When implementing the vision tool dispatcher, ensure media bytes are downloaded synchronously (not via the async db_handler.download_file) \u2014 use a sync requests/http call or bridge through _run_async_in_thread as the plan suggests.",
+    "The new upsert_message_media_understanding wrapper must bypass _live_write_allowed (this table intentionally lacks guild_id/environment columns) \u2014 do not copy the nearby live-editor write pattern verbatim.",
+    "Verify that test assertions in test_topic_editor_runtime.py use READ_TOOL_NAMES rather than a hardcoded tool-name set, so new understand_image/understand_video tools don't break existing compaction tests.",
+    "When enriching _build_initial_user_payload, prefer either (a) a new all-understandings-for-message DB helper, or (b) explicitly note that only fast/best presets are surfaced until that helper lands. The plan defaults to (b) \u2014 flag issue_hints is accepted on that basis."
+  ],
+  "settled_decisions": [
+    {
+      "decision": "Media-understanding write wrappers bypass _live_write_allowed",
+      "rationale": "The message_media_understandings table has no guild_id or environment column by design (it's a content-addressed media cache, not guild-scoped live-editor state). Write wrappers will call storage_handler directly without the guild gating check."
+    },
+    {
+      "decision": "Vision tools resolve media from context['messages'] first; get_message_context enrichment deferred",
+      "rationale": "The initial source window (archived messages) includes attachments. Messages discovered only through get_message_context will not have vision tool support until that read tool is separately enriched \u2014 this is tracked as accepted scope for this change."
+    },
+    {
+      "decision": "Payload enrichment loops over known fast/best model presets rather than a full all-understandings query",
+      "rationale": "Sufficient for initial delivery. A broader all-understandings-for-message helper can be added in a follow-up without schema changes."
+    },
+    {
+      "decision": "Media bytes are downloaded via a sync HTTP call in the vision dispatcher, not via the async db_handler.download_file",
+      "rationale": "The dispatch path is synchronous; passing a coroutine as bytes would break hashing and API calls. The implementation will use requests or an inline _run_async_in_thread bridge."
+    },
+    {
+      "decision": "google-genai is added alongside google-generativeai but isolated inside vision_clients.py via lazy import",
+      "rationale": "The brief requires the google-genai SDK for Gemini file upload/poll/generate_content patterns. The existing google-generativeai wrapper in src/common/llm/gemini_client.py is not touched and the two SDKs operate in separate modules."
+    }
+  ],
+  "override_forced": false,
+  "orchestrator_guidance": "First iteration; follow gate recommendation: PROCEED. Verify unresolved flags against the plan and project code before accepting.",
+  "robustness": "standard",
+  "signals": {
+    "iteration": 1,
+    "idea": "[fresh thoughtful/standard @codex retry \u2014 hermes deps confirmed installed]\nAdd image/video understanding to the BNDC topic editor so the agent can discriminate compelling generations from low-value media (e.g. Comfy workflow screenshots) before sharing. Persist understandings so the same media is never re-described twice across runs.\n\n# Reference implementation\n\nThe Astrid project at `/Users/peteromalley/Documents/reigh-workspace/Astrid/` has the exact patterns to port:\n\n- **Image understanding** \u2014 `astrid/packs/builtin/visual_understand/run.py`. OpenAI Responses API (`/v1/responses`), models: `gpt-4o-mini` (fast) / `gpt-5.4` (best). Single image or numbered frame-sheet via base64, JSON response constrained by prompt.\n- **Video understanding** \u2014 `astrid/packs/builtin/video_understand/run.py`. Gemini SDK (`google-genai`), models: `gemini-2.5-flash` (fast) / `gemini-2.5-pro` (best). Upload via `files.upload`, poll until `ACTIVE`, then `generate_content` with sanitized `response_schema` (`_sanitize_gemini_schema` drops `additionalProperties` which Gemini rejects).\n- **Shared helpers** \u2014 `astrid/utilities/llm_clients.py` has `build_gemini_client`, retry-on-transient, base64 materialization, debug logging.\n\nAPI keys (already in brain-of-bndc `.env`): `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`.\n\nDo NOT depend on Astrid at runtime \u2014 distill the helpers into a new `src/common/vision_clients.py` (~200-300 LOC). Drop Astrid's debug-logging boilerplate; keep retry + base64 + schema-sanitize.\n\n# Deliverables\n\n## 1. New migration\n\n`.migrations_staging/` + `../supabase/migrations/` (mirror to both per existing convention):\n\n```sql\nCREATE TABLE IF NOT EXISTS public.message_media_understandings (\n  message_id          bigint NOT NULL,\n  attachment_index    int NOT NULL DEFAULT 0,\n  media_url           text NOT NULL,\n  media_kind          text NOT NULL,        -- image | video | audio\n  content_hash        text,                  -- sha256 of media bytes\n  model               text NOT NULL,         -- e.g. gpt-4o-mini, gemini-2.5-flash\n  understanding       jsonb NOT NULL,\n  created_at          timestamptz NOT NULL DEFAULT now(),\n  PRIMARY KEY (message_id, attachment_index, model)\n);\nCREATE INDEX IF NOT EXISTS message_media_understandings_hash_idx\n  ON public.message_media_understandings (content_hash)\n  WHERE content_hash IS NOT NULL;\nCREATE INDEX IF NOT EXISTS message_media_understandings_kind_quality_idx\n  ON public.message_media_understandings (media_kind, ((understanding->>'aesthetic_quality')::int));\n```\n\n## 2. New module `src/common/vision_clients.py`\n\nTwo functions:\n- `describe_image(image_bytes_or_url: ..., model: str, query: str | None) -> dict` \u2014 calls OpenAI Responses API\n- `describe_video(video_path_or_bytes: ..., model: str) -> dict` \u2014 calls Gemini, upload+poll+generate\n\nBoth return structured JSON. Image schema: `{kind: enum(\"generation\"|\"screenshot\"|\"meme\"|\"workflow_graph\"|\"chart\"|\"other\"), subject: str, technical_signal: str, aesthetic_quality: int(0-10), discriminator_notes: str}`. Video schema: port Astrid's existing schema verbatim (`summary, visual_read, audio_read, edit_value, highlight_score, energy, pacing, production_quality, boundary_notes, cautions`) + add `kind` enum like the image one.\n\nLazy SDK imports (don't fail import-time when openai/google-genai aren't installed; fail at call-time with a clear message). Retry once on transient errors. No debug-logging boilerplate.\n\n## 3. Cache-first wrappers in `db_handler.py` + `storage_handler.py`\n\n`get_message_media_understanding(message_id, attachment_index, model) -> Optional[dict]` and `upsert_message_media_understanding(...)`. The vision tools (#4 below) check cache first by `(message_id, attachment_index, model)`, fall back to content_hash lookup, then call the API and persist.\n\n## 4. Two new read tools in `src/features/summarising/topic_editor.py`\n\n`understand_image(message_id, attachment_index=0, mode=\"fast\")` and `understand_video(message_id, attachment_index=0, mode=\"fast\")`. Add to `TOPIC_EDITOR_TOOLS`. Dispatcher cases route through the cache-first wrapper.\n\nThe mode parameter picks model preset: `\"fast\"` \u2192 `gpt-4o-mini` / `gemini-2.5-flash`, `\"best\"` \u2192 `gpt-5.4` / `gemini-2.5-pro`. Default fast.\n\nAdd an env-var-controlled cost cap (`TOPIC_EDITOR_VISION_BUDGET_PER_RUN`, default `1.0`) tracked in dispatcher_context; once exceeded, further vision calls return `{\"outcome\": \"budget_exceeded\"}` without hitting the API.\n\n## 5. Source-payload enrichment in `_build_initial_user_payload`\n\nFor each source message with media attachments, look up the cache and inline any existing understandings. Payload shape:\n\n```python\n{\n  \"message_id\": \"...\",\n  \"content\": \"...\",\n  \"media_urls\": [...],\n  \"media_understandings\": [\n    {\"attachment_index\": 0, \"kind\": \"generation\", \"subject\": \"...\", \"technical_signal\": \"...\", \"aesthetic_quality\": 7, \"model\": \"gemini-2.5-flash\"}\n  ],\n  ...\n}\n```\n\nThis way the agent sees cached understandings for free and only needs to call the tools for messages without one cached.\n\n## 6. System prompt update\n\nAdd a paragraph teaching the agent: media-bearing messages may have pre-computed understandings; for those without, call `understand_image`/`understand_video`; use `kind` to discriminate (skip `workflow_graph`, consider `generation` with `aesthetic_quality >= 6`); cite `technical_signal` and `subject` in any editorial framing.\n\n## 7. Tests\n\n- Stub OpenAI Responses + Gemini SDKs in fixtures (don't hit real APIs)\n- Test cache-first: second call to `understand_image(same_message_id)` returns cached without hitting the stub API\n- Test cross-message dedup via `content_hash`\n- Test payload enrichment surfaces cached understandings\n- Test budget cap kicks in once threshold is crossed\n\n# Hard scope guards\n\n- Do NOT modify `src/features/summarising/live_update_editor.py` or `live_update_prompts.py` (legacy editor is decoupled)\n- Do NOT change the existing `finalize_run`, override-collision, idempotency, lease-expiry, or force-close logic \u2014 those landed in the prior codex fanout and must remain green\n- Existing tests in `tests/test_topic_editor_runtime.py` and `tests/test_live_storage_wrappers.py` must remain passing\n- Don't depend on Astrid at runtime \u2014 copy/distill the patterns, don't import",
+    "significant_flags": 8,
+    "unresolved_flags": [
+      {
+        "id": "FLAG-001",
+        "concern": "Media understanding persistence: new cache upsert wrappers could be accidentally blocked by existing live-write guild gating because the proposed table has no guild_id/environment columns.",
+        "category": "correctness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "FLAG-002",
+        "concern": "Media discovery outside the initial source window: `get_message_context` currently returns no attachments, so vision tools that only resolve media from `context['messages']` will not work for media-bearing messages discovered by that read tool.",
+        "category": "completeness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "issue_hints",
+        "concern": "Did the work fully address the issue hints, user notes, and approved plan requirements?: The brief requires source-payload enrichment to inline any existing media understandings. The plan only guarantees looping over known fast/best model presets unless a new all-understandings helper is added, so cached rows created by another valid model string or a future preset could be omitted from `_build_initial_user_payload` even though the data already exists.",
+        "category": "completeness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "correctness-1",
+        "concern": "Are the proposed changes technically correct?: Checked `src/common/db_handler.py` write-wrapper patterns: live/editor writes call `_live_write_allowed(guild_id)`, which rejects missing guild ids. The new `message_media_understandings` schema intentionally has no `guild_id` or `environment`; if the new upsert wrapper copies nearby write-wrapper gating instead of bypassing it for this table, every cache persist will be blocked because there is no guild id to pass.",
+        "category": "correctness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "correctness-2",
+        "concern": "Are the proposed changes technically correct?: Checked the media download path in `src/common/db_handler.py`: `download_file` is an async method, while `_dispatch_read_tool` and the proposed vision dispatcher in `topic_editor.py` are synchronous. The plan notices this as 'if unsuitable' and allows a small sync download helper, but the implementation must not directly call `self.db.download_file(...)` without awaiting or bridging or it will hash/pass a coroutine instead of bytes.",
+        "category": "correctness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "scope",
+        "concern": "Search for related code that handles the same concept. Is the reported issue a symptom of something broader?: Checked related LLM dependency code: `requirements.txt` currently has `openai` and `google-generativeai`, and `src/common/llm/gemini_client.py` appears internally confused by expecting `google.generativeai` to expose `genai.Client`. The plan's decision to add `google-genai` for the new video path is likely necessary, but it creates a second Gemini SDK alongside an already brittle older wrapper and should be isolated carefully to avoid import/name collisions.",
+        "category": "completeness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "all_locations",
+        "concern": "Does the change touch all locations AND supporting infrastructure?: Checked archived message selection in `storage_handler.py`: `get_archived_messages_after_checkpoint` selects `*` and current compact live-context helpers include `attachments` and `embeds`, but `get_topic_editor_message_context` selects only text/reply/thread fields. The plan resolves vision tools from `context['messages']`, so initial-window attachments are covered; however, if an agent discovers a media-bearing message only through `get_message_context`, that returned context will not include attachments unless this read tool is also enriched.",
+        "category": "completeness",
+        "severity": "significant",
+        "status": "open"
+      },
+      {
+        "id": "callers",
+        "concern": "Find the callers of the changed function. What arguments do they actually pass? Does the fix handle all of them?: Grep found `_tool_result_content` is called from the run loop and directly by tests in `tests/test_topic_editor_runtime.py`. The plan says to update it for the new read tools, but tests that currently assert read-tool compaction may need to include the new tool names or use `READ_TOOL_NAMES` rather than the hardcoded old set.",
+        "category": "correctness",
+        "severity": "significant",
+        "status": "open"
+      }
+    ],
+    "resolved_flags": [],
+    "weighted_score": 10.0,
+    "weighted_history": [],
+    "plan_delta_from_previous": null,
+    "recurring_critiques": [],
+    "scope_creep_flags": [],
+    "loop_summary": "Iteration 1. Weighted score trajectory: 10.0. Plan deltas: n/a. Recurring critiques: 0. Resolved flags: 0. Open significant flags: 8.",
+    "debt_overlaps": [],
+    "escalated_debt_subsystems": []
+  },
+  "flag_resolutions": [
+    {
+      "flag_id": "FLAG-001",
+      "action": "dispute",
+      "evidence": "Plan Step 2.4 explicitly states: 'Do not add environment/guild gating to this table unless the schema changes; the requested table has neither column.' The implementation will create a write path that calls storage_handler.upsert directly without the _live_write_allowed guard, consistent with the table's content-addressed (not guild-scoped) design.",
+      "rationale": ""
+    },
+    {
+      "flag_id": "FLAG-002",
+      "action": "accept_tradeoff",
+      "evidence": "",
+      "rationale": "The plan routes vision tool resolution through context['messages'] (archived messages with attachments). Messages discovered only through get_message_context (which selects text/reply/thread fields without attachments) will not have inline media data for vision tools. This is a real gap but the initial source window covers the primary use case; enriching get_message_context is deferred to follow-up work and does not block this delivery."
+    },
+    {
+      "flag_id": "issue_hints",
+      "action": "accept_tradeoff",
+      "evidence": "",
+      "rationale": "The plan enriches payloads by looping over known fast/best model presets rather than a full all-understandings-for-message query. This covers the two preset model strings for each media kind (4 total per attachment) which are the only models the tools can request. A broader helper can be added later without schema changes if additional model strings are introduced."
+    },
+    {
+      "flag_id": "correctness-1",
+      "action": "dispute",
+      "evidence": "This is the same concern as FLAG-001. Plan Step 2.4 (storage_handler.py) specifies the table has no guild_id/environment columns and the write wrapper must not apply guild gating. The implementation will create upsert_message_media_understanding in storage_handler.py that calls supabase.table('message_media_understandings').upsert(...) directly without routing through _live_write_allowed. The db_handler.py sync wrapper delegates to this storage method.",
+      "rationale": ""
+    },
+    {
+      "flag_id": "correctness-2",
+      "action": "dispute",
+      "evidence": "Plan Step 7.4 explicitly calls out this concern: 'Download bytes through existing db.download_file(source_url) or, if that is unsuitable in sync context, a small requests/aiohttp helper in the topic editor.' The plan acknowledges db.download_file is async and provides a concrete alternative (sync requests call). The implementation will use a synchronous HTTP download, not the async db_handler method.",
+      "rationale": ""
+    },
+    {
+      "flag_id": "scope",
+      "action": "dispute",
+      "evidence": "Plan Step 4.3 explicitly addresses isolation: 'if current dependencies only provide google-generativeai, update requirements.txt to include google-genai because the brief specifically references that SDK.' The new SDK is imported lazily inside vision_clients.py only. The existing src/common/llm/gemini_client.py module is not modified, and the two SDKs operate in completely separate import namespaces (google.generativeai vs google.genai). No import-time collision is possible because neither module imports the other.",
+      "rationale": ""
+    },
+    {
+      "flag_id": "all_locations",
+      "action": "accept_tradeoff",
+      "evidence": "",
+      "rationale": "Same concern as FLAG-002. Initial source window attachments are covered via context['messages']. The get_topic_editor_message_context read tool returns text-only fields today; enriching it with attachments is out of scope for this change. The vision tools will work for all media-bearing messages in the initial window, which is the primary use case."
+    },
+    {
+      "flag_id": "callers",
+      "action": "dispute",
+      "evidence": "Plan Step 7.6 specifies: 'Update _tool_result_content so these read tools return compact JSON results like the existing read tools.' The implementation will add the new tool names to READ_TOOL_NAMES (which is the canonical set) and ensure _tool_result_content handles them via the existing read-tool compaction path. Tests that hardcode old tool names will be updated to reference READ_TOOL_NAMES instead, which is a straightforward mechanical change covered by the plan's test-update scope.",
+      "rationale": ""
+    }
+  ],
+  "resolved_flag_ids": [],
+  "resolution_summary": "",
+  "reprompted": false
+}

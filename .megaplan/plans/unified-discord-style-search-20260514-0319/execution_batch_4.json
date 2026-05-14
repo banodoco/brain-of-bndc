@@ -1,0 +1,45 @@
+{
+  "output": "T4 complete. Added sync wrappers `search_messages_unified` and `get_reply_chain` to db_handler.py via `_run_async_in_thread` (after line 532, not touching the older DBHandler.search_messages at line 121). Wired archive-scope dispatch in topic_editor.py: `scope='archive'` calls `self.db.search_messages_unified(guild_id=context.get('guild_id'), environment=self.environment, ...)`. Added `get_reply_chain` elif branch before the `else`, extracting message_id (required) and max_depth (clamped 1-15, default 5). Unknown scope raises ValueError \u2192 surfaces as tool_error. All guard tests green (35/35). Runtime: 16/18 pass \u2014 2 expected failures deferred to T5 (tool count 13\u219214, old param-name assertions).",
+  "files_changed": [
+    "src/common/db_handler.py",
+    "src/features/summarising/topic_editor.py",
+    ".megaplan/plans/unified-discord-style-search-20260514-0319/execution_batch_4.json"
+  ],
+  "commands_run": [
+    "python -c 'import py_compile; ...' (syntax check both files)",
+    "pytest tests/test_topic_editor_runtime.py -x -v (1 expected fail, tool count 13\u219214)",
+    "pytest tests/test_topic_editor_media_understanding.py tests/test_topic_editor_core.py -x -v (10 passed)",
+    "pytest tests/test_live_update_prompts.py -x -v (25 passed)",
+    "pytest tests/test_topic_editor_runtime.py -v (16 passed, 2 expected fails)"
+  ],
+  "deviations": [
+    "Advisory quality: code changes lacked test updates: src/common/db_handler.py, src/features/summarising/topic_editor.py.",
+    "Advisory observation mismatch: executor claimed files not observed in git status/content hash delta: .megaplan/plans/unified-discord-style-search-20260514-0319/execution_batch_4.json",
+    "Advisory audit finding: Sense check SC8 is missing an executor acknowledgment.",
+    "Advisory audit finding: Tasks left pending after execute (executor never started them): T5"
+  ],
+  "task_updates": [
+    {
+      "id": "T4",
+      "status": "done",
+      "executor_notes": "Added sync search_messages_unified and get_reply_chain wrappers to db_handler.py via _run_async_in_thread, inserted after get_topic_editor_message_context (~line 532). Did NOT modify DBHandler.search_messages at line 121. Wired archive-scope dispatch in _dispatch_read_tool: scope='archive' calls self.db.search_messages_unified(guild_id=context.get('guild_id'), environment=self.environment, ...). Added get_reply_chain elif before the else, with max_depth clamped 1-15 (default 5). Unknown scope \u2192 ValueError \u2192 tool_error. All watch items: _run_async_in_thread pattern, get_reply_chain before else, guild_id+environment passed through, no older DBHandler.search_messages touched. 16/18 runtime tests pass (2 expected T5-deferred failures). 35/35 guard tests green.",
+      "files_changed": [
+        "src/common/db_handler.py",
+        "src/features/summarising/topic_editor.py"
+      ],
+      "task_id": "T4",
+      "commands_run": []
+    }
+  ],
+  "sense_check_acknowledgments": [
+    {
+      "id": "SC7",
+      "task_id": "T4",
+      "question": "Do archive-scope dispatch and get_reply_chain dispatch pass guild_id and environment correctly?",
+      "verdict": "PASS",
+      "note": "archive scope: self.db.search_messages_unified(guild_id=context.get('guild_id'), environment=self.environment, ...). get_reply_chain: self.db.get_reply_chain(message_id=..., guild_id=context.get('guild_id'), environment=self.environment, max_depth=...). Both follow the same pattern as get_topic_editor_message_context and get_topic_editor_author_profile, ensuring proper Supabase query scoping.",
+      "sense_check_id": "SC7",
+      "executor_note": "archive scope: self.db.search_messages_unified(guild_id=context.get('guild_id'), environment=self.environment, ...). get_reply_chain: self.db.get_reply_chain(message_id=..., guild_id=context.get('guild_id'), environment=self.environment, max_depth=...). Both follow the same pattern as get_topic_editor_message_context and get_topic_editor_author_profile, ensuring proper Supabase query scoping."
+    }
+  ]
+}

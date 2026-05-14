@@ -1,0 +1,27 @@
+{
+  "flags": [
+    {
+      "id": "FLAG-001",
+      "concern": "tests/test_topic_editor_runtime.py:273 hardcodes `assert len(llm_call[\"tools\"]) == 13`. Adding 3 new tools increases TOPIC_EDITOR_TOOLS to 16 items, so this assertion will fail. The plan must update the expected count to 16 (or remove the redundant hardcoded count since the preceding line already asserts `llm_call[\"tools\"] == TOPIC_EDITOR_TOOLS`).",
+      "category": "correctness",
+      "severity_hint": "uncertain",
+      "evidence": "Added an explicit step in Step 5 to update the hardcoded assertion `assert len(llm_call[\"tools\"]) == 13` at line 273 of tests/test_topic_editor_runtime.py to `16`, since FLAG-001 identified this as a guaranteed test failure when 3 new tools are added to TOPIC_EDITOR_TOOLS. Also noted the line-272 assertion already compares to the list itself, so the length check is redundant but updating it to 16 is the lowest-risk fix.",
+      "raised_in": "critique_v1.json",
+      "status": "addressed",
+      "severity": "significant",
+      "verified": false,
+      "addressed_in": "plan_v2.md"
+    },
+    {
+      "id": "verifiability-0",
+      "concern": "Criterion 9: requires human verification (subjective_judgment).",
+      "category": "other",
+      "severity_hint": "likely-minor",
+      "evidence": "",
+      "raised_in": "critique_v1.json",
+      "status": "open",
+      "severity": "minor",
+      "verified": false
+    }
+  ]
+}

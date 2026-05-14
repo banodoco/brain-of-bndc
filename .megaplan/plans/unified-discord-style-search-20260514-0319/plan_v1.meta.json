@@ -1,0 +1,109 @@
+{
+  "version": 1,
+  "timestamp": "2026-05-14T01:21:40Z",
+  "hash": "sha256:54e720ac7127567e590d45e8a9c0d34c7d88bc7cb7703b1dd9b0b8bddebcff9e",
+  "questions": [
+    "What is the exact production schema for mentions in `discord_messages`? Repository reads show `attachments`, `embeds`, and `reference_id`, but I did not find a clear `mentions` column. If no column exists, should `mentions_author_id` match Discord mention text in `content` such as `<@123>` / `<@!123>`?",
+    "For the 30-day archive range cap, should an over-broad `after`/`before` interval be clamped silently as the brief says, or rejected as `tool_error` so the agent knows it asked for too much? I assume clamp unless malformed."
+  ],
+  "success_criteria": [
+    {
+      "criterion": "`TOPIC_EDITOR_TOOLS` exposes exactly one `search_messages` read tool using the unified filter schema and includes a separate `get_reply_chain` tool with required `message_id`.",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "The old topic-editor `search_messages` parameters `author_id`, `channel_id`, and `hours_back` are no longer part of that tool schema, and equivalent behavior is available through `from_author_id`, `in_channel_id`, `after`, and default `scope='window'`.",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "Window-scope `search_messages` AND-combines query, author, channel, mention, has, time, reply-status, and limit filters against `dispatcher_context['messages']`.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Archive-scope `search_messages` calls a storage-backed `search_messages_unified` path scoped by `guild_id` and `environment`, with parameterized content matching and compact result rows capped to safe fields/previews.",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "parse_diff",
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "Malformed `after` or `before` values produce a `tool_error` outcome rather than being ignored.",
+      "priority": "must",
+      "requires": [
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "`get_reply_chain` walks `discord_messages.reference_id` iteratively, clamps `max_depth` to 15, detects cycles, and returns compact ancestor rows root-first.",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "The topic-editor system prompt documents the unified search examples and `get_reply_chain` usage without modifying `src/features/summarising/live_update_editor.py` or `src/features/summarising/live_update_prompts.py`.",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "Focused topic-editor tests pass after updating existing `search_messages` tests and adding coverage for archive dispatch, filter combinations, reply-chain walking, and cycle detection.",
+      "priority": "must",
+      "requires": [
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "No guarded flows are changed: `finalize_run`, the agent loop, override-collision, idempotency, lease-expiry, force-close, and vision tool behavior remain outside the diff except incidental imports/schema lists if required.",
+      "priority": "must",
+      "requires": [
+        "parse_diff",
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Implementation keeps search/reply helpers small and direct, with no raw SQL string interpolation for user-provided search text.",
+      "priority": "should",
+      "requires": [
+        "read_files",
+        "parse_diff",
+        "subjective_judgment"
+      ]
+    },
+    {
+      "criterion": "Result payloads remain compact enough for the existing ~2KB tool-result cap, with `content_preview` capped at 200 characters per message.",
+      "priority": "should",
+      "requires": [
+        "read_files",
+        "run_tests"
+      ]
+    }
+  ],
+  "assumptions": [
+    "The topic editor stores reply parent ids in `discord_messages.reference_id`; the new public tool output should call this `reply_to_message_id` to match the brief and existing topic-editor context output.",
+    "`scope` defaults to `window`, preserving the existing source-window-only search behavior unless the agent explicitly asks for `archive`.",
+    "`has=['file']` means any non-empty attachment; `image`, `video`, and `audio` are derived from attachment content type or filename extension; `embed` means non-empty embeds; `link` means URL-like text in `content`.",
+    "If a dedicated mentions column is absent, `mentions_author_id` can be implemented by matching Discord mention tokens in message content for window scope and archive scope.",
+    "Archive range clamping means the effective interval should not exceed 30 days; malformed time syntax is still an error.",
+    "The existing `_tool_result_content(...)` JSON truncation is acceptable as the standard ~2KB cap pattern, but helper-level `content_preview` trimming should reduce how often it truncates blindly.",
+    "Tests should be concentrated in `tests/test_topic_editor_runtime.py` as requested; broader storage fake tests are useful only if they stay cheap and reliable."
+  ],
+  "structure_warnings": []
+}

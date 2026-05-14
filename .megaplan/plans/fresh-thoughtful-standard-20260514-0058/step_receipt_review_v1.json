@@ -1,0 +1,39 @@
+{
+  "receipt_id": "f00c380f-8fd0-4b19-99e9-a9618f174703",
+  "plan_id": "fresh-thoughtful-standard-20260514-0058",
+  "phase": "review",
+  "iteration": 1,
+  "attempt": 1,
+  "timestamp_utc": "2026-05-13T23:45:58.106490+00:00",
+  "profile_name": "thoughtful",
+  "agent": "codex",
+  "agent_mode": "persistent",
+  "model_configured": "codex:low",
+  "model_actual": "gpt-5.5",
+  "session_id": "019e23b9-7776-7c80-99fa-afc72a332426",
+  "megaplan_version": "0.8.1",
+  "schema_version": 1,
+  "prompt_hash_raw": "d67316900f6d0876915f67c94e88360754a25ff9abd2c51cf6520b1f2f79464b",
+  "prompt_hash_canonical": "344beb58b5e7937bbd40fac4c3a9fa7c92bb4d407977aeaeab04753c13e8086f",
+  "canonicalization_version": 1,
+  "upstream_artifact_hashes": [
+    "sha256:8afef03b0669e927329d744fa45d432557f5af2c28513860414b20f46a144302"
+  ],
+  "cost_usd": 1.290328,
+  "duration_ms": 140420,
+  "prompt_tokens": 697496,
+  "completion_tokens": 6864,
+  "verdict": "approved",
+  "metrics": {
+    "review_verdict": "approved",
+    "task_verdicts_count": 13,
+    "total_tasks": 13,
+    "sense_check_verdicts_count": 13,
+    "total_sense_checks": 13,
+    "missing_evidence_count": 0,
+    "rework_items_count": 0,
+    "criteria_pass_count": 0,
+    "criteria_deferred_count": 0
+  },
+  "scope_drift_severity": null
+}

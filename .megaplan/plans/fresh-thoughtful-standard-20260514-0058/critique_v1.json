@@ -1,0 +1,125 @@
+{
+  "checks": [
+    {
+      "id": "issue_hints",
+      "question": "Did the work fully address the issue hints, user notes, and approved plan requirements?",
+      "findings": [
+        {
+          "detail": "Checked the hard scope guards against the plan and current repository: the plan confines edits to migrations, `src/common/vision_clients.py`, `src/common/db_handler.py`, `src/common/storage_handler.py`, and `src/features/summarising/topic_editor.py`, and explicitly says not to modify `live_update_editor.py` or `live_update_prompts.py`; that matches the guard and should avoid disturbing prior finalize/idempotency/lease/collision work.",
+          "flagged": false
+        },
+        {
+          "detail": "The brief requires source-payload enrichment to inline any existing media understandings. The plan only guarantees looping over known fast/best model presets unless a new all-understandings helper is added, so cached rows created by another valid model string or a future preset could be omitted from `_build_initial_user_payload` even though the data already exists.",
+          "flagged": true
+        }
+      ]
+    },
+    {
+      "id": "correctness",
+      "question": "Are the proposed changes technically correct?",
+      "findings": [
+        {
+          "detail": "Checked `src/common/db_handler.py` write-wrapper patterns: live/editor writes call `_live_write_allowed(guild_id)`, which rejects missing guild ids. The new `message_media_understandings` schema intentionally has no `guild_id` or `environment`; if the new upsert wrapper copies nearby write-wrapper gating instead of bypassing it for this table, every cache persist will be blocked because there is no guild id to pass.",
+          "flagged": true
+        },
+        {
+          "detail": "Checked the media download path in `src/common/db_handler.py`: `download_file` is an async method, while `_dispatch_read_tool` and the proposed vision dispatcher in `topic_editor.py` are synchronous. The plan notices this as 'if unsuitable' and allows a small sync download helper, but the implementation must not directly call `self.db.download_file(...)` without awaiting or bridging or it will hash/pass a coroutine instead of bytes.",
+          "flagged": true
+        },
+        {
+          "detail": "Checked the topic editor's run loop and dispatcher context. Adding `vision_budget_usd` and `vision_cost_usd` to `dispatcher_context` is structurally compatible with the current synchronous tool dispatch, and the existing LLM cost cap is separate from the proposed vision budget, so the concept does not conflict with current token/cost force-close logic.",
+          "flagged": false
+        }
+      ]
+    },
+    {
+      "id": "scope",
+      "question": "Search for related code that handles the same concept. Is the reported issue a symptom of something broader?",
+      "findings": [
+        {
+          "detail": "Searched for existing media handling and found Discord attachment records use `url`, `proxy_url`, `filename`, `content_type`, `height`, and `width` in `src/common/discord_utils.py`, while tests commonly store `attachments` as a JSON string. The plan's attachment normalization explicitly tolerates JSON strings and those fields, so it is scoped to the actual stored Discord shape rather than inventing a separate media model.",
+          "flagged": false
+        },
+        {
+          "detail": "Checked related LLM dependency code: `requirements.txt` currently has `openai` and `google-generativeai`, and `src/common/llm/gemini_client.py` appears internally confused by expecting `google.generativeai` to expose `genai.Client`. The plan's decision to add `google-genai` for the new video path is likely necessary, but it creates a second Gemini SDK alongside an already brittle older wrapper and should be isolated carefully to avoid import/name collisions.",
+          "flagged": true
+        }
+      ]
+    },
+    {
+      "id": "all_locations",
+      "question": "Does the change touch all locations AND supporting infrastructure?",
+      "findings": [
+        {
+          "detail": "Checked `topic_editor.py` registrations: read-tool routing depends on `READ_TOOL_NAMES`, `TOPIC_EDITOR_TOOLS`, `_dispatch_read_tool`, and `_tool_result_content`, with no separate plugin registry. The plan names all four integration points for `understand_image` and `understand_video`, so tool registration and result feedback appear covered.",
+          "flagged": false
+        },
+        {
+          "detail": "Checked archived message selection in `storage_handler.py`: `get_archived_messages_after_checkpoint` selects `*` and current compact live-context helpers include `attachments` and `embeds`, but `get_topic_editor_message_context` selects only text/reply/thread fields. The plan resolves vision tools from `context['messages']`, so initial-window attachments are covered; however, if an agent discovers a media-bearing message only through `get_message_context`, that returned context will not include attachments unless this read tool is also enriched.",
+          "flagged": true
+        },
+        {
+          "detail": "Checked migration conventions: both `.migrations_staging/` and `../supabase/migrations/` exist and already contain mirrored live-update migrations, so the plan's mirrored migration step matches repository practice.",
+          "flagged": false
+        }
+      ]
+    },
+    {
+      "id": "callers",
+      "question": "Find the callers of the changed function. What arguments do they actually pass? Does the fix handle all of them?",
+      "findings": [
+        {
+          "detail": "Grep found `_build_initial_user_payload` is only called from `run_once` with `(messages, active_topics)`, and `_message_payload` is only called inside `_build_initial_user_payload`. Enriching these instance methods with media URLs and cached understandings should not require a broad caller migration.",
+          "flagged": false
+        },
+        {
+          "detail": "Grep found `_tool_result_content` is called from the run loop and directly by tests in `tests/test_topic_editor_runtime.py`. The plan says to update it for the new read tools, but tests that currently assert read-tool compaction may need to include the new tool names or use `READ_TOOL_NAMES` rather than the hardcoded old set.",
+          "flagged": true
+        },
+        {
+          "detail": "Checked current dispatch call arguments: `_dispatch_tool_call` passes the raw call and `dispatcher_context`, and `_dispatch_read_tool` expects `call['input']` to be a dict. The proposed optional `attachment_index=0` and `mode='fast'` defaults need to be applied inside the dispatcher because Anthropic tool calls may omit optional fields entirely.",
+          "flagged": false
+        }
+      ]
+    }
+  ],
+  "flags": [
+    {
+      "id": "FLAG-001",
+      "concern": "Media understanding persistence: new cache upsert wrappers could be accidentally blocked by existing live-write guild gating because the proposed table has no guild_id/environment columns.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "`DatabaseHandler._live_write_allowed` rejects missing guild ids; nearby write wrappers call it before storage writes, while the planned `message_media_understandings` row shape contains only message_id, attachment_index, media_url, media_kind, content_hash, model, understanding, and created_at."
+    },
+    {
+      "id": "FLAG-002",
+      "concern": "Media discovery outside the initial source window: `get_message_context` currently returns no attachments, so vision tools that only resolve media from `context['messages']` will not work for media-bearing messages discovered by that read tool.",
+      "category": "completeness",
+      "severity_hint": "uncertain",
+      "evidence": "`storage_handler.get_topic_editor_message_context` selects `message_id,channel_id,author_id,content,created_at,reference_id,thread_id`; the plan routes vision tool resolution through the run's `context['messages']` rather than extending message-context rows with attachment data."
+    },
+    {
+      "id": "FLAG-003",
+      "concern": "Gemini dependency split: adding `google-genai` is probably required, but the repository already imports `google.generativeai` through an older wrapper with known version-shape assumptions.",
+      "category": "maintainability",
+      "severity_hint": "likely-minor",
+      "evidence": "`requirements.txt` lists `google-generativeai>=0.3.0`; `src/common/llm/gemini_client.py` imports `google.generativeai as genai` but then expects `genai.Client`, and the plan adds the newer `google-genai` SDK for video understanding."
+    },
+    {
+      "id": "verifiability-0",
+      "concern": "Criterion 10: requires human verification (subjective_judgment).",
+      "category": "verifiability",
+      "severity_hint": "likely-minor",
+      "status": "open"
+    },
+    {
+      "id": "verifiability-1",
+      "concern": "Criterion 11: requires human verification (subjective_judgment).",
+      "category": "verifiability",
+      "severity_hint": "likely-minor",
+      "status": "open"
+    }
+  ],
+  "verified_flag_ids": [],
+  "disputed_flag_ids": []
+}

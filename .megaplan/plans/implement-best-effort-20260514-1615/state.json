@@ -1,0 +1,495 @@
+{
+  "name": "implement-best-effort-20260514-1615",
+  "idea": "Implement best-effort external linked media extraction for TopicEditor live updates. Current behavior: TopicEditor can attach Discord attachments/embeds by source-local media_refs, auto-shortlists media-bearing Discord posts with >=5 reactions as watching topics, and disabled the old LiveTopCreations auto-post loop. New goal: when a source message links to Reddit, Twitter/X, or similar external posts that contain media, provide a safe, consistent best-effort way to resolve/download that media for TopicEditor use. Requirements: prefer archived Discord attachments/embeds first; detect external URLs in source messages and embeds; use a resolver tier such as yt-dlp metadata/download with strict timeout, file-size, content-type, and domain safeguards; cache resolved results so repeated runs do not re-download; expose available external media refs to the agent in message context/source payload; allow structured blocks to bind external resolved media to the relevant section; when publishing, attach or post the resolved media in the same interleaved block flow, falling back to the original link if extraction fails; never make external extraction failure block text publishing; add clear logs/trace metadata explaining resolved/downloaded/skipped/fallback cases; include tests for Reddit/Twitter-like URLs, resolver failures, cache hits, oversize media, and publisher fallback. Keep secrets out of logs and do not reintroduce direct auto-posting at five reactions.",
+  "current_state": "finalized",
+  "iteration": 2,
+  "created_at": "2026-05-14T14:15:46Z",
+  "config": {
+    "project_dir": "/Users/peteromalley/Documents/banodoco-workspace/brain-of-bndc",
+    "auto_approve": true,
+    "robustness": "standard",
+    "mode": "code",
+    "strict_notes": false,
+    "agent": "",
+    "profile": "thoughtful",
+    "vendor": "codex",
+    "depth": "medium",
+    "with_prep": true,
+    "with_feedback": true,
+    "phase_model": [
+      "plan=codex:medium",
+      "prep=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "critique=codex:low",
+      "revise=codex:medium",
+      "gate=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "finalize=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "execute=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "loop_plan=codex:medium",
+      "loop_execute=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "review=codex:low",
+      "tiebreaker_researcher=codex:medium",
+      "tiebreaker_challenger=codex:medium",
+      "feedback=claude:low"
+    ]
+  },
+  "sessions": {
+    "hermes_prep": {
+      "id": "8c3ea947-59c7-4c59-a376-42c8dcfb37a9",
+      "mode": "persistent",
+      "created_at": "2026-05-14T14:22:25Z",
+      "last_used_at": "2026-05-14T14:22:25Z",
+      "refreshed": false
+    },
+    "codex_planner": {
+      "id": "019e26de-1a47-78e0-a3f0-f2ca3f071740",
+      "mode": "persistent",
+      "created_at": "2026-05-14T14:24:29Z",
+      "last_used_at": "2026-05-14T14:51:43Z",
+      "refreshed": false
+    },
+    "codex_critic": {
+      "id": "019e26e0-04bc-7783-bc3a-c928023f62d2",
+      "mode": "persistent",
+      "created_at": "2026-05-14T14:26:52Z",
+      "last_used_at": "2026-05-14T14:56:31Z",
+      "refreshed": false
+    },
+    "hermes_gatekeeper": {
+      "id": "21cba18f-e0f7-4a08-965d-9621723c9a1c",
+      "mode": "persistent",
+      "created_at": "2026-05-14T14:33:12Z",
+      "last_used_at": "2026-05-14T14:57:21Z",
+      "refreshed": false
+    },
+    "hermes_finalizer": {
+      "id": "293e0190-9fd5-490e-93e8-c53f68124652",
+      "mode": "persistent",
+      "created_at": "2026-05-14T14:41:46Z",
+      "last_used_at": "2026-05-14T15:07:14Z",
+      "refreshed": false
+    },
+    "hermes_executor": {
+      "id": "8e9da061-9a44-4a87-8162-cb447ad94bc2",
+      "mode": "persistent",
+      "created_at": "2026-05-14T14:45:24Z",
+      "last_used_at": "2026-05-14T18:22:31Z",
+      "refreshed": false
+    },
+    "codex_reviewer": {
+      "id": "019e27c7-6609-7a02-bb22-51ac6acd6dc9",
+      "mode": "persistent",
+      "created_at": "2026-05-14T18:39:20Z",
+      "last_used_at": "2026-05-14T18:39:20Z",
+      "refreshed": false
+    }
+  },
+  "plan_versions": [
+    {
+      "version": 1,
+      "file": "plan_v1.md",
+      "hash": "sha256:e4091b2dc5588a7cfbbc331e0814f3fc4e949a412acd40ac2218dd34cf08df10",
+      "timestamp": "2026-05-14T14:24:29Z"
+    },
+    {
+      "version": 2,
+      "file": "plan_v2.md",
+      "hash": "sha256:5d694c734357e12023e2e8e0638bcb94d147481ebe96304b3b150edc44211120",
+      "timestamp": "2026-05-14T14:51:43Z"
+    }
+  ],
+  "history": [
+    {
+      "step": "init",
+      "timestamp": "2026-05-14T14:15:46Z",
+      "duration_ms": 0,
+      "cost_usd": 0.0,
+      "result": "success",
+      "environment": {
+        "claude": true,
+        "codex": true
+      }
+    },
+    {
+      "step": "prep",
+      "timestamp": "2026-05-14T14:22:25Z",
+      "duration_ms": 393576,
+      "cost_usd": 3.5954577,
+      "result": "success",
+      "prompt_tokens": 2047441,
+      "completion_tokens": 9457,
+      "total_tokens": 2056898,
+      "session_mode": "persistent",
+      "session_id": "8c3ea947-59c7-4c59-a376-42c8dcfb37a9",
+      "agent": "hermes",
+      "output_file": "prep.json",
+      "artifact_hash": "sha256:1d60f1b794dda047354909bff7dd956f9349c24eef40b440908313d6eef5fd92"
+    },
+    {
+      "step": "plan",
+      "timestamp": "2026-05-14T14:24:29Z",
+      "duration_ms": 119536,
+      "cost_usd": 0.681796,
+      "result": "success",
+      "prompt_tokens": 369050,
+      "completion_tokens": 6319,
+      "total_tokens": 375369,
+      "session_mode": "persistent",
+      "session_id": "019e26de-1a47-78e0-a3f0-f2ca3f071740",
+      "agent": "codex",
+      "output_file": "plan_v1.md",
+      "artifact_hash": "sha256:e4091b2dc5588a7cfbbc331e0814f3fc4e949a412acd40ac2218dd34cf08df10"
+    },
+    {
+      "step": "critique",
+      "timestamp": "2026-05-14T14:26:52Z",
+      "duration_ms": 136436,
+      "cost_usd": 0.962182,
+      "result": "success",
+      "prompt_tokens": 574958,
+      "completion_tokens": 6480,
+      "total_tokens": 581438,
+      "session_mode": "persistent",
+      "session_id": "019e26e0-04bc-7783-bc3a-c928023f62d2",
+      "agent": "codex",
+      "output_file": "critique_v1.json",
+      "artifact_hash": "sha256:ce2ce99b6fb1ba8b30913e6fc58d6f7dd9636db34e8f8c6015e993aa9cf0d360",
+      "flags_count": 12
+    },
+    {
+      "step": "gate",
+      "timestamp": "2026-05-14T14:33:12Z",
+      "duration_ms": 367662,
+      "cost_usd": 1.72911978,
+      "result": "success",
+      "prompt_tokens": 977027,
+      "completion_tokens": 8360,
+      "total_tokens": 985387,
+      "session_mode": "persistent",
+      "session_id": "2649a927-fe2a-4afe-822a-f6c4fbe634fc",
+      "agent": "hermes",
+      "output_file": "gate.json",
+      "artifact_hash": "sha256:5b689995d41524080f0479d256cc6c1d76a8f9add0dfd413c2a06ca01abdc910",
+      "recommendation": "PROCEED"
+    },
+    {
+      "step": "finalize",
+      "timestamp": "2026-05-14T14:41:46Z",
+      "duration_ms": 500115,
+      "cost_usd": 1.3957740600000001,
+      "result": "success",
+      "prompt_tokens": 775229,
+      "completion_tokens": 13470,
+      "total_tokens": 788699,
+      "session_mode": "persistent",
+      "session_id": "d9c509de-ea74-49eb-93ff-0fdb7cec8584",
+      "agent": "hermes",
+      "output_file": "finalize.json",
+      "artifact_hash": "sha256:59cc4c7ea5e1944b75b34f793b595732ee9fe4553492151789832be5477bcfc3"
+    },
+    {
+      "step": "execute",
+      "timestamp": "2026-05-14T14:45:24Z",
+      "duration_ms": 211416,
+      "cost_usd": 0.39185148000000003,
+      "result": "blocked",
+      "session_mode": "persistent",
+      "session_id": "a839400a-bef4-451c-97a4-e2c6cb390303",
+      "agent": "hermes",
+      "output_file": "execution.json",
+      "artifact_hash": "sha256:ca6cba40a5d7157c64639ab5c6fd79554242d5732129796ddec8b99884710605",
+      "finalize_hash": "sha256:13ae0cba5f3f75452596e76e34dd0aae4d56e92b45e8cd099b5152a923d19e2e",
+      "approval_mode": "auto_approve"
+    },
+    {
+      "step": "critique",
+      "timestamp": "2026-05-14T14:47:56Z",
+      "duration_ms": 95591,
+      "cost_usd": 1.864067,
+      "result": "success",
+      "prompt_tokens": 1224757,
+      "completion_tokens": 11283,
+      "total_tokens": 1236040,
+      "session_mode": "persistent",
+      "session_id": "019e26e0-04bc-7783-bc3a-c928023f62d2",
+      "agent": "codex",
+      "output_file": "critique_v1.json",
+      "artifact_hash": "sha256:65892d96fede068de94c978c64293b92b7a6decc9c187f7d9da27b93b15c4dae",
+      "flags_count": 12
+    },
+    {
+      "step": "gate",
+      "timestamp": "2026-05-14T14:49:40Z",
+      "duration_ms": 89271,
+      "cost_usd": 0.053235300000000006,
+      "result": "success",
+      "prompt_tokens": 26713,
+      "completion_tokens": 1941,
+      "total_tokens": 28654,
+      "session_mode": "persistent",
+      "session_id": "39e7a171-0346-45e8-9a04-a3762c439eb2",
+      "agent": "hermes",
+      "output_file": "gate.json",
+      "artifact_hash": "sha256:cea4719287396e9f436753e8b5fa0504fc19655c9a1c4f4100e52f6752782ee5",
+      "recommendation": "ITERATE"
+    },
+    {
+      "step": "revise",
+      "timestamp": "2026-05-14T14:51:43Z",
+      "duration_ms": 115352,
+      "cost_usd": 1.171875,
+      "result": "success",
+      "prompt_tokens": 457143,
+      "completion_tokens": 11256,
+      "total_tokens": 468399,
+      "session_mode": "persistent",
+      "session_id": "019e26de-1a47-78e0-a3f0-f2ca3f071740",
+      "agent": "codex",
+      "output_file": "plan_v2.md",
+      "artifact_hash": "sha256:5d694c734357e12023e2e8e0638bcb94d147481ebe96304b3b150edc44211120",
+      "flags_addressed": [
+        "issue_hints",
+        "correctness-1",
+        "correctness-2",
+        "scope",
+        "DEBT-045",
+        "DEBT-046",
+        "DEBT-047",
+        "DEBT-048",
+        "callers-1",
+        "callers-2"
+      ]
+    },
+    {
+      "step": "critique",
+      "timestamp": "2026-05-14T14:53:17Z",
+      "duration_ms": 86390,
+      "cost_usd": 2.520297,
+      "result": "success",
+      "prompt_tokens": 1971975,
+      "completion_tokens": 15565,
+      "total_tokens": 1987540,
+      "session_mode": "persistent",
+      "session_id": "019e26e0-04bc-7783-bc3a-c928023f62d2",
+      "agent": "codex",
+      "output_file": "critique_v2.json",
+      "artifact_hash": "sha256:0b2d8d31864f23049232feabab1f5716690e2ff2959da518d51f2661c33fbb7d",
+      "flags_count": 6
+    },
+    {
+      "step": "critique",
+      "timestamp": "2026-05-14T14:56:31Z",
+      "duration_ms": 79263,
+      "cost_usd": 3.255255,
+      "result": "success",
+      "prompt_tokens": 2914365,
+      "completion_tokens": 19357,
+      "total_tokens": 2933722,
+      "session_mode": "persistent",
+      "session_id": "019e26e0-04bc-7783-bc3a-c928023f62d2",
+      "agent": "codex",
+      "output_file": "critique_v2.json",
+      "artifact_hash": "sha256:ff7796d29b17aeb73c47b21bdaf30296366d728754b88fd3dbbae3218182a079",
+      "flags_count": 2
+    },
+    {
+      "step": "gate",
+      "timestamp": "2026-05-14T14:57:21Z",
+      "duration_ms": 45418,
+      "cost_usd": 0.045767220000000004,
+      "result": "success",
+      "prompt_tokens": 23831,
+      "completion_tokens": 1236,
+      "total_tokens": 25067,
+      "session_mode": "persistent",
+      "session_id": "21cba18f-e0f7-4a08-965d-9621723c9a1c",
+      "agent": "hermes",
+      "output_file": "gate.json",
+      "artifact_hash": "sha256:66bf8f44a686382f3657124f0a77bc36c953a52a5c8fbdda317a6ddc3050283d",
+      "recommendation": "PROCEED"
+    },
+    {
+      "step": "finalize",
+      "timestamp": "2026-05-14T15:07:14Z",
+      "duration_ms": 580021,
+      "cost_usd": 2.09086752,
+      "result": "success",
+      "prompt_tokens": 1171876,
+      "completion_tokens": 14886,
+      "total_tokens": 1186762,
+      "session_mode": "persistent",
+      "session_id": "293e0190-9fd5-490e-93e8-c53f68124652",
+      "agent": "hermes",
+      "output_file": "finalize.json",
+      "artifact_hash": "sha256:2a02dcb2c75ffdc9d7e94b195ac566fc8d198708670cf0afedd59ec700a1c251"
+    },
+    {
+      "step": "execute",
+      "timestamp": "2026-05-14T18:22:31Z",
+      "duration_ms": 11705508,
+      "cost_usd": 44.02918272,
+      "result": "success",
+      "session_mode": "persistent",
+      "session_id": "8e9da061-9a44-4a87-8162-cb447ad94bc2",
+      "agent": "hermes",
+      "output_file": "execution.json",
+      "artifact_hash": "sha256:b7fa964390d593158ee88b0ff1fe5f550e5ab50bea29bb8f290c01b1149beac5",
+      "finalize_hash": "sha256:56080165cd2b90afbd694789de56c83626219c08239a0ba16d1d1b2136ae1538",
+      "approval_mode": "auto_approve"
+    },
+    {
+      "step": "review",
+      "timestamp": "2026-05-14T18:39:20Z",
+      "duration_ms": 121097,
+      "cost_usd": 1.378266,
+      "result": "needs_rework",
+      "prompt_tokens": 996132,
+      "completion_tokens": 6429,
+      "total_tokens": 1002561,
+      "session_mode": "persistent",
+      "session_id": "019e27c7-6609-7a02-bb22-51ac6acd6dc9",
+      "agent": "codex",
+      "output_file": "review.json",
+      "artifact_hash": "sha256:2eda54660d5ecbacbdf561f2f846f2b71adbeedf53172333b1a0fa919b48eb5b",
+      "finalize_hash": "sha256:d176054ec07cfc2b557421b2d9afdb3299b1f1fd6927345aa5347dfadf5282e2"
+    }
+  ],
+  "meta": {
+    "significant_counts": [
+      10,
+      10,
+      4,
+      0
+    ],
+    "weighted_scores": [
+      18.0,
+      0
+    ],
+    "plan_deltas": [
+      86.01
+    ],
+    "recurring_critiques": [
+      [],
+      [],
+      [],
+      []
+    ],
+    "total_cost_usd": 65.164994,
+    "overrides": [
+      {
+        "action": "add-note",
+        "timestamp": "2026-05-14T14:27:00Z",
+        "note": "User clarification: external media resolution can use a higher configurable download/upload cap than the initial 25 MB assumption because successful media is uploaded to Discord for hosting. Still enforce a hard timeout, max byte cap, and Discord upload compatibility; prefer a default cap aligned with practical Discord bot upload limits rather than tiny preview-cache limits. Lazy resolution still means only resolving/downloading selected external refs, not every link up front.",
+        "source": "user"
+      },
+      {
+        "action": "add-note",
+        "timestamp": "2026-05-14T14:45:46Z",
+        "note": "Execution correction: do not block local implementation on production deployment actions. The executor should create the staged migration and code first; copying/running migrations and setting EXTERNAL_MEDIA_CACHE_DIR are deployment/post-execute actions, not before-execute prerequisites. Remove the premature T16 gate and keep U1/U2 as operator follow-up before production deployment.",
+        "source": "user"
+      },
+      {
+        "action": "replan",
+        "timestamp": "2026-05-14T14:45:51Z",
+        "reason": "Execution blocked on premature before_execute user-action gate"
+      },
+      {
+        "action": "add-note",
+        "timestamp": "2026-05-14T14:48:06Z",
+        "note": "Implementation constraints for executor: (1) use one shared deterministic extract_external_urls helper for _message_payload, StorageHandler.get_topic_editor_message_context, validation, _resolve_media_url_from_metadata, and publish fallback lookup so external indexes cannot drift; (2) replace the structured publisher's flat string-only send model with explicit send units preserving suppressed-mode output, sent_id accounting, media_count, flat_message_count, and partial failure semantics for both text URL fallback and discord.File sends; (3) enforce strict source-domain safelist on original URLs, then allow yt-dlp resolved CDN URLs only when provenance is from that safelisted source and content-type, byte cap, timeout, and Discord upload compatibility checks pass; (4) every downstream kind branch must be explicit attachment/embed/external, never 'non-attachment means embed'.",
+        "source": "user"
+      },
+      {
+        "action": "replan",
+        "timestamp": "2026-05-14T14:54:41Z",
+        "reason": "Resolve remaining layering and long-form platform policy critique flags"
+      },
+      {
+        "action": "add-note",
+        "timestamp": "2026-05-14T15:44:04Z",
+        "note": "New runtime finding: YouTube/fallback links can duplicate Discord previews when the same URL appears in block text and as a media/fallback unit. Add publish-time URL de-duplication for fallback-link-only/external URLs: if a media/fallback URL already appears in the associated block text or has already been sent as a media URL in this topic, do not send an additional bare URL media unit. Prefer keeping the contextual text occurrence and avoid duplicate Discord unfurls. Also avoid auto-attaching default media refs for long-form fallback-link-only embeds when the URL is already present in the block text.",
+        "source": "user"
+      }
+    ],
+    "notes": [
+      {
+        "timestamp": "2026-05-14T14:27:00Z",
+        "note": "User clarification: external media resolution can use a higher configurable download/upload cap than the initial 25 MB assumption because successful media is uploaded to Discord for hosting. Still enforce a hard timeout, max byte cap, and Discord upload compatibility; prefer a default cap aligned with practical Discord bot upload limits rather than tiny preview-cache limits. Lazy resolution still means only resolving/downloading selected external refs, not every link up front.",
+        "source": "user"
+      },
+      {
+        "timestamp": "2026-05-14T14:45:46Z",
+        "note": "Execution correction: do not block local implementation on production deployment actions. The executor should create the staged migration and code first; copying/running migrations and setting EXTERNAL_MEDIA_CACHE_DIR are deployment/post-execute actions, not before-execute prerequisites. Remove the premature T16 gate and keep U1/U2 as operator follow-up before production deployment.",
+        "source": "user"
+      },
+      {
+        "timestamp": "2026-05-14T14:45:51Z",
+        "note": "Remove the task that verifies production migration/env setup before implementation. Treat production migration application and EXTERNAL_MEDIA_CACHE_DIR as after-execute/deployment actions. The implementation should first create the staged migration, resolver, cache wrappers, publisher changes, and tests."
+      },
+      {
+        "timestamp": "2026-05-14T14:48:06Z",
+        "note": "Implementation constraints for executor: (1) use one shared deterministic extract_external_urls helper for _message_payload, StorageHandler.get_topic_editor_message_context, validation, _resolve_media_url_from_metadata, and publish fallback lookup so external indexes cannot drift; (2) replace the structured publisher's flat string-only send model with explicit send units preserving suppressed-mode output, sent_id accounting, media_count, flat_message_count, and partial failure semantics for both text URL fallback and discord.File sends; (3) enforce strict source-domain safelist on original URLs, then allow yt-dlp resolved CDN URLs only when provenance is from that safelisted source and content-type, byte cap, timeout, and Discord upload compatibility checks pass; (4) every downstream kind branch must be explicit attachment/embed/external, never 'non-attachment means embed'.",
+        "source": "user"
+      },
+      {
+        "timestamp": "2026-05-14T14:54:41Z",
+        "note": "Plan correction: put the shared pure external URL extraction/types/safety helper in a neutral common module such as src/common/external_media.py so src/common/storage_handler.py and TopicEditor can both import it without common depending on features. Keep side-effectful TopicEditor resolver orchestration in summarising only if needed, but all shared indexing must come from common. Also define platform policy explicitly: long-form domains such as youtube.com/youtu.be, vimeo.com, twitch.tv are exposed as external link refs but are fallback-link-only by default for TopicEditor Discord attachments; do not yt-dlp download them unless future explicit opt-in and small direct media compatibility are added. Short-form/social domains can use lazy yt-dlp/download under provenance, byte cap, content type, timeout, and Discord upload checks."
+      },
+      {
+        "timestamp": "2026-05-14T15:44:04Z",
+        "note": "New runtime finding: YouTube/fallback links can duplicate Discord previews when the same URL appears in block text and as a media/fallback unit. Add publish-time URL de-duplication for fallback-link-only/external URLs: if a media/fallback URL already appears in the associated block text or has already been sent as a media URL in this topic, do not send an additional bare URL media unit. Prefer keeping the contextual text occurrence and avoid duplicate Discord unfurls. Also avoid auto-attaching default media refs for long-form fallback-link-only embeds when the URL is already present in the block text.",
+        "source": "user"
+      }
+    ],
+    "current_invocation_id": "73b8304ac4bd4095"
+  },
+  "last_gate": {
+    "recommendation": "PROCEED",
+    "rationale": "All 15 flags from the previous iteration are resolved. The critique check summary confirms issue_hints, correctness, scope, all_locations, and callers are clear. The weighted score trajectory went from 18.0 to 0. The plan now addresses all four original critique gaps: (1) a single shared `extract_external_urls` helper in `src/common/external_media.py` avoiding feature\u2192common dependency inversion, (2) explicit two-tier safety with source-domain safelist plus provenance-bound CDN download under content-type/byte-cap/timeout/Discord-upload checks, (3) explicit attachment/embed/external branches at every media-ref consumption point eliminating implicit embed fallthrough, and (4) a concrete send-unit model preserving suppressed-mode output, sent-id accounting, media counts, flat_message_count, and partial failure semantics. The iteration pressure analysis shows no groups meeting TIEBREAKER thresholds (0 reopened across all groups), no escalated debt subsystems overlap with this plan's domain, and the execution order is logically sequenced from shared helpers through staged migration through payload wiring to publisher refactoring to tests. Preflight confirms writable project directory, success criteria present, and both Claude and Codex available.",
+    "reprompted": false,
+    "signals_assessment": "Score trajectory 18.0\u21920 (clean). All 15 flags resolved this iteration with no unresolved significant flags remaining. Plan delta is 86.86%, indicating substantial revision. No recurring critiques, no scope creep flags, no debt overlaps with this plan's subsystem. Preflight passed. The plan is mature and ready for execution.",
+    "warnings": [
+      "The staged migration .migrations_staging/20260514160000_external_media_cache.sql must be applied to production Supabase before deploying code that reads/writes the external_media_cache table. This is noted as deployment follow-up (U1).",
+      "EXTERNAL_MEDIA_CACHE_DIR and the external media byte cap must be configured in production before the resolver can persist and serve cached downloads. This is noted as deployment follow-up (U2).",
+      "Long-form domains (YouTube, Vimeo, Twitch) are explicitly fallback-link-only by default per the platform policy defined in Step 1.5, which resolves the earlier ambiguity. Ensure the executor does not attempt yt-dlp metadata/download for these domains."
+    ],
+    "settled_decisions": [
+      {
+        "decision": "Shared `extract_external_urls` helper lives in `src/common/external_media.py` so both `src/common/storage_handler.py` and TopicEditor can import it without common depending on features.",
+        "context": "Resolved layering concern FLAG-005 / DEBT-047 about feature\u2192common dependency inversion."
+      },
+      {
+        "decision": "Long-form domains (YouTube, Vimeo, Twitch) are safelisted for external link ref exposure but are fallback-link-only for TopicEditor Discord publishing. Short-form/social domains may attempt lazy yt-dlp resolution.",
+        "context": "Resolved correctness / FLAG-006 ambiguity about YouTube/Vimeo/Twitch download policy."
+      },
+      {
+        "decision": "Resolved CDN URLs from yt-dlp are trusted only when the original URL passes source-domain safelist AND the downloaded content passes content-type, byte-cap, timeout, and Discord upload compatibility checks. The CDN host itself is not safelisted.",
+        "context": "Resolved DEBT-046 about false fallbacks vs unsafe arbitrary downloads with two-tier provenance model."
+      },
+      {
+        "decision": "Structured publisher send-unit model: text units (`send_kind: text`), URL fallback units (`send_kind: url`), and file units (`send_kind: file`). Suppressed mode preserves flat_messages, media_indices, media_count, and flat_message_count.",
+        "context": "Resolved DEBT-045 about the flattened string-only publisher being incompatible with discord.File sends."
+      }
+    ],
+    "passed": true,
+    "preflight_results": {
+      "project_dir_exists": true,
+      "project_dir_writable": true,
+      "success_criteria_present": true,
+      "claude_available": true,
+      "codex_available": true
+    },
+    "orchestrator_guidance": "Plan passed gate and preflight. Proceed to finalize."
+  },
+  "active_step": {
+    "step": "execute",
+    "agent": "hermes",
+    "mode": "persistent",
+    "run_id": "d9fb17ef-4fb1-4176-b0ca-b72d881aac3c",
+    "started_at": "2026-05-14T18:42:10Z",
+    "attempt": 3,
+    "last_activity_at": "2026-05-14T18:56:23Z",
+    "last_activity_kind": "stderr",
+    "model": "fireworks:accounts/fireworks/models/deepseek-v4-pro",
+    "last_activity_detail": "[tool] \u30fe(\uff3e\u2207\uff3e) \u26a1 running 2 tools concurrently"
+  }
+}

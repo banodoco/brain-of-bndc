@@ -1,0 +1,105 @@
+{
+  "version": 1,
+  "timestamp": "2026-05-13T22:57:31Z",
+  "hash": "sha256:d11cd2427c1488060599bfb8f6248ed9037c6b510b02d4130de4c50689bbbdc9",
+  "questions": [
+    "Should the implementation add `google-genai` to `requirements.txt` even though the repo currently lists `google-generativeai>=0.3.0`, or is dependency management handled elsewhere in deployment?",
+    "What fixed per-call cost estimates should the budget cap use for image/video fast/best calls? If none are specified, the implementation will use conservative static estimates solely for gating and metadata, not billing."
+  ],
+  "success_criteria": [
+    {
+      "criterion": "A mirrored migration creates `public.message_media_understandings` with the requested primary key and indexes in both `.migrations_staging/` and `../supabase/migrations/`.",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "`src/common/vision_clients.py` provides `describe_image` and `describe_video`, uses lazy SDK/API imports, returns structured JSON, retries transient failures once, and does not import Astrid at runtime.",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "parse_diff",
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "Topic editor registers `understand_image` and `understand_video` as read tools, dispatches them through cache-first logic, and does not alter write-tool idempotency/finalize/lease behavior.",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "parse_diff",
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "A second `understand_image` call for the same `(message_id, attachment_index, model)` returns cached data without invoking the vision API stub.",
+      "priority": "must",
+      "requires": [
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "A different message with identical media bytes reuses the cached understanding via `content_hash` and persists a row for the new message without invoking the API stub again.",
+      "priority": "must",
+      "requires": [
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "Initial topic editor user payload includes `media_urls` and cache-only `media_understandings` for source messages with cached media rows.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "When `TOPIC_EDITOR_VISION_BUDGET_PER_RUN` is exceeded, further vision tool calls return `{\"outcome\":\"budget_exceeded\"}` and do not hit the API stub.",
+      "priority": "must",
+      "requires": [
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "Existing regression tests `tests/test_topic_editor_runtime.py` and `tests/test_live_storage_wrappers.py` pass after updates.",
+      "priority": "must",
+      "requires": [
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "`src/features/summarising/live_update_editor.py` and `src/features/summarising/live_update_prompts.py` are not modified.",
+      "priority": "must",
+      "requires": [
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "The new vision client module stays close to the requested size target, roughly 200-300 LOC, without Astrid debug logging boilerplate.",
+      "priority": "should",
+      "requires": [
+        "read_files",
+        "subjective_judgment"
+      ]
+    },
+    {
+      "criterion": "Prompt text gives the agent clear editorial rules for using `kind`, `aesthetic_quality`, `subject`, and `technical_signal` without over-instructing unrelated topic behavior.",
+      "priority": "should",
+      "requires": [
+        "read_files",
+        "subjective_judgment"
+      ]
+    }
+  ],
+  "assumptions": [
+    "Media attachments are stored on source messages in Discord-style `attachments` fields as either a JSON string or list of dicts, with URLs in `url` or `proxy_url`.",
+    "Only image and video understanding tools are required now; the migration allows `audio` for future compatibility, but no `understand_audio` tool will be added.",
+    "Content-hash dedup should be model-specific: reuse only rows with the same `model`, because different models may produce materially different structured descriptions.",
+    "Initial payload enrichment should use cached fast-model rows only and must never make network/API calls during payload construction.",
+    "The implementation may add `google-genai` as a dependency if it is not already available, while leaving the existing `google-generativeai` dependency untouched unless tests show a conflict.",
+    "Budget tracking is a per-run dispatcher concern for vision API calls only and is separate from the existing Anthropic token/cost force-close logic."
+  ],
+  "structure_warnings": []
+}

@@ -1,0 +1,34 @@
+{
+  "receipt_id": "73aed10c-a653-4c8d-bc53-34fbad4d00b1",
+  "plan_id": "structured-live-update-doc-publishing",
+  "phase": "gate",
+  "iteration": 1,
+  "attempt": 1,
+  "timestamp_utc": "2026-05-14T10:15:14.693375+00:00",
+  "profile_name": "thoughtful",
+  "agent": "hermes",
+  "agent_mode": "persistent",
+  "model_configured": "hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+  "model_actual": "accounts/fireworks/models/deepseek-v4-pro",
+  "session_id": "7aeaf515-230a-4bc7-bd07-165e4be38e9a",
+  "megaplan_version": "0.8.1",
+  "schema_version": 1,
+  "prompt_hash_raw": "0e6d2e15f7780d0f4cd7d300a0b3ae0f10a44219d4e6282df4ca796ca117a544",
+  "prompt_hash_canonical": "3629ecc558090382d22949f093bbffc91e1bb938160a831003ff58e168363962",
+  "canonicalization_version": 1,
+  "upstream_artifact_hashes": [
+    "sha256:909cf9a4842f70a3cd82dd6a5640582397302eff87b887193c388f67a2aa9cc6"
+  ],
+  "cost_usd": 0.04486938000000001,
+  "duration_ms": 49363,
+  "prompt_tokens": 21313,
+  "completion_tokens": 2237,
+  "verdict": null,
+  "metrics": {
+    "recommendation": "ITERATE",
+    "blocking_flags_resolved": 0,
+    "blocking_flags_remaining": 0,
+    "override_forced": false
+  },
+  "scope_drift_severity": null
+}

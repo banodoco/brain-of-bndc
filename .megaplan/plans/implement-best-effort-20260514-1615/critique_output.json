@@ -1,0 +1,162 @@
+{
+  "checks": [
+    {
+      "id": "issue_hints",
+      "question": "Did the work fully address the issue hints, user notes, and approved plan requirements?",
+      "guidance": "Cross-check the result against explicit user notes, critique corrections, and watch items. Flag anything the implementation ignored, contradicted, or only partially covered.",
+      "findings": [
+        {
+          "detail": "Verified the latest user corrections are reflected in the plan: shared extraction/types/safety helpers are now in neutral `src/common/external_media.py`, long-form domains are explicitly fallback-link-only by default, production migration/env work remains deployment follow-up, and lazy resolution still applies only to selected structured block external refs.",
+          "flagged": false
+        },
+        {
+          "detail": "Checked the two-tier download-safety requirement against Phase 1 Step 2. The plan still enforces source-domain safelist before side effects and only downloads yt-dlp CDN URLs when safelisted-source provenance plus content-type, byte cap, timeout, and Discord upload compatibility checks pass.",
+          "flagged": false
+        }
+      ],
+      "prior_findings": [
+        {
+          "detail": "Verified the user correction about production setup versus local implementation. The revised plan now creates `.migrations_staging/20260514160000_external_media_cache.sql` during implementation and moves production migration application plus `EXTERNAL_MEDIA_CACHE_DIR` configuration into Deployment Follow-Up, so the premature pre-implementation gate is removed.",
+          "flagged": false,
+          "status": "n/a"
+        },
+        {
+          "detail": "Checked the user clarification about file size limits. Step 2 now says the byte cap is configurable and should default around practical Discord bot upload limits rather than the earlier tiny preview-cache assumption, while still requiring timeout, byte cap, content-type checks, and Discord upload compatibility.",
+          "flagged": false,
+          "status": "n/a"
+        },
+        {
+          "detail": "The brief still says downloads should have a strict domain safelist, but revised Step 2 explicitly says not to domain-safelist ephemeral yt-dlp CDN hosts and instead to rely on source provenance plus content-type, byte cap, and timeout. That is an intentional tradeoff and may be pragmatic, but it diverges from the literal domain-safelist-on-downloads constraint.",
+          "flagged": true,
+          "status": "verified"
+        }
+      ]
+    },
+    {
+      "id": "correctness",
+      "question": "Are the proposed changes technically correct?",
+      "guidance": "Look for logic errors, invalid assumptions, broken invariants, schema mismatches, or behavior that would fail at runtime. When the fix adds a conditional branch, check whether it handles all relevant cases \u2014 not just the one reported in the issue.",
+      "findings": [
+        {
+          "detail": "Verified the prior long-form platform ambiguity is addressed in executable plan steps. YouTube, Vimeo, and Twitch remain safelisted for detection/exposure as external link refs, but Step 1 defines them as fallback-link-only and Step 2 says fallback-only domains return a structured fallback outcome without yt-dlp or HTTP download.",
+          "flagged": false
+        },
+        {
+          "detail": "Rechecked the structured publisher concern against Phase 4 Step 8. The plan now requires an explicit send-unit model for text, fallback URL, and file sends, and it preserves the existing observable counters and status semantics, so the previous string-only send-loop risk is adequately contained.",
+          "flagged": false
+        }
+      ],
+      "prior_findings": [
+        {
+          "detail": "Recurring debt: Checked the structured publish path in `src/features/summarising/topic_editor.py`: `_publish_topic` currently turns every `render_topic_publish_units` media unit into a string in `flat_messages` and sends it with `channel.send(message_text)`. The revised plan still says to send `discord.File` on resolver success, but it does not define the concrete replacement send-unit model for mixed text, fallback URL strings, and file sends, including suppressed-mode return shape, sent-id accounting, and partial status.",
+          "flagged": true,
+          "status": "verified"
+        },
+        {
+          "detail": "Checked the existing validation branch around `topic_editor.py:1621`. Because the current code handles `kind == \"attachment\"` and treats every other kind as embed, the executor must add an explicit external branch before the embed fallback; the plan calls for validating external refs separately, so the intended direction is correct, but this is a real caller-sensitive edge that should remain in the critique.",
+          "flagged": true,
+          "status": "verified"
+        }
+      ]
+    },
+    {
+      "id": "scope",
+      "question": "Search for related code that handles the same concept. Is the reported issue a symptom of something broader?",
+      "guidance": "Look at how the changed function is used across the codebase. Does the fix only address one caller's scenario while others remain broken? Flag missing required work or out-of-scope edits. A minimal patch is often right, but check whether the underlying problem is bigger than what the issue describes.",
+      "findings": [
+        {
+          "detail": "Verified the shared-indexing concern is still explicitly covered. Phase 1 Step 1 and success criterion 3 require `extract_external_urls` to be the only source of truth for `_message_payload`, `get_message_context`, validation, `_resolve_media_url_from_metadata`, render fallback lookup, and publish-time resolver lookup.",
+          "flagged": false
+        },
+        {
+          "detail": "Searched related live-update media paths and found no plan change that broadens external refs into `live_update_prompts.py` flat candidate media handling. The plan continues to keep external media binding inside TopicEditor structured blocks and preserves auto-shortlist-to-watching behavior.",
+          "flagged": false
+        }
+      ],
+      "prior_findings": [
+        {
+          "detail": "Searched related media-ref code and confirmed the TopicEditor media-ref contract is separate from `live_update_prompts.py` flat `media_refs`. The plan keeps external refs scoped to TopicEditor document blocks and says not to auto-shortlist solely on external links, so it does not broaden the old five-reaction direct-post surface.",
+          "flagged": false,
+          "status": "n/a"
+        },
+        {
+          "detail": "Recurring debt: Checked the three source-message paths that would need external URL indexing: `TopicEditor._message_payload`, `StorageHandler.get_topic_editor_message_context`, and publish/validation hydration through `get_topic_editor_source_messages`. The revised plan still describes detecting URLs separately in multiple places and does not explicitly require one shared deterministic extraction helper, so `kind: \"external\", index: N` can drift between prompt exposure, validation, rendering, and fallback resolution.",
+          "flagged": true,
+          "status": "verified"
+        }
+      ]
+    },
+    {
+      "id": "all_locations",
+      "question": "Does the change touch all locations AND supporting infrastructure?",
+      "guidance": "Search for all instances of the symbol/pattern being changed. Also ask: does this feature require setup, registration, or integration code beyond the core logic? Missing glue code causes test failures even when the core fix is correct.",
+      "findings": [
+        {
+          "detail": "Verified the prior layering flag against the revised module placement. The common/shared helper now lives in `src/common/external_media.py`, so `src/common/storage_handler.py` and `src/features/summarising/topic_editor.py` can both import it without making common depend on `src.features.summarising`.",
+          "flagged": false
+        },
+        {
+          "detail": "Checked supporting infrastructure coverage against the repository: the plan names DB and storage wrappers near `message_media_understandings`, creates a `.migrations_staging` SQL file, updates prompt/tool schema, payloads, validation, rendering, source media counts, publishing, and targeted tests. Those are the relevant locations surfaced by the current code search.",
+          "flagged": false
+        }
+      ],
+      "prior_findings": [
+        {
+          "detail": "Verified the prior schema-infrastructure gap against the current plan and repository. The repo already has `.migrations_staging` SQL files, and revised Step 3 now requires creating the staged `external_media_cache` migration there, matching the existing `message_media_understandings` pattern instead of relying on inline DDL documentation.",
+          "flagged": false,
+          "status": "n/a"
+        },
+        {
+          "detail": "Checked the `post_sectioned_topic` tool schema and prompt text in `topic_editor.py`; both currently enumerate only `attachment` and `embed` for `media_refs.kind`. The plan explicitly includes updating both locations, so the integration point is covered, but it should be validated by the planned schema/core tests because otherwise the agent cannot legally emit `kind: \"external\"`.",
+          "flagged": false,
+          "status": "n/a"
+        }
+      ]
+    },
+    {
+      "id": "callers",
+      "question": "Find the callers of the changed function. What arguments do they actually pass? Does the fix handle all of them?",
+      "guidance": "Grep for call sites. For each caller, check what values it passes \u2014 especially edge cases like None, zero, empty, or composite inputs. Then ask: should this change be here, or in a caller, callee, or new method?",
+      "findings": [
+        {
+          "detail": "Verified the normalized media-ref caller concern remains addressed. The plan requires explicit `attachment`, `embed`, and `external` branches anywhere normalized refs are consumed, including validation and `_resolve_media_url_from_metadata`, and explicitly forbids the current `else: embed` pattern.",
+          "flagged": false
+        },
+        {
+          "detail": "Checked `_resolve_media_url_from_metadata` callers again: `render_topic_publish_units` can use external fallback URL lookup while `_summarize_source_media_counts` is protected by Step 7's instruction to preserve existing attachment/embed counts and either exclude external refs from `resolvable_media` or report them separately.",
+          "flagged": false
+        }
+      ],
+      "prior_findings": [
+        {
+          "detail": "Grep found `normalize_media_ref` feeds `normalize_topic_document` and `block_media_refs`, and `block_media_refs` feeds both validation and `render_topic_publish_units`. Extending `normalize_media_ref` is the correct choke point, but the downstream attachment/embed assumptions must be updated in every caller that branches on `kind`.",
+          "flagged": true,
+          "status": "verified"
+        },
+        {
+          "detail": "Grep found `_resolve_media_url_from_metadata` is called from `render_topic_publish_units`, `_summarize_source_media_counts`, and unit tests. The plan's rule to keep extraction out of this function is correct for purity, but adding external fallback URL lookup here will also affect source media counts unless the summary function deliberately excludes external refs or reports them separately.",
+          "flagged": true,
+          "status": "verified"
+        }
+      ]
+    }
+  ],
+  "flags": [],
+  "verified_flag_ids": [
+    "issue_hints",
+    "correctness",
+    "correctness-1",
+    "correctness-2",
+    "scope",
+    "all_locations",
+    "FLAG-005",
+    "FLAG-006",
+    "DEBT-045",
+    "DEBT-046",
+    "DEBT-047",
+    "DEBT-048",
+    "callers-1",
+    "callers-2"
+  ],
+  "disputed_flag_ids": []
+}

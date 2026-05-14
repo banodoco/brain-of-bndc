@@ -1,0 +1,31 @@
+{
+  "receipt_id": "347b638c-e0c3-47c8-98e9-d7217215207e",
+  "plan_id": "unified-discord-style-search-20260514-0319",
+  "phase": "finalize",
+  "iteration": 2,
+  "attempt": 1,
+  "timestamp_utc": "2026-05-14T01:40:05.028469+00:00",
+  "profile_name": "led",
+  "agent": "hermes",
+  "agent_mode": "persistent",
+  "model_configured": "hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+  "model_actual": "accounts/fireworks/models/deepseek-v4-pro",
+  "session_id": "93f8885d-ceee-4a63-a28e-a3e7fbd2064a",
+  "megaplan_version": "0.8.1",
+  "schema_version": 1,
+  "prompt_hash_raw": "8206341516259a943fb8ed264ef7e4af392597b143d3e321112681d0bc2ab1a3",
+  "prompt_hash_canonical": "8966b98cae9b3e2ba5d8a0fbb79774e0787db408f797ead3e133e6e66d004fe2",
+  "canonicalization_version": 1,
+  "upstream_artifact_hashes": [],
+  "cost_usd": 1.74462144,
+  "duration_ms": 733474,
+  "prompt_tokens": 962468,
+  "completion_tokens": 20094,
+  "verdict": null,
+  "metrics": {
+    "tasks_count": 5,
+    "sense_checks_count": 8,
+    "per_task_evidence_file_count": 0
+  },
+  "scope_drift_severity": null
+}

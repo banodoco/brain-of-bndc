@@ -1,0 +1,123 @@
+{
+  "version": 2,
+  "timestamp": "2026-05-14T01:27:39Z",
+  "hash": "sha256:b678707a40d2d74a6ce626edd315eec49a048b00e4fbc9fdda785957dfeb44ad",
+  "changes_summary": "Resolved FLAG-001 by committing to Discord mention-token regex matching (`<@ID>` / `<@!ID>`) against `content` for both window and archive scope, since `discord_messages` has no dedicated `mentions` column. Archive scope uses Supabase `.ilike()` with parameterized token patterns (safe: integer IDs formatted into fixed tokens, not user-controlled free text). Window scope uses Python `re.search`. Also clarified the two-pass archive `has` filter strategy (indexed SQL filters first, Python post-filter for jsonb attachment/embed checks) to avoid depending on undocumented Supabase jsonb operators. Made step ordering more concrete with exact line references and renamed `_search_source_messages` \u2192 `_search_window_messages` to avoid ambiguity.",
+  "flags_addressed": [
+    "FLAG-001"
+  ],
+  "questions": [
+    "Should the 30-day archive range cap clamp silently (narrow the interval to 30 days) or reject as `tool_error`? The plan currently says clamp silently per the original brief, but `tool_error` may be better so the agent knows it asked for too much and can adjust."
+  ],
+  "success_criteria": [
+    {
+      "criterion": "`TOPIC_EDITOR_TOOLS` exposes exactly one `search_messages` read tool using the unified filter schema and includes a separate `get_reply_chain` tool with required `message_id` and optional `max_depth`.",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "The old topic-editor `search_messages` parameters `author_id`, `channel_id`, and `hours_back` are no longer part of that tool schema, and equivalent behavior is available through `from_author_id`, `in_channel_id`, `after`, and default `scope='window'`.",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "Window-scope `search_messages` AND-combines query, from_author, in_channel, mentions_author (via `<@ID>` / `<@!ID>` regex in content), has, time, reply-status, and limit filters against `dispatcher_context['messages']`.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Archive-scope `search_messages` calls a storage-backed `search_messages_unified` path scoped by `guild_id` and `environment`, with parameterized content matching, mention-token `.ilike()` patterns, and compact result rows with `content_preview` \u2264200 chars.",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "parse_diff",
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "Malformed `after` or `before` values (not ISO timestamp, not relative `Nd`/`Nh`) produce a `tool_error` outcome rather than being silently ignored.",
+      "priority": "must",
+      "requires": [
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "`get_reply_chain` walks `discord_messages.reference_id` iteratively, clamps `max_depth` to 1\u201315 (default 5), detects cycles via a `seen` set, and returns compact ancestor rows root-first.",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "The topic-editor system prompt documents the unified search examples and `get_reply_chain` usage without modifying `src/features/summarising/live_update_editor.py` or `src/features/summarising/live_update_prompts.py`.",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "Focused topic-editor tests pass after updating existing `search_messages` tests (param rename: `author_id`\u2192`from_author_id`, `channel_id`\u2192`in_channel_id`) and adding coverage for archive dispatch, filter combinations, reply-chain walking, and cycle detection.",
+      "priority": "must",
+      "requires": [
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "No guarded flows are changed: `finalize_run`, the agent loop, override-collision, idempotency, lease-expiry, force-close, vision tools, and `live_update_editor.py` / `live_update_prompts.py` remain outside the diff except incidental import/schema list updates if required.",
+      "priority": "must",
+      "requires": [
+        "parse_diff",
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Archive `mentions_author_id` filtering uses `.ilike()` on `content` with `<@ID>` and `<@!ID>` token patterns \u2014 NO reference to a non-existent `mentions` column.",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "Implementation keeps search/reply helpers parameterized: no raw SQL string interpolation for user-provided search text; mention-token patterns use integer IDs formatted into fixed strings.",
+      "priority": "should",
+      "requires": [
+        "read_files",
+        "parse_diff",
+        "subjective_judgment"
+      ]
+    },
+    {
+      "criterion": "Result payloads remain compact enough for the existing ~2KB tool-result cap; `content_preview` capped at 200 characters per message; list-level `truncated: true` flag when rows are trimmed.",
+      "priority": "should",
+      "requires": [
+        "read_files",
+        "run_tests"
+      ]
+    }
+  ],
+  "assumptions": [
+    "`discord_messages` has no `mentions` column; `mentions_author_id` filtering MUST use content token matching (`<@ID>` / `<@!ID>`) via `.ilike()` for archive scope and `re.search` for window scope.",
+    "`reference_id` is the reply-parent column and is mapped to `reply_to_message_id` in all tool output.",
+    "`scope` defaults to `window`, preserving existing source-window search behavior.",
+    "`has=['file']` means non-empty `attachments` array; `image`/`video`/`audio` derived from attachment `content_type` or filename extension; `embed` means non-empty `embeds` array; `link` means URL-like text in `content`.",
+    "Archive `has` filtering uses a two-pass approach: indexed SQL filters first, Python post-filter for jsonb attachment/embed checks (avoids depending on potentially unavailable Supabase jsonb operators).",
+    "Archive 30-day range cap applies: if `after` and `before` span more than 30 days, clamp the earlier bound so the effective window is \u226430 days; malformed time syntax is still a `tool_error`.",
+    "The existing `_tool_result_content(...)` 2KB JSON truncation is adequate; helper-level `content_preview` trimming (200 chars) reduces how often it truncates blindly.",
+    "Tests should be concentrated in `tests/test_topic_editor_runtime.py`; storage-level fakes only if cheap.",
+    "The older `DBHandler.search_messages(...)` (line 121 of db_handler.py) serves a different (non-topic-editor) purpose and is NOT modified."
+  ],
+  "delta_from_previous_percent": 89.25,
+  "structure_warnings": []
+}

@@ -1,0 +1,155 @@
+{
+  "checks": [
+    {
+      "id": "issue_hints",
+      "question": "Did the work fully address the issue hints, user notes, and approved plan requirements?",
+      "guidance": "Cross-check the result against explicit user notes, critique corrections, and watch items. Flag anything the implementation ignored, contradicted, or only partially covered.",
+      "findings": [
+        {
+          "detail": "Verified the revised plan addresses the prior media-ref concern: it now defines canonical refs as `{message_id, kind, index}` with `kind` set to `attachment` or `embed`, while preserving `{message_id, attachment_index}` as shorthand for current attachment-index workflows. That directly resolves the original attachment-only ambiguity against the requirement to resolve both attachment and embed URLs.",
+          "flagged": false
+        },
+        {
+          "detail": "Checked the requested storage/render/publish behavior against the current code: `_summary_for_tool` still stores legacy `{body, sections}`, `render_topic` still appends a raw source footer, and `_publish_topic` still sends rendered strings. The revised plan continues to cover those exact gaps with `summary.blocks`, inline citations, no structured footer, deterministic media ordering, and paragraph-aware chunking.",
+          "flagged": false
+        }
+      ],
+      "prior_findings": [
+        {
+          "detail": "The plan directly covers the central requested behavior: `post_sectioned_topic` currently stores only `body` and loose `sections` in `TopicEditor._summary_for_tool`, `render_topic` currently emits one trimmed message with a raw `Source(s)` footer, and `_publish_topic` currently sends the rendered string list as-is. The proposed normalization, inline citations, publish units, media hydration, no-footer behavior, and block-by-block sending are aligned with the requested document-like TopicEditor change.",
+          "flagged": false,
+          "status": "n/a"
+        },
+        {
+          "detail": "Issue hints require media refs to resolve to attachment/embed URLs at publish time, but the plan leaves embed addressing unresolved in its questions and assumptions while still saying validation should resolve attachments/embeds. A schema with only `{message_id, attachment_index}` can address attachments, but it cannot unambiguously address embeds unless the implementation defines a combined namespace or adds a `{kind, index}` field.",
+          "flagged": true,
+          "status": "addressed"
+        }
+      ]
+    },
+    {
+      "id": "correctness",
+      "question": "Are the proposed changes technically correct?",
+      "guidance": "Look for logic errors, invalid assumptions, broken invariants, schema mismatches, or behavior that would fail at runtime. When the fix adds a conditional branch, check whether it handles all relevant cases \u2014 not just the one reported in the issue.",
+      "findings": [
+        {
+          "detail": "Verified the revised plan addresses the prior archive-source correctness issue: Phase 3 now requires normalizing blocks before source derivation and explicitly says merged current-window plus archive-resolved rows must feed `source_authors`, `post_simple_topic` validation, and collision detection. That matches the current `_dispatch_create_topic_tool` failure mode where only `context[\"messages\"]` contributes authors today.",
+          "flagged": false
+        },
+        {
+          "detail": "The plan's internal resolver wording is slightly ambiguous: it says to add `get_topic_editor_source_messages(..., limit=50)` or extend the existing `get_topic_editor_message_context` path. The existing storage method clamps `limit` to at most 10 and slices requested IDs before querying, so any implementation that merely reuses that method without removing the cap for internal validation/hydration could miss sources beyond the first 10 in a structured document.",
+          "flagged": true
+        }
+      ],
+      "prior_findings": [
+        {
+          "detail": "Checked `_dispatch_create_topic_tool`: it currently derives `source_messages` and `source_authors` only from `context[\"messages\"]` via `_messages_by_id` before collision detection and post_simple validation. The plan says block sources may be accepted when resolved by DB lookup outside the current source window, but it does not explicitly require the resolved DB rows to feed `source_authors`, so simple-topic author limits and collision author-overlap checks could become wrong for archive-sourced blocks.",
+          "flagged": true,
+          "status": "addressed"
+        },
+        {
+          "detail": "Checked existing rendering behavior: `render_topic` returns a single trimmed message for sectioned topics and `_trim_discord_message` truncates beyond 2000 characters. The plan's separate publish-unit renderer and paragraph-aware chunking is technically compatible with this layout, provided `render_topic` stays as a legacy pure helper and `_publish_topic` moves to publish units only for structured `blocks` summaries.",
+          "flagged": false,
+          "status": "n/a"
+        }
+      ]
+    },
+    {
+      "id": "scope",
+      "question": "Search for related code that handles the same concept. Is the reported issue a symptom of something broader?",
+      "guidance": "Look at how the changed function is used across the codebase. Does the fix only address one caller's scenario while others remain broken? Flag missing required work or out-of-scope edits. A minimal patch is often right, but check whether the underlying problem is bigger than what the issue describes.",
+      "findings": [
+        {
+          "detail": "Verified the revised plan contains the earlier scope concern around existing media conventions: it preserves shorthand `{message_id, attachment_index}` for the current vision/read-tool convention and says to reuse `_normalize_attachment_list` plus existing embed URL extraction instead of introducing a separate parser. That contains the risk of splitting media-ref semantics across TopicEditor paths.",
+          "flagged": false
+        },
+        {
+          "detail": "Checked related source storage paths: `add_topic_source(s)` already exists in storage/db wrappers, and `_dispatch_create_topic_tool` currently writes one row per distinct `source_ids` item. The revised plan keeps this as a union-source collection change and does not introduce a parallel topic_sources write subsystem.",
+          "flagged": false
+        }
+      ],
+      "prior_findings": [
+        {
+          "detail": "Searched TopicEditor media handling and found existing `_message_payload`, `_filter_source_messages`, `_dispatch_understand_media_tool`, and `_enrich_media_understandings` paths already work with `attachments`/`embeds` or attachment indices. The plan updates publishing hydration, but should also preserve or reuse these existing source-window media conventions so new `media_refs` do not diverge from the current `understand_media` tool's `{message_id, attachment_index}` contract.",
+          "flagged": true,
+          "status": "addressed"
+        },
+        {
+          "detail": "The broader storage wrappers already have `add_topic_source(s)` and the create dispatch writes one row per distinct `source_ids` item, so preserving `topic_sources` as the union of block-level sources is a scoped change in source collection rather than a new storage subsystem. This part of the plan appears appropriately bounded.",
+          "flagged": false,
+          "status": "n/a"
+        }
+      ]
+    },
+    {
+      "id": "all_locations",
+      "question": "Does the change touch all locations AND supporting infrastructure?",
+      "guidance": "Search for all instances of the symbol/pattern being changed. Also ask: does this feature require setup, registration, or integration code beyond the core logic? Missing glue code causes test failures even when the core fix is correct.",
+      "findings": [
+        {
+          "detail": "Verified the revised plan addresses the read-tool metadata gap: it now explicitly updates `storage_handler.get_topic_editor_message_context` to select `guild_id`, `attachments`, and `embeds`, and adds bounded `media_refs_available` output for both archive read-tool rows and source-window `_message_payload` rows.",
+          "flagged": false
+        },
+        {
+          "detail": "Checked tool routing locations again: `TOPIC_EDITOR_TOOLS` owns the schema, `WRITE_TOOL_NAMES` already includes `post_sectioned_topic`, and `_dispatch_tool_call` already routes create tools to `_dispatch_create_topic_tool`. The revised plan targets schema, prompt, dispatch guard, storage wrapper, db wrapper, and publishing paths, which are the supporting locations needed for this feature.",
+          "flagged": false
+        }
+      ],
+      "prior_findings": [
+        {
+          "detail": "Checked `storage_handler.get_topic_editor_message_context`: it selects only `message_id,channel_id,author_id,content,created_at,reference_id,thread_id`, so archive/read-tool messages currently do not include `guild_id`, `attachments`, or `embeds`. The plan adds a publishing lookup with those fields, but it does not explicitly update the `get_message_context` read tool output that the agent would use to discover exact attachment indices for archive messages.",
+          "flagged": true,
+          "status": "addressed"
+        },
+        {
+          "detail": "Checked tool registration and dispatch: `WRITE_TOOL_NAMES` already includes `post_sectioned_topic`, the input schema lives in `TOPIC_EDITOR_TOOLS`, and `_dispatch_tool_call` routes `post_sectioned_topic` to `_dispatch_create_topic_tool`. The plan's schema/prompt and dispatch updates target the correct TopicEditor locations and do not need a new tool registration path.",
+          "flagged": false,
+          "status": "n/a"
+        }
+      ]
+    },
+    {
+      "id": "callers",
+      "question": "Find the callers of the changed function. What arguments do they actually pass? Does the fix handle all of them?",
+      "guidance": "Grep for call sites. For each caller, check what values it passes \u2014 especially edge cases like None, zero, empty, or composite inputs. Then ask: should this change be here, or in a caller, callee, or new method?",
+      "findings": [
+        {
+          "detail": "Verified the revised plan addresses the prior blocks-only caller risk: Phase 1 now explicitly relaxes the current `_dispatch_create_topic_tool` guard from rejecting `post_sectioned_topic` without `sections` to rejecting only when both legacy `sections` and new `blocks` normalize to zero publishable blocks.",
+          "flagged": false
+        },
+        {
+          "detail": "Checked `_publish_topic` and test call sites: runtime tests currently monkeypatch `render_topic` and expect legacy string-list publishing semantics, including partial sends. The revised plan keeps `render_topic(topic)` pure for legacy simple behavior and makes structured publish units conditional on `summary.blocks`, which preserves those existing callers while adding the new path.",
+          "flagged": false
+        }
+      ],
+      "prior_findings": [
+        {
+          "detail": "Grep shows tests monkeypatch `render_topic` and call `_publish_topic` with legacy topics, including partial-send behavior where `render_topic` returns two messages. The plan keeps `render_topic(topic)` pure for legacy tests and adds a new `render_topic_publish_units(...)` helper, which is the right caller-compatible shape if `_publish_topic` only switches to publish units for structured document summaries or preserves the same string-list behavior for legacy topics.",
+          "flagged": false,
+          "status": "n/a"
+        },
+        {
+          "detail": "Checked `_summary_for_tool` callers through `_dispatch_create_topic_tool`: all create tools currently pass raw tool args, and `post_sectioned_topic` currently rejects calls without `sections`. The plan says new `blocks` inputs should be accepted, but the dispatch rejection condition must be changed from `not args.get(\"sections\")` to allow valid `blocks`; otherwise new structured calls would be rejected before normalization.",
+          "flagged": true,
+          "status": "addressed"
+        }
+      ]
+    }
+  ],
+  "flags": [
+    {
+      "id": "FLAG-005",
+      "concern": "TopicEditor source resolver: internal validation/hydration must not inherit the existing `get_topic_editor_message_context` 10-message cap.",
+      "category": "correctness",
+      "severity_hint": "moderate",
+      "evidence": "`storage_handler.get_topic_editor_message_context` currently computes `safe_limit = max(1, min(int(limit or 10), 10))` and slices `message_ids` to that cap. The revised plan allows either a new `get_topic_editor_source_messages(..., limit=50)` resolver or extending the existing path; if the existing capped path is reused for block source validation, author derivation, citation hydration, or media hydration, structured topics with more than 10 source IDs can incorrectly reject or omit later refs."
+    }
+  ],
+  "verified_flag_ids": [
+    "FLAG-001",
+    "FLAG-002",
+    "FLAG-003",
+    "FLAG-004"
+  ],
+  "disputed_flag_ids": []
+}

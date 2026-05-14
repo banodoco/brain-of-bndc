@@ -1,0 +1,43 @@
+{
+  "receipt_id": "3c8aa140-a1de-4bb6-af54-565153c35b9f",
+  "plan_id": "structured-live-update-doc-publishing",
+  "phase": "critique",
+  "iteration": 2,
+  "attempt": 1,
+  "timestamp_utc": "2026-05-14T10:18:33.152521+00:00",
+  "profile_name": "thoughtful",
+  "agent": "codex",
+  "agent_mode": "persistent",
+  "model_configured": "codex:low",
+  "model_actual": "gpt-5.5",
+  "session_id": "019e25f8-e763-7431-bba7-ac45ccd5d139",
+  "megaplan_version": "0.8.1",
+  "schema_version": 1,
+  "prompt_hash_raw": "22404dc71b277a7d862ad9223abd28267cb90832ca6901a9d54c4a61338fdd71",
+  "prompt_hash_canonical": "7a4c5a8cdf701a98f8219ffb1fb280e50f4ae64d555c5b4a33a1d4e5cccca93f",
+  "canonicalization_version": 1,
+  "upstream_artifact_hashes": [
+    "sha256:43b25c858fcb1f59f4940598c6f842e8be5c8844e925efa7be6cb1314d4d35fd"
+  ],
+  "cost_usd": 1.456982,
+  "duration_ms": 110021,
+  "prompt_tokens": 993496,
+  "completion_tokens": 12257,
+  "verdict": null,
+  "metrics": {
+    "findings_per_check": {
+      "issue_hints": 2,
+      "correctness": 2,
+      "scope": 2,
+      "all_locations": 2,
+      "callers": 2
+    },
+    "severity_distribution": {
+      "unknown": 10
+    },
+    "clean_checks_count": 0,
+    "flagged_checks_count": 5,
+    "rubber_stamp_ratio": 0.0
+  },
+  "scope_drift_severity": null
+}

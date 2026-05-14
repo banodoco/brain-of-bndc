@@ -1,0 +1,252 @@
+{
+  "review_verdict": "approved",
+  "checks": [],
+  "pre_check_flags": [
+    {
+      "id": "PRECHECK-DIFF_SIZE_SANITY",
+      "check": "diff_size_sanity",
+      "detail": "Diff size looks larger than expected: changed_lines=1829, expected\u224820, ratio=91.45, files=8, hunks=17.",
+      "severity": "significant",
+      "evidence_file": "requirements.txt"
+    }
+  ],
+  "verified_flag_ids": [
+    "FLAG-003"
+  ],
+  "disputed_flag_ids": [
+    "verifiability-0",
+    "verifiability-1"
+  ],
+  "criteria": [
+    {
+      "name": "Mirrored media-understandings migration",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "Verified `.migrations_staging/20260514010000_message_media_understandings.sql` and `../supabase/migrations/20260514010000_message_media_understandings.sql` exist and are identical. The migration creates `public.message_media_understandings` with requested columns, PK `(message_id, attachment_index, model)`, hash partial index, kind/quality expression index, RLS, revoke, and sync_status insert."
+    },
+    {
+      "name": "Vision client module",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "`src/common/vision_clients.py` defines `describe_image`, `describe_video`, `_sha256`, `_is_transient_error`, and recursive `_sanitize_gemini_schema`. It uses lazy `openai` / `google.genai` imports, OpenAI Responses API via `/v1/responses`, Gemini upload/poll/generate flow, retry-once loops, base64 image materialization, and no Astrid import."
+    },
+    {
+      "name": "Cache wrappers in db/storage handlers",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "`src/common/storage_handler.py` has async get-by-PK, get-by-hash ordered by `created_at desc`, and upsert methods. `src/common/db_handler.py` wraps them via `_run_async_in_thread`; upsert bypasses `_live_write_allowed` and only checks `self.storage_handler`."
+    },
+    {
+      "name": "Topic editor vision tools and budget",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "`understand_image` and `understand_video` are in `READ_TOOL_NAMES` and `TOPIC_EDITOR_TOOLS`. `_dispatch_understand_media` resolves source-window attachments, uses sync `requests.get`, computes `_sha256`, checks PK cache then hash cache then budget, selects fast/best presets, persists rows, and returns `budget_exceeded` before API calls when the estimated cost would exceed the run budget."
+    },
+    {
+      "name": "Source payload enrichment",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "`_message_payload` preserves existing fields and adds `media_urls`. `_build_initial_user_payload` calls `_enrich_media_understandings`, which loops attachment indexes over the four known model presets and adds cached `media_understandings` with requested image fields and video fields when present."
+    },
+    {
+      "name": "System prompt guidance",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "`TOPIC_EDITOR_SYSTEM_PROMPT` now explains cached `media_understandings`, when to call `understand_image` / `understand_video`, skipping `workflow_graph`, considering `generation` with `aesthetic_quality >= 6`, and citing `technical_signal` / `subject`."
+    },
+    {
+      "name": "Stubbed vision tests",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "`tests/test_vision_clients.py` monkeypatches `urlopen` and injects fake `google.genai` modules. `tests/test_topic_editor_media_understanding.py` monkeypatches `requests.get` and `src.common.vision_clients` functions. No real external API calls are needed."
+    },
+    {
+      "name": "Cache/dedup/enrichment/budget test coverage",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "`tests/test_topic_editor_media_understanding.py` covers same-message cache-first behavior, cross-message `content_hash` dedup, payload enrichment, budget cap without API call, no budget deduction on cache hits, and tool registration."
+    },
+    {
+      "name": "Regression tests pass",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "Ran `python -m pytest tests/test_vision_clients.py tests/test_topic_editor_runtime.py tests/test_live_storage_wrappers.py tests/test_topic_editor_media_understanding.py -q`: 39 passed, 0 failed."
+    },
+    {
+      "name": "Legacy live-update files untouched",
+      "priority": "must",
+      "pass": "pass",
+      "evidence": "`git diff -- src/features/summarising/live_update_editor.py src/features/summarising/live_update_prompts.py` returned no changes."
+    },
+    {
+      "name": "Vision client size and boilerplate",
+      "priority": "should",
+      "pass": "deferred_human",
+      "evidence": "`src/common/vision_clients.py` is 438 lines, above the requested rough 200-300 LOC target, but the file has no debug-logging boilerplate and the extra length is mostly schemas, docstrings, and error handling. Final quality judgment is subjective."
+    },
+    {
+      "name": "Attachment normalization scope",
+      "priority": "should",
+      "pass": "deferred_human",
+      "evidence": "`_normalize_attachment_list` is deterministic and handles list/dict/JSON-string/invalid inputs. `_message_payload` also extracts embed media URLs, which is slightly broader than attachments-only behavior. Final scope judgment is subjective."
+    }
+  ],
+  "issues": [],
+  "rework_items": [],
+  "summary": "Approved. All must criteria pass, the settled decisions were implemented, and the focused regression suite is green. The only caveat is that `vision_clients.py` is larger than the rough target, but that is a should-level quality concern rather than a blocker.",
+  "task_verdicts": [
+    {
+      "task_id": "T13",
+      "reviewer_verdict": "Pass. Before-execute key checks and baseline test evidence are recorded; no implementation issue found.",
+      "evidence_files": [
+        ".env",
+        "tests/test_topic_editor_runtime.py",
+        "tests/test_live_storage_wrappers.py"
+      ]
+    },
+    {
+      "task_id": "T1",
+      "reviewer_verdict": "Pass. Mirrored migration files are present and identical with the requested schema/indexes plus acceptable project-convention constraints.",
+      "evidence_files": [
+        ".migrations_staging/20260514010000_message_media_understandings.sql",
+        "../supabase/migrations/20260514010000_message_media_understandings.sql"
+      ]
+    },
+    {
+      "task_id": "T2",
+      "reviewer_verdict": "Pass. Async storage methods exist, use the requested table, hash lookup orders newest-first, and upsert has no guild gating.",
+      "evidence_files": [
+        "src/common/storage_handler.py"
+      ]
+    },
+    {
+      "task_id": "T3",
+      "reviewer_verdict": "Pass. Sync DB wrappers delegate via `_run_async_in_thread`; media-understanding upsert bypasses `_live_write_allowed`.",
+      "evidence_files": [
+        "src/common/db_handler.py"
+      ]
+    },
+    {
+      "task_id": "T4",
+      "reviewer_verdict": "Pass. Vision clients implement the required public API, lazy SDK imports, retry, base64 handling, Gemini schema sanitization, and no Astrid runtime dependency.",
+      "evidence_files": [
+        "src/common/vision_clients.py",
+        "tests/test_vision_clients.py"
+      ]
+    },
+    {
+      "task_id": "T5",
+      "reviewer_verdict": "Pass. `google-genai` was added while `google-generativeai` remains untouched.",
+      "evidence_files": [
+        "requirements.txt"
+      ]
+    },
+    {
+      "task_id": "T6",
+      "reviewer_verdict": "Pass. Message payload now includes `media_urls`; attachment normalization handles list/dict/JSON-string shapes.",
+      "evidence_files": [
+        "src/features/summarising/topic_editor.py"
+      ]
+    },
+    {
+      "task_id": "T7",
+      "reviewer_verdict": "Pass. Initial payload enrichment queries the four known model presets and remains best-effort.",
+      "evidence_files": [
+        "src/features/summarising/topic_editor.py"
+      ]
+    },
+    {
+      "task_id": "T8",
+      "reviewer_verdict": "Pass. Vision read tools are registered and dispatched with cache-first, hash-dedup, sync download, model presets, and budget accounting.",
+      "evidence_files": [
+        "src/features/summarising/topic_editor.py",
+        "tests/test_topic_editor_media_understanding.py"
+      ]
+    },
+    {
+      "task_id": "T9",
+      "reviewer_verdict": "Pass. Prompt guidance includes cached understandings, tool usage, workflow-graph filtering, quality threshold, and framing fields.",
+      "evidence_files": [
+        "src/features/summarising/topic_editor.py"
+      ]
+    },
+    {
+      "task_id": "T10",
+      "reviewer_verdict": "Pass. Vision client tests stub OpenAI and Gemini behavior and cover parsing, input forms, schema sanitization, missing SDK, and retry behavior.",
+      "evidence_files": [
+        "tests/test_vision_clients.py"
+      ]
+    },
+    {
+      "task_id": "T11",
+      "reviewer_verdict": "Pass. Topic editor media-understanding tests cover cache-first, content-hash dedup, enrichment, budget cap, cache-hit cost behavior, and tool schemas.",
+      "evidence_files": [
+        "tests/test_topic_editor_media_understanding.py"
+      ]
+    },
+    {
+      "task_id": "T12",
+      "reviewer_verdict": "Pass. Final targeted test run is green: 39 passed, 0 failed.",
+      "evidence_files": [
+        "tests/test_vision_clients.py",
+        "tests/test_topic_editor_runtime.py",
+        "tests/test_live_storage_wrappers.py",
+        "tests/test_topic_editor_media_understanding.py"
+      ]
+    }
+  ],
+  "sense_check_verdicts": [
+    {
+      "sense_check_id": "SC1",
+      "verdict": "Confirmed. Migration files are identical and include required table, PK, indexes, RLS/revoke, and sync_status insert."
+    },
+    {
+      "sense_check_id": "SC2",
+      "verdict": "Confirmed. Storage methods are async, hash lookup orders by `created_at desc`, and upsert has no guild gating."
+    },
+    {
+      "sense_check_id": "SC3",
+      "verdict": "Confirmed. DB wrappers use `_run_async_in_thread`; upsert bypasses `_live_write_allowed`; hash lookup wrapper exists."
+    },
+    {
+      "sense_check_id": "SC4",
+      "verdict": "Confirmed. Vision module imports cleanly, public functions exist, schema sanitizer is recursive, retry-once pattern exists, and no debug logging boilerplate was found."
+    },
+    {
+      "sense_check_id": "SC5",
+      "verdict": "Confirmed. `google-genai` and existing `google-generativeai` are both present in `requirements.txt`."
+    },
+    {
+      "sense_check_id": "SC6",
+      "verdict": "Confirmed. `_message_payload` includes `media_urls`, normalizer is tolerant, and existing fields are preserved."
+    },
+    {
+      "sense_check_id": "SC7",
+      "verdict": "Confirmed. `_build_initial_user_payload` includes best-effort `media_understandings` over all four presets."
+    },
+    {
+      "sense_check_id": "SC8",
+      "verdict": "Confirmed. Vision tools are registered, cache order is PK then hash then budget, sync `requests.get` is used, `budget_exceeded` avoids API calls, and `_tool_result_content` uses `READ_TOOL_NAMES`."
+    },
+    {
+      "sense_check_id": "SC9",
+      "verdict": "Confirmed. Prompt includes all requested media-understanding editorial guidance."
+    },
+    {
+      "sense_check_id": "SC10",
+      "verdict": "Confirmed. Vision client tests pass and use stubs rather than real provider calls."
+    },
+    {
+      "sense_check_id": "SC11",
+      "verdict": "Confirmed. Cache-first, dedup, payload enrichment, budget cap, and cache-hit budget tests pass."
+    },
+    {
+      "sense_check_id": "SC12",
+      "verdict": "Confirmed. Full targeted suite passed: 39 passed, 0 failed."
+    },
+    {
+      "sense_check_id": "SC13",
+      "verdict": "Confirmed. Before-execute key verification and baseline test evidence were recorded."
+    }
+  ]
+}

@@ -1,0 +1,272 @@
+{
+  "tasks": [
+    {
+      "id": "T1",
+      "description": "Create mirrored SQL migration `20260514010000_message_media_understandings.sql` in both `.migrations_staging/` and `../supabase/migrations/`. Define `public.message_media_understandings` table with columns `message_id bigint NOT NULL`, `attachment_index int NOT NULL DEFAULT 0`, `media_url text NOT NULL`, `media_kind text NOT NULL`, `content_hash text`, `model text NOT NULL`, `understanding jsonb NOT NULL`, `created_at timestamptz NOT NULL DEFAULT now()`. Primary key `(message_id, attachment_index, model)`. Add index `message_media_understandings_hash_idx` on `(content_hash) WHERE content_hash IS NOT NULL`. Add index `message_media_understandings_kind_quality_idx` on `(media_kind, ((understanding->>'aesthetic_quality')::int))`. Enable RLS and revoke anon/authenticated access. Insert `message_media_understandings` into `sync_status`.",
+      "depends_on": [],
+      "status": "pending",
+      "executor_notes": "",
+      "reviewer_verdict": "",
+      "kind": "code"
+    },
+    {
+      "id": "T2",
+      "description": "Add three async methods to `src/common/storage_handler.py`: (a) `get_message_media_understanding(message_id, attachment_index, model)` — select single row by PK, return dict or None; (b) `get_message_media_understanding_by_hash(content_hash, model=None, media_kind=None)` — select where `content_hash = value` ordered by `created_at desc`, return first row or None; (c) `upsert_message_media_understanding(row)` — upsert using PK `(message_id, attachment_index, model)` via `supabase_client.table('message_media_understandings').upsert(...)`. Normalize `understanding` through existing pattern (json.dumps/dict handling). Do NOT add guild gating — this table has no guild_id column.",
+      "depends_on": ["T1"],
+      "status": "pending",
+      "executor_notes": "",
+      "reviewer_verdict": "",
+      "kind": "code"
+    },
+    {
+      "id": "T3",
+      "description": "Add three sync wrappers to `src/common/db_handler.py` using `_run_async_in_thread`: (a) `get_message_media_understanding(message_id, attachment_index, model)` delegating to storage_handler; (b) `get_message_media_understanding_by_hash(content_hash, model=None, media_kind=None)`; (c) `upsert_message_media_understanding(row)`. The upsert wrapper must call `self.storage_handler.upsert_message_media_understanding(row)` directly WITHOUT the `_live_write_allowed` guard — this table is content-addressed, not guild-scoped. Only guard with `if not self.storage_handler: return None`.",
+      "depends_on": ["T2"],
+      "status": "pending",
+      "executor_notes": "",
+      "reviewer_verdict": "",
+      "kind": "code"
+    },
+    {
+      "id": "T4",
+      "description": "Create `src/common/vision_clients.py` (~250 LOC). Include: (1) Lazy imports for `openai` and `google.genai` (try at call-time; raise clear error if missing). (2) `describe_image(image_bytes_or_url, model, query=None) -> dict` — accepts bytes, Path, or URL string. Base64-encode image bytes/path as data URL. Call OpenAI `/v1/responses` with `text.format = json_schema` constraining to `{kind, subject, technical_signal, aesthetic_quality (0-10), discriminator_notes}`. Retry once on transient errors. (3) `describe_video(video_path_or_bytes, model) -> dict` — materialize bytes to temp `.mp4` if needed. Upload via `files.upload`, poll until `ACTIVE` (max 180s), then `generate_content` with sanitized schema. Schema: Astrid's video fields (`summary, visual_read, audio_read, edit_value, highlight_score, energy, pacing, production_quality, boundary_notes, cautions`) plus `kind` enum. (4) Shared helpers: `_sha256(bytes) -> str`, `_is_transient_error(exc) -> bool`, `_sanitize_gemini_schema` (recursively drops `additionalProperties`). No debug-logging boilerplate.",
+      "depends_on": ["T3"],
+      "status": "pending",
+      "executor_notes": "",
+      "reviewer_verdict": "",
+      "kind": "code"
+    },
+    {
+      "id": "T5",
+      "description": "Add `google-genai` to `requirements.txt` (the newer SDK required by Gemini file-upload/poll/generate_content patterns). Keep existing `google-generativeai` untouched — they operate in separate import namespaces and the new SDK is imported lazily inside `vision_clients.py` only.",
+      "depends_on": ["T4"],
+      "status": "pending",
+      "executor_notes": "",
+      "reviewer_verdict": "",
+      "kind": "code"
+    },
+    {
+      "id": "T6",
+      "description": "Extend `_message_payload` in `topic_editor.py` to include `media_urls`: extract from `message.get('attachments')` (handling both list and JSON-string forms), collect `url` field from each attachment. Also check `message.get('embeds')` for media URLs. Keep all existing payload fields (`message_id, channel_id, author_id, author, content, created_at`) exactly as-is. Add a small helper `_normalize_attachment_list(attachments)` that handles list/dict/JSON-string inputs.",
+      "depends_on": ["T3"],
+      "status": "pending",
+      "executor_notes": "",
+      "reviewer_verdict": "",
+      "kind": "code"
+    },
+    {
+      "id": "T7",
+      "description": "In `_build_initial_user_payload`, after building each source message payload, attach `media_understandings` by querying cache for known model presets: `gpt-4o-mini`, `gpt-5.4` (image) and `gemini-2.5-flash`, `gemini-2.5-pro` (video). Loop over each attachment index and each applicable model preset; call `self.db.get_message_media_understanding(message_id, idx, model)`. Shape each item as `{attachment_index, kind, subject, technical_signal, aesthetic_quality, model}` plus video fields when present. Best-effort: missing rows produce empty list, not a failure. Keep existing `source_messages` and `active_topics` keys unchanged.",
+      "depends_on": ["T6"],
+      "status": "pending",
+      "executor_notes": "",
+      "reviewer_verdict": "",
+      "kind": "code"
+    },
+    {
+      "id": "T8",
+      "description": "Add `understand_image` and `understand_video` to `READ_TOOL_NAMES` and `TOPIC_EDITOR_TOOLS`. Tool schemas: `message_id` (int, required), `attachment_index` (int, default 0), `mode` (enum: fast/best, default fast). Model presets: image fast→gpt-4o-mini, best→gpt-5.4; video fast→gemini-2.5-flash, best→gemini-2.5-pro. Add `vision_budget_usd` and `vision_cost_usd` to `dispatcher_context` (parse `TOPIC_EDITOR_VISION_BUDGET_PER_RUN`, default 1.0). In `_dispatch_read_tool`, add two new cases that call a shared helper `_dispatch_understand_media(call, context, media_kind)`: (a) resolve source message from `context['messages']` by message_id; (b) resolve attachment URL; (c) download bytes via sync `requests.get(url)` (NOT the async `db.download_file`); (d) compute sha256; (e) check PK cache → hash cache → budget; (f) if budget exceeded, return `{outcome: budget_exceeded}`; (g) call `vision_clients.describe_image`/`describe_video`; (h) persist result and return compact JSON. Fixed estimated costs per call: image $0.01, video $0.05 (deducted from budget only on actual API call, not on cache hit). Update `_tool_result_content` to use `READ_TOOL_NAMES` instead of hardcoded set for read-tool compaction, so new tools are automatically included.",
+      "depends_on": ["T4", "T7"],
+      "status": "pending",
+      "executor_notes": "",
+      "reviewer_verdict": "",
+      "kind": "code"
+    },
+    {
+      "id": "T9",
+      "description": "Update `TOPIC_EDITOR_SYSTEM_PROMPT` by appending one paragraph after the existing text: Explain that media-bearing messages in the source payload may include pre-computed `media_understandings` (cached from prior runs). For uncached media that could affect editorial judgment, the agent should call `understand_image` or `understand_video`. Use `kind` to discriminate: skip `workflow_graph` items entirely; consider `generation` items with `aesthetic_quality >= 6` for editorial framing; cite `technical_signal` and `subject` when writing about any media-backed topic.",
+      "depends_on": ["T8"],
+      "status": "pending",
+      "executor_notes": "",
+      "reviewer_verdict": "",
+      "kind": "code"
+    },
+    {
+      "id": "T10",
+      "description": "Create `tests/test_vision_clients.py` with monkeypatched SDK tests: (1) `test_describe_image_returns_structured_json` — patch `urllib.request.urlopen` to return a fake Responses API JSON; verify `describe_image` returns dict with keys `kind, subject, technical_signal, aesthetic_quality, discriminator_notes`. (2) `test_describe_image_accepts_bytes_and_url` — verify both input forms work. (3) `test_describe_video_uploads_polls_and_returns_json` — monkeypatch `google.genai.Client` to simulate upload→ACTIVE→generate_content flow; verify returned dict has video fields plus `kind`. (4) `test_sanitize_gemini_schema_drops_additional_properties` — verify recursive removal. (5) `test_missing_sdk_raises_at_call_time_not_import` — verify `vision_clients` imports cleanly without openai/google-genai installed, then verify describe_image raises at call time. (6) `test_retries_once_on_transient` — simulate timeout on first call, success on second. NO real API calls.",
+      "depends_on": ["T4"],
+      "status": "pending",
+      "executor_notes": "",
+      "reviewer_verdict": "",
+      "kind": "test"
+    },
+    {
+      "id": "T11",
+      "description": "Extend `tests/test_topic_editor_runtime.py` (or create `tests/test_topic_editor_media_understanding.py`) with: (1) Extend `FakeDB` with in-memory `message_media_understandings` dict plus hash-lookup tracking. (2) `test_cache_first_second_call_no_api` — two `understand_image` calls for same (message_id, attachment_index, model): second returns cached result without hitting the stubbed vision client. (3) `test_cross_message_dedup_via_content_hash` — same bytes, different message_id: first call hits stub API and persists; second call reuses hash-cached understanding and persists row for second message. (4) `test_payload_enrichment_surfaces_cached_understandings` — seed cache rows, call `_build_initial_user_payload`, verify `media_understandings` present in output. (5) `test_budget_cap_returns_budget_exceeded` — set `TOPIC_EDITOR_VISION_BUDGET_PER_RUN=0.001` (below estimated cost), verify vision tool returns `budget_exceeded` without API call. (6) `test_budget_not_deducted_on_cache_hit` — budget stays at initial value when result comes from cache. Stub `vision_clients` via monkeypatch; no real API calls. Verify all existing tests in `test_topic_editor_runtime.py` and `test_live_storage_wrappers.py` still pass.",
+      "depends_on": ["T8", "T10"],
+      "status": "pending",
+      "executor_notes": "",
+      "reviewer_verdict": "",
+      "kind": "test"
+    },
+    {
+      "id": "T12",
+      "description": "Run the full test suite to validate all changes: `pytest tests/test_vision_clients.py tests/test_topic_editor_runtime.py tests/test_live_storage_wrappers.py -v`. Verify all new tests pass. Verify ALL existing tests in `test_topic_editor_runtime.py` (13 tests) and `test_live_storage_wrappers.py` (all 6 tests) remain passing — especially `test_topic_editor_run_once_uses_native_tools_and_topic_run_lifecycle` which asserts `len(llm_call['tools']) == 11` (this count increases to 13 with new tools). Also verify the force-close, collision, publisher, cold-start, read-tool, and audit-action tests all pass unchanged. If any test fails, read the error, fix the code, and re-run until all pass.",
+      "depends_on": ["T11"],
+      "status": "pending",
+      "executor_notes": "",
+      "reviewer_verdict": "",
+      "kind": "test"
+    }
+  ],
+  "watch_items": [
+    "UPSERT BYPASS: `db_handler.upsert_message_media_understanding` must call `self.storage_handler.upsert_message_media_understanding(row)` directly — NO `_live_write_allowed` guard. This table intentionally has no guild_id column. Only guard: `if not self.storage_handler: return None`.",
+    "SYNC DOWNLOAD: Vision tool dispatcher in topic_editor runs synchronously. Download media bytes via `requests.get(url)` — do NOT call the async `self.db.download_file()` or you will pass a coroutine as bytes, breaking sha256 and API calls.",
+    "READ_TOOL_NAMES: `_tool_result_content` line 583 currently hardcodes `{\"search_topics\", \"search_messages\", \"get_author_profile\", \"get_message_context\"}`. Change to `name in READ_TOOL_NAMES` so new `understand_image`/`understand_video` are automatically included in read-tool compaction. Existing tests that check compaction will still pass.",
+    "TOOL COUNT: `test_topic_editor_run_once_uses_native_tools_and_topic_run_lifecycle` asserts `len(llm_call['tools']) == 11`. After adding 2 new tools, update this assertion to 13.",
+    "ENRICHMENT PRESETS: `_build_initial_user_payload` loops over known model presets (4 total: 2 image + 2 video). Cached rows from other model strings are not surfaced — accepted tradeoff per plan.",
+    "NO LEGACY EDITOR CHANGES: Do NOT modify `src/features/summarising/live_update_editor.py` or `live_update_prompts.py`. All changes are in `topic_editor.py` only.",
+    "NO FINALIZE CHANGES: Do NOT change `finalize_run`, override-collision, idempotency, lease-expiry, or force-close logic. All new behavior is additive read-tool behavior.",
+    "GEMINI SDK ISOLATION: `google-genai` is imported lazily inside `vision_clients.py` only. The existing `src/common/llm/gemini_client.py` (which uses `google-generativeai`) is not modified.",
+    "CONTEXT['MESSAGES']: Vision tools resolve media from `context['messages']` (archived messages with attachments). Messages discovered only through `get_message_context` read tool will not have vision tool support — accepted tradeoff."
+  ],
+  "sense_checks": [
+    {
+      "id": "SC1",
+      "task_id": "T1",
+      "question": "Does the migration exist identically in BOTH .migrations_staging/ AND ../supabase/migrations/? Does it include all columns, the PK, both indexes, RLS, and sync_status insert?",
+      "verdict": ""
+    },
+    {
+      "id": "SC2",
+      "task_id": "T2",
+      "question": "Are all three storage methods async? Does upsert_message_media_understanding skip guild gating? Does get_by_hash order by created_at desc?",
+      "verdict": ""
+    },
+    {
+      "id": "SC3",
+      "task_id": "T3",
+      "question": "Do the db_handler sync wrappers delegate through _run_async_in_thread? Does upsert bypass _live_write_allowed? Is there a hash-lookup wrapper?",
+      "verdict": ""
+    },
+    {
+      "id": "SC4",
+      "task_id": "T4",
+      "question": "Does vision_clients.py import without openai/google-genai installed? Are describe_image and describe_video both present? Is _sanitize_gemini_schema recursive? Is there a retry-once pattern? Is there NO debug-logging boilerplate?",
+      "verdict": ""
+    },
+    {
+      "id": "SC5",
+      "task_id": "T5",
+      "question": "Is google-genai added to requirements.txt? Is google-generativeai left untouched?",
+      "verdict": ""
+    },
+    {
+      "id": "SC6",
+      "task_id": "T6",
+      "question": "Does _message_payload now include media_urls? Is the attachment normalizer tolerant of both list and JSON-string inputs? Are all existing payload fields preserved?",
+      "verdict": ""
+    },
+    {
+      "id": "SC7",
+      "task_id": "T7",
+      "question": "Does _build_initial_user_payload include media_understandings for media-bearing messages? Does it loop over all 4 model presets? Is enrichment best-effort (empty list on missing rows)?",
+      "verdict": ""
+    },
+    {
+      "id": "SC8",
+      "task_id": "T8",
+      "question": "Are understand_image/understand_video in READ_TOOL_NAMES and TOPIC_EDITOR_TOOLS? Does the dispatcher check PK cache → hash cache → budget before API? Is sync requests used for download? Does budget_exceeded return without API call? Is _tool_result_content updated to use READ_TOOL_NAMES?",
+      "verdict": ""
+    },
+    {
+      "id": "SC9",
+      "task_id": "T9",
+      "question": "Does the system prompt mention media_understandings, understand_image/understand_video, the kind-based discrimination rules, and the aesthetic_quality >= 6 guidance?",
+      "verdict": ""
+    },
+    {
+      "id": "SC10",
+      "task_id": "T10",
+      "question": "Do all vision client tests pass? Are SDKs stubbed (no real API calls)? Are input forms (bytes/URL/path), schema sanitization, retry-once, and missing-SDK-at-import-time all covered?",
+      "verdict": ""
+    },
+    {
+      "id": "SC11",
+      "task_id": "T11",
+      "question": "Do cache-first, cross-message dedup, payload enrichment, budget-cap, and budget-not-deducted-on-cache-hit tests all pass? Are vision_clients stubbed? Do existing tests in test_topic_editor_runtime.py and test_live_storage_wrappers.py still pass?",
+      "verdict": ""
+    },
+    {
+      "id": "SC12",
+      "task_id": "T12",
+      "question": "Do ALL tests pass (new + existing)? Is the tool count assertion updated to 13? Are force-close, collision, publisher, cold-start, read-tool, and audit-action tests all green?",
+      "verdict": ""
+    }
+  ],
+  "user_actions": [
+    {
+      "id": "U1",
+      "description": "Verify OPENAI_API_KEY and GEMINI_API_KEY are set in .env (already present per brief).",
+      "phase": "before_execute",
+      "blocks_task_ids": ["T10", "T11", "T12"],
+      "rationale": "Tests stub SDKs so keys are not strictly required for tests, but the real runtime needs them."
+    },
+    {
+      "id": "U2",
+      "description": "Run the SQL migration against the Supabase database (or verify it auto-applies if the project has migration automation).",
+      "phase": "after_execute",
+      "blocks_task_ids": [],
+      "rationale": "The migration files are created in-repo but must be applied to the live database."
+    }
+  ],
+  "meta_commentary": "Execution order is T1→T2→T3→(T4,T6 parallel)→T5→T7→T8→T9→T10→T11→T12. The critical correctness concerns are: (1) db_handler upsert wrapper bypasses _live_write_allowed — the table has no guild_id by design; (2) vision dispatcher uses sync requests.get(), not async db.download_file(); (3) _tool_result_content switches from hardcoded read-tool set to READ_TOOL_NAMES; (4) the tool-count assertion in test_topic_editor_run_once_uses_native_tools_and_topic_run_lifecycle goes from 11 to 13. When enriching payloads, loop over 4 known model presets; a broader all-understandings query is deferred. For the vision client, distill ONLY the needed patterns from Astrid (responses API call shape, Gemini upload/poll/generate, schema sanitizer) — do NOT import Astrid. Keep vision_clients.py under 300 LOC by dropping Astrid's debug-logging machinery entirely.",
+  "validation": {
+    "plan_steps_covered": [
+      {
+        "plan_step_summary": "Step 1: Create mirrored SQL migration in .migrations_staging/ and ../supabase/migrations/",
+        "finalize_item_ids": ["T1"]
+      },
+      {
+        "plan_step_summary": "Step 2: Add Supabase storage methods (get, get_by_hash, upsert)",
+        "finalize_item_ids": ["T2"]
+      },
+      {
+        "plan_step_summary": "Step 3: Add DB handler sync wrappers (get, upsert, hash lookup)",
+        "finalize_item_ids": ["T3"]
+      },
+      {
+        "plan_step_summary": "Step 4: Implement src/common/vision_clients.py (describe_image, describe_video, helpers)",
+        "finalize_item_ids": ["T4"]
+      },
+      {
+        "plan_step_summary": "Step 5: Include attachments in source payloads (_message_payload media_urls)",
+        "finalize_item_ids": ["T6"]
+      },
+      {
+        "plan_step_summary": "Step 6: Enrich initial payload with cached understandings (_build_initial_user_payload)",
+        "finalize_item_ids": ["T7"]
+      },
+      {
+        "plan_step_summary": "Step 7: Add understand_image/understand_video read tools, dispatcher cases, budget tracking",
+        "finalize_item_ids": ["T8"]
+      },
+      {
+        "plan_step_summary": "Step 8: Update system prompt with media understanding guidance",
+        "finalize_item_ids": ["T9"]
+      },
+      {
+        "plan_step_summary": "Step 9: Add focused unit tests for vision clients (stubbed SDKs)",
+        "finalize_item_ids": ["T10"]
+      },
+      {
+        "plan_step_summary": "Step 10: Add topic editor cache, budget, dedup, enrichment tests",
+        "finalize_item_ids": ["T11"]
+      },
+      {
+        "plan_step_summary": "Requirements.txt: Add google-genai dependency",
+        "finalize_item_ids": ["T5"]
+      },
+      {
+        "plan_step_summary": "Final validation: Run all tests, verify regression tests pass",
+        "finalize_item_ids": ["T12"]
+      }
+    ],
+    "orphan_tasks": [],
+    "completeness_notes": "All 10 plan steps are covered. T4 (vision_clients.py) naturally covers plan Step 4 and its dependencies (lazy imports, retry, schema sanitize). T5 covers the google-genai dependency requirement from Step 4's sub-note. T12 is the consolidated final test run covering the validation-order requirements. No orphan tasks — every task maps to a plan deliverable or validation step. The settled decisions (bypass guild gating, sync download, READ_TOOL_NAMES, enrichment presets) are all captured in watch_items and executor descriptions.",
+    "coverage_complete": true
+  },
+  "baseline_test_failures": "none expected — all existing tests should pass before changes begin",
+  "baseline_test_command": "pytest tests/test_topic_editor_runtime.py tests/test_live_storage_wrappers.py -q",
+  "baseline_test_note": "Run this before starting to confirm the baseline is clean. Expect 19 tests passing (13 in test_topic_editor_runtime.py + 6 in test_live_storage_wrappers.py). The tool-count assertion on line 273 will need updating after T8."
+}

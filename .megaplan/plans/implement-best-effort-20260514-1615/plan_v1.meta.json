@@ -1,0 +1,119 @@
+{
+  "version": 1,
+  "timestamp": "2026-05-14T14:24:29Z",
+  "hash": "sha256:e4091b2dc5588a7cfbbc331e0814f3fc4e949a412acd40ac2218dd34cf08df10",
+  "questions": [
+    "Should external media be eagerly metadata-resolved for every detected source URL before the agent prompt, or is exposing stable external refs and resolving only refs selected for publishing acceptable? I assume lazy publish-time resolution to avoid downloading irrelevant links.",
+    "Where should durable downloaded media live in production: local disk cache, Supabase storage, or both? I assume local cache path plus DB metadata is acceptable unless the deployment uses ephemeral disks.",
+    "What exact max download size and timeout should be enforced? I assume conservative defaults such as 25 MB and 15 seconds total unless existing production limits say otherwise.",
+    "Should YouTube/Vimeo/Twitch links be downloadable for TopicEditor, or only treated as fallback links? They appear in the curator safelist, but attaching long-form video files to Discord may exceed practical limits."
+  ],
+  "success_criteria": [
+    {
+      "criterion": "Existing attachment and embed media refs normalize, validate, render, and publish exactly as before for current tests.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "`normalize_media_ref` accepts `kind: \"external\"` refs and rejects malformed or out-of-range external refs with deterministic errors or rejected tool transitions.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Source message payloads and `get_message_context` expose compact `media_refs_available` entries for safelisted external URLs found in message content and embeds, with Discord attachment/embed refs listed first.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "External URL extraction is restricted to the safelist and enforces timeout, max-size, content-type, and sanitized logging behavior in unit-tested resolver paths.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "yt-dlp is invoked in metadata-only mode before any download attempt, and tests prove metadata failures fall back without raising into TopicEditor publishing.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "Resolved external media is cached by stable URL key plus content hash so repeated publish attempts can reuse cache without re-downloading.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Structured publishing interleaves selected external media with block text; on resolver/download/file-send failure it posts the original link and continues publishing remaining text/units.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "No code path reintroduces direct LiveTopCreations-style auto-posting at the reaction threshold; reaction-qualified media remains an auto-shortlist-to-watching flow.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "Logs and trace metadata describe resolved/downloaded/skipped/fallback outcomes without emitting query tokens or secrets from URLs.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "read_files",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "New resolver code keeps pure parsing/normalization helpers separate from subprocess, network, filesystem, and DB side effects.",
+      "priority": "should",
+      "requires": [
+        "read_files",
+        "subjective_judgment"
+      ]
+    },
+    {
+      "criterion": "Tests avoid real network calls, real yt-dlp execution, and real Discord sends by using stubs/fakes.",
+      "priority": "should",
+      "requires": [
+        "run_tests",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "A manual production smoke test can publish a structured topic containing a Reddit or X external media ref and observe either an attached file or fallback link in the expected block position.",
+      "priority": "info",
+      "requires": [
+        "verify_physical_device",
+        "observe_runtime_logs"
+      ]
+    }
+  ],
+  "assumptions": [
+    "External media resolution should be lazy for selected block media_refs, not eager for every link in the source window.",
+    "The safelist should start from the curator list and add canonical Reddit/Twitter/X/Instagram domains required by this task.",
+    "The resolver may use local filesystem cache plus DB metadata unless production storage requirements say otherwise.",
+    "External resolver failures are normal outcomes, not exceptional TopicEditor failures.",
+    "Structured block publishing is the target path; legacy simple-topic publishing does not need new external media binding.",
+    "Tests should use fakes for subprocess, HTTP, cache, and Discord file sends."
+  ],
+  "structure_warnings": []
+}

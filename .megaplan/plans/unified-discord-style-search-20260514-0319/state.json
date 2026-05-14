@@ -1,0 +1,196 @@
+{
+  "name": "unified-discord-style-search-20260514-0319",
+  "idea": "[unified Discord-style search]\n\nCollapse the topic editor's message-search surface into ONE tool modeled on Discord's search filters. Today there's `search_messages` (source-window only) plus the agent has no way to ask \"from:author has:video after:7d\" type queries. Replace the existing source-window-only `search_messages` with a unified version that takes Discord-style filter params and toggles scope between the current source window and the full `discord_messages` archive.\n\nAlso add ONE separate tool for reply-chain traversal (it's graph-walking, not search).\n\n# 1. Unified `search_messages` (REPLACES the existing one)\n\n```python\n{\n    \"name\": \"search_messages\",\n    \"description\": (\n        \"Search Discord messages. Filter parameters are AND-combined; any combination is valid (all are optional). \"\n        \"Use `scope` to choose: 'window' (current source-message window, cheap, default) or 'archive' (full discord_messages, broader context). \"\n        \"Use this when you need 'from:author has:video after:Xd' style queries to ground editorial framing.\"\n    ),\n    \"input_schema\": {\n        \"type\": \"object\",\n        \"properties\": {\n            \"query\": {\"type\": \"string\", \"description\": \"free-text content match (ILIKE)\"},\n            \"from_author_id\": {\"type\": \"integer\", \"description\": \"equivalent to Discord 'from:' \u2014 restrict to messages this author wrote\"},\n            \"in_channel_id\": {\"type\": \"integer\", \"description\": \"equivalent to Discord 'in:' \u2014 restrict to one channel\"},\n            \"mentions_author_id\": {\"type\": \"integer\", \"description\": \"equivalent to Discord 'mentions:' \u2014 restrict to messages that mention this author\"},\n            \"has\": {\n                \"type\": \"array\",\n                \"items\": {\"type\": \"string\", \"enum\": [\"image\", \"video\", \"audio\", \"link\", \"embed\", \"file\"]},\n                \"description\": \"equivalent to Discord 'has:' \u2014 filter by attachment/embed kind. Array combines AND.\",\n            },\n            \"after\": {\"type\": \"string\", \"description\": \"lower-bound time. Accepts ISO timestamp OR relative like '24h', '7d', '30d'\"},\n            \"before\": {\"type\": \"string\", \"description\": \"upper-bound time. Same format as after\"},\n            \"is_reply\": {\"type\": \"boolean\", \"description\": \"if true, only messages that are replies (reply_to_message_id IS NOT NULL)\"},\n            \"limit\": {\"type\": \"integer\", \"description\": \"default 20, max 50\"},\n            \"scope\": {\"type\": \"string\", \"enum\": [\"window\", \"archive\"], \"description\": \"default 'window'\"},\n        },\n        \"required\": [],\n    },\n}\n```\n\n## Implementation\n\n- New storage method `search_messages_unified(*, scope, guild_id, environment, query, from_author_id, in_channel_id, mentions_author_id, has, after, before, is_reply, limit)`. Returns `[{message_id, channel_id, channel_name, author_id, author_name, content_preview, created_at, reply_to_message_id, has_attachments, has_links, ...}]`.\n\n- For `scope='window'`: filter the in-memory `dispatcher_context[\"messages\"]` list. Cheap.\n\n- For `scope='archive'`: query `discord_messages` table. Apply filters as SQL `WHERE` clauses:\n  - `query`: `content ILIKE '%{query}%'` (parameterized, no SQL injection)\n  - `from_author_id`: `author_id = X`\n  - `in_channel_id`: `channel_id = X`\n  - `mentions_author_id`: search `mentions` array column (or jsonb \u2014 match the actual schema)\n  - `has`: jsonb existence on attachments/embeds/links \u2014 match the discord_messages columns (likely `attachments jsonb`, `embeds jsonb`, content regex for links)\n  - `after`/`before`: parse relative ('Xd', 'Xh') to timestamps; clamp absolute max range to 30 days (720h)\n  - `is_reply`: `reply_to_message_id IS NOT NULL` / `IS NULL`\n  - `limit`: clamp 1..50, default 20\n\n- Time-parser helper: accepts ISO timestamp OR relative like `Nh`/`Nd`. Reject malformed input with a clear tool_error outcome rather than silently ignoring.\n\n- Result content_preview capped at 200 chars per message; full JSON response capped at ~2KB (truncate the list with a `truncated: true` flag if it would exceed).\n\n# 2. `get_reply_chain` (new, separate from search)\n\n```python\n{\n    \"name\": \"get_reply_chain\",\n    \"description\": \"Walk the reply chain backwards from a message. Returns ancestor messages root-first. Use when a generation or post is a reply and you want to understand what it's responding to.\",\n    \"input_schema\": {\n        \"type\": \"object\",\n        \"properties\": {\n            \"message_id\": {\"type\": \"string\"},\n            \"max_depth\": {\"type\": \"integer\", \"description\": \"default 5, max 15\"},\n        },\n        \"required\": [\"message_id\"],\n    },\n}\n```\n\n- Iterative loop: SELECT one row from `discord_messages` WHERE message_id = current, append, set current = reply_to_message_id, stop on NULL or max_depth or cycle.\n- Cycle detection: set of seen IDs, abort if revisit.\n- Return `[{message_id, author_id, author_name, channel_id, content_preview, created_at}]` root-first.\n- One SQL query per depth step. Acceptable at depth 5.\n\n# 3. Wiring\n\n- Drop the existing `search_messages` tool definition entirely; replace with the unified version above.\n- Add `get_reply_chain` to `TOPIC_EDITOR_TOOLS` next to the other read tools.\n- Both go through `_dispatch_read_tool` with the standard JSON-encoded result + ~2KB cap pattern.\n- Add storage methods to `src/common/storage_handler.py` (async) and db_handler wrappers in `src/common/db_handler.py` (sync via `_run_async_in_thread`).\n- Tests in `tests/test_topic_editor_runtime.py` for each filter combination + scope + reply-chain walking + cycle detection.\n\n# 4. System prompt update\n\nAdd a brief paragraph telling the agent these tools exist with examples:\n- `search_messages(query=\"Wan 2.5\", from_author_id=X, has=[\"video\"], scope=\"archive\", after=\"7d\")` to find a user's recent video posts about a tool\n- `search_messages(in_channel_id=X, after=\"24h\", has=[\"image\"])` to scan a channel for recent generations\n- `get_reply_chain(message_id=\"...\")` when a source message has `reply_to_message_id` set\n\nKeep the existing tool descriptions for `search_topics`, `get_author_profile`, `get_message_context` unchanged \u2014 those serve different purposes.\n\n# Hard scope guards\n\n- Do NOT touch `src/features/summarising/live_update_editor.py` or `live_update_prompts.py`\n- Do NOT change `finalize_run`, the agent loop, override-collision, idempotency, lease-expiry, force-close, vision tools, or any prior subagent's work\n- DO replace the existing source-window-only `search_messages` \u2014 the unified version covers it via `scope='window'` (default)\n- Existing tests for `search_messages` will need updating to match the new param shape; keep semantic coverage\n- All other existing tests must remain green",
+  "current_state": "done",
+  "iteration": 2,
+  "created_at": "2026-05-14T01:19:42Z",
+  "config": {
+    "project_dir": "/Users/peteromalley/Documents/banodoco-workspace/brain-of-bndc",
+    "auto_approve": true,
+    "robustness": "light",
+    "mode": "code",
+    "strict_notes": false,
+    "agent": "",
+    "profile": "led",
+    "vendor": "codex",
+    "from_doc": "docs/live-update-editor-sprint-plan.md",
+    "phase_model": [
+      "plan=codex:low",
+      "prep=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "critique=hermes:fireworks:accounts/fireworks/models/kimi-k2p6",
+      "revise=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "gate=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "finalize=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "execute=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "loop_plan=codex:low",
+      "loop_execute=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "review=hermes:fireworks:accounts/fireworks/models/kimi-k2p6",
+      "tiebreaker_researcher=codex:low",
+      "tiebreaker_challenger=codex:low",
+      "feedback=claude:low"
+    ]
+  },
+  "sessions": {
+    "codex_planner": {
+      "id": "019e2411-84f1-7d52-84e3-1c53d739de8f",
+      "mode": "persistent",
+      "created_at": "2026-05-14T01:21:40Z",
+      "last_used_at": "2026-05-14T01:21:40Z",
+      "refreshed": false
+    },
+    "hermes_critic": {
+      "id": "5ad96fd1-528a-4fbe-a5b9-393da2c85595",
+      "mode": "persistent",
+      "created_at": "2026-05-14T01:24:24Z",
+      "last_used_at": "2026-05-14T01:24:24Z",
+      "refreshed": false
+    },
+    "hermes_planner": {
+      "id": "279956d0-0a54-4ff9-85b7-854652582c53",
+      "mode": "persistent",
+      "created_at": "2026-05-14T01:27:39Z",
+      "last_used_at": "2026-05-14T01:27:39Z",
+      "refreshed": false
+    },
+    "hermes_finalizer": {
+      "id": "93f8885d-ceee-4a63-a28e-a3e7fbd2064a",
+      "mode": "persistent",
+      "created_at": "2026-05-14T01:40:05Z",
+      "last_used_at": "2026-05-14T01:40:05Z",
+      "refreshed": false
+    },
+    "hermes_executor": {
+      "id": "8df25b2a-d657-4397-9e99-84d39b3d0253",
+      "mode": "persistent",
+      "created_at": "2026-05-14T01:45:51Z",
+      "last_used_at": "2026-05-14T02:15:01Z",
+      "refreshed": false
+    }
+  },
+  "plan_versions": [
+    {
+      "version": 1,
+      "file": "plan_v1.md",
+      "hash": "sha256:54e720ac7127567e590d45e8a9c0d34c7d88bc7cb7703b1dd9b0b8bddebcff9e",
+      "timestamp": "2026-05-14T01:21:40Z"
+    },
+    {
+      "version": 2,
+      "file": "plan_v2.md",
+      "hash": "sha256:b678707a40d2d74a6ce626edd315eec49a048b00e4fbc9fdda785957dfeb44ad",
+      "timestamp": "2026-05-14T01:27:39Z"
+    }
+  ],
+  "history": [
+    {
+      "step": "init",
+      "timestamp": "2026-05-14T01:19:42Z",
+      "duration_ms": 0,
+      "cost_usd": 0.0,
+      "result": "success",
+      "environment": {
+        "claude": true,
+        "codex": true
+      }
+    },
+    {
+      "step": "plan",
+      "timestamp": "2026-05-14T01:21:40Z",
+      "duration_ms": 112005,
+      "cost_usd": 0.55432,
+      "result": "success",
+      "prompt_tokens": 325538,
+      "completion_tokens": 5309,
+      "total_tokens": 330847,
+      "session_mode": "persistent",
+      "session_id": "019e2411-84f1-7d52-84e3-1c53d739de8f",
+      "agent": "codex",
+      "output_file": "plan_v1.md",
+      "artifact_hash": "sha256:54e720ac7127567e590d45e8a9c0d34c7d88bc7cb7703b1dd9b0b8bddebcff9e"
+    },
+    {
+      "step": "critique",
+      "timestamp": "2026-05-14T01:24:24Z",
+      "duration_ms": 161412,
+      "cost_usd": 0.7905114,
+      "result": "success",
+      "prompt_tokens": 776972,
+      "completion_tokens": 13097,
+      "total_tokens": 790069,
+      "session_mode": "persistent",
+      "session_id": "5ad96fd1-528a-4fbe-a5b9-393da2c85595",
+      "agent": "hermes",
+      "output_file": "critique_v1.json",
+      "artifact_hash": "sha256:3a1d19a525c447389f55e318e412119e41c262b192895babc2860802768b0338",
+      "flags_count": 2
+    },
+    {
+      "step": "revise",
+      "timestamp": "2026-05-14T01:27:39Z",
+      "duration_ms": 192179,
+      "cost_usd": 0.89391456,
+      "result": "success",
+      "prompt_tokens": 494388,
+      "completion_tokens": 9678,
+      "total_tokens": 504066,
+      "session_mode": "persistent",
+      "session_id": "279956d0-0a54-4ff9-85b7-854652582c53",
+      "agent": "hermes",
+      "output_file": "plan_v2.md",
+      "artifact_hash": "sha256:b678707a40d2d74a6ce626edd315eec49a048b00e4fbc9fdda785957dfeb44ad",
+      "flags_addressed": [
+        "FLAG-001"
+      ]
+    },
+    {
+      "step": "finalize",
+      "timestamp": "2026-05-14T01:40:05Z",
+      "duration_ms": 733474,
+      "cost_usd": 1.74462144,
+      "result": "success",
+      "prompt_tokens": 962468,
+      "completion_tokens": 20094,
+      "total_tokens": 982562,
+      "session_mode": "persistent",
+      "session_id": "93f8885d-ceee-4a63-a28e-a3e7fbd2064a",
+      "agent": "hermes",
+      "output_file": "finalize.json",
+      "artifact_hash": "sha256:7044cf8fccd7ac0a1f9ebe5d34539eeee3f19922e175fc5c1b467199c4ca2009"
+    },
+    {
+      "step": "execute",
+      "timestamp": "2026-05-14T02:15:01Z",
+      "duration_ms": 2092558,
+      "cost_usd": 17.42786958,
+      "result": "success",
+      "session_mode": "persistent",
+      "session_id": "8df25b2a-d657-4397-9e99-84d39b3d0253",
+      "agent": "hermes",
+      "output_file": "execution.json",
+      "artifact_hash": "sha256:c39bf0382fc615e34fdc347bc5498581829ef5cc4644875f35363a2d629f6d14",
+      "finalize_hash": "sha256:b177d8745a578ed29fb5f43b05a8526888cf6e73da550133e2f20fdcdb70d0bb",
+      "approval_mode": "auto_approve"
+    }
+  ],
+  "meta": {
+    "significant_counts": [
+      1
+    ],
+    "weighted_scores": [],
+    "plan_deltas": [
+      89.25
+    ],
+    "recurring_critiques": [
+      []
+    ],
+    "total_cost_usd": 21.411237,
+    "overrides": [],
+    "notes": [],
+    "imported_decisions": [],
+    "current_invocation_id": "d0c9f9df1b0343b0",
+    "user_approved_gate": true
+  },
+  "last_gate": {
+    "recommendation": "ITERATE"
+  }
+}

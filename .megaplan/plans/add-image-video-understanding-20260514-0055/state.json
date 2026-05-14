@@ -1,0 +1,95 @@
+{
+  "name": "add-image-video-understanding-20260514-0055",
+  "idea": "Add image/video understanding to the BNDC topic editor so the agent can discriminate compelling generations from low-value media (e.g. Comfy workflow screenshots) before sharing. Persist understandings so the same media is never re-described twice across runs.\n\n# Reference implementation\n\nThe Astrid project at `/Users/peteromalley/Documents/reigh-workspace/Astrid/` has the exact patterns to port:\n\n- **Image understanding** \u2014 `astrid/packs/builtin/visual_understand/run.py`. OpenAI Responses API (`/v1/responses`), models: `gpt-4o-mini` (fast) / `gpt-5.4` (best). Single image or numbered frame-sheet via base64, JSON response constrained by prompt.\n- **Video understanding** \u2014 `astrid/packs/builtin/video_understand/run.py`. Gemini SDK (`google-genai`), models: `gemini-2.5-flash` (fast) / `gemini-2.5-pro` (best). Upload via `files.upload`, poll until `ACTIVE`, then `generate_content` with sanitized `response_schema` (`_sanitize_gemini_schema` drops `additionalProperties` which Gemini rejects).\n- **Shared helpers** \u2014 `astrid/utilities/llm_clients.py` has `build_gemini_client`, retry-on-transient, base64 materialization, debug logging.\n\nAPI keys (already in brain-of-bndc `.env`): `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`.\n\nDo NOT depend on Astrid at runtime \u2014 distill the helpers into a new `src/common/vision_clients.py` (~200-300 LOC). Drop Astrid's debug-logging boilerplate; keep retry + base64 + schema-sanitize.\n\n# Deliverables\n\n## 1. New migration\n\n`.migrations_staging/` + `../supabase/migrations/` (mirror to both per existing convention):\n\n```sql\nCREATE TABLE IF NOT EXISTS public.message_media_understandings (\n  message_id          bigint NOT NULL,\n  attachment_index    int NOT NULL DEFAULT 0,\n  media_url           text NOT NULL,\n  media_kind          text NOT NULL,        -- image | video | audio\n  content_hash        text,                  -- sha256 of media bytes\n  model               text NOT NULL,         -- e.g. gpt-4o-mini, gemini-2.5-flash\n  understanding       jsonb NOT NULL,\n  created_at          timestamptz NOT NULL DEFAULT now(),\n  PRIMARY KEY (message_id, attachment_index, model)\n);\nCREATE INDEX IF NOT EXISTS message_media_understandings_hash_idx\n  ON public.message_media_understandings (content_hash)\n  WHERE content_hash IS NOT NULL;\nCREATE INDEX IF NOT EXISTS message_media_understandings_kind_quality_idx\n  ON public.message_media_understandings (media_kind, ((understanding->>'aesthetic_quality')::int));\n```\n\n## 2. New module `src/common/vision_clients.py`\n\nTwo functions:\n- `describe_image(image_bytes_or_url: ..., model: str, query: str | None) -> dict` \u2014 calls OpenAI Responses API\n- `describe_video(video_path_or_bytes: ..., model: str) -> dict` \u2014 calls Gemini, upload+poll+generate\n\nBoth return structured JSON. Image schema: `{kind: enum(\"generation\"|\"screenshot\"|\"meme\"|\"workflow_graph\"|\"chart\"|\"other\"), subject: str, technical_signal: str, aesthetic_quality: int(0-10), discriminator_notes: str}`. Video schema: port Astrid's existing schema verbatim (`summary, visual_read, audio_read, edit_value, highlight_score, energy, pacing, production_quality, boundary_notes, cautions`) + add `kind` enum like the image one.\n\nLazy SDK imports (don't fail import-time when openai/google-genai aren't installed; fail at call-time with a clear message). Retry once on transient errors. No debug-logging boilerplate.\n\n## 3. Cache-first wrappers in `db_handler.py` + `storage_handler.py`\n\n`get_message_media_understanding(message_id, attachment_index, model) -> Optional[dict]` and `upsert_message_media_understanding(...)`. The vision tools (#4 below) check cache first by `(message_id, attachment_index, model)`, fall back to content_hash lookup, then call the API and persist.\n\n## 4. Two new read tools in `src/features/summarising/topic_editor.py`\n\n`understand_image(message_id, attachment_index=0, mode=\"fast\")` and `understand_video(message_id, attachment_index=0, mode=\"fast\")`. Add to `TOPIC_EDITOR_TOOLS`. Dispatcher cases route through the cache-first wrapper.\n\nThe mode parameter picks model preset: `\"fast\"` \u2192 `gpt-4o-mini` / `gemini-2.5-flash`, `\"best\"` \u2192 `gpt-5.4` / `gemini-2.5-pro`. Default fast.\n\nAdd an env-var-controlled cost cap (`TOPIC_EDITOR_VISION_BUDGET_PER_RUN`, default `1.0`) tracked in dispatcher_context; once exceeded, further vision calls return `{\"outcome\": \"budget_exceeded\"}` without hitting the API.\n\n## 5. Source-payload enrichment in `_build_initial_user_payload`\n\nFor each source message with media attachments, look up the cache and inline any existing understandings. Payload shape:\n\n```python\n{\n  \"message_id\": \"...\",\n  \"content\": \"...\",\n  \"media_urls\": [...],\n  \"media_understandings\": [\n    {\"attachment_index\": 0, \"kind\": \"generation\", \"subject\": \"...\", \"technical_signal\": \"...\", \"aesthetic_quality\": 7, \"model\": \"gemini-2.5-flash\"}\n  ],\n  ...\n}\n```\n\nThis way the agent sees cached understandings for free and only needs to call the tools for messages without one cached.\n\n## 6. System prompt update\n\nAdd a paragraph teaching the agent: media-bearing messages may have pre-computed understandings; for those without, call `understand_image`/`understand_video`; use `kind` to discriminate (skip `workflow_graph`, consider `generation` with `aesthetic_quality >= 6`); cite `technical_signal` and `subject` in any editorial framing.\n\n## 7. Tests\n\n- Stub OpenAI Responses + Gemini SDKs in fixtures (don't hit real APIs)\n- Test cache-first: second call to `understand_image(same_message_id)` returns cached without hitting the stub API\n- Test cross-message dedup via `content_hash`\n- Test payload enrichment surfaces cached understandings\n- Test budget cap kicks in once threshold is crossed\n\n# Hard scope guards\n\n- Do NOT modify `src/features/summarising/live_update_editor.py` or `live_update_prompts.py` (legacy editor is decoupled)\n- Do NOT change the existing `finalize_run`, override-collision, idempotency, lease-expiry, or force-close logic \u2014 those landed in the prior codex fanout and must remain green\n- Existing tests in `tests/test_topic_editor_runtime.py` and `tests/test_live_storage_wrappers.py` must remain passing\n- Don't depend on Astrid at runtime \u2014 copy/distill the patterns, don't import",
+  "current_state": "planned",
+  "iteration": 1,
+  "created_at": "2026-05-13T22:55:01Z",
+  "config": {
+    "project_dir": "/Users/peteromalley/Documents/banodoco-workspace/brain-of-bndc",
+    "auto_approve": true,
+    "robustness": "light",
+    "mode": "code",
+    "strict_notes": false,
+    "agent": "",
+    "profile": "all-codex",
+    "from_doc": "docs/live-update-editor-sprint-plan.md",
+    "phase_model": [
+      "plan=codex",
+      "prep=codex",
+      "critique=codex",
+      "revise=codex",
+      "gate=codex",
+      "finalize=codex",
+      "execute=codex",
+      "feedback=claude:low",
+      "loop_plan=codex",
+      "loop_execute=codex",
+      "review=codex",
+      "tiebreaker_researcher=codex",
+      "tiebreaker_challenger=codex"
+    ]
+  },
+  "sessions": {
+    "codex_planner": {
+      "id": "019e238d-1617-78e3-80f1-15f3242d61da",
+      "mode": "persistent",
+      "created_at": "2026-05-13T22:57:31Z",
+      "last_used_at": "2026-05-13T22:57:31Z",
+      "refreshed": false
+    }
+  },
+  "plan_versions": [
+    {
+      "version": 1,
+      "file": "plan_v1.md",
+      "hash": "sha256:d11cd2427c1488060599bfb8f6248ed9037c6b510b02d4130de4c50689bbbdc9",
+      "timestamp": "2026-05-13T22:57:31Z"
+    }
+  ],
+  "history": [
+    {
+      "step": "init",
+      "timestamp": "2026-05-13T22:55:01Z",
+      "duration_ms": 0,
+      "cost_usd": 0.0,
+      "result": "success",
+      "environment": {
+        "claude": true,
+        "codex": true
+      }
+    },
+    {
+      "step": "plan",
+      "timestamp": "2026-05-13T22:57:31Z",
+      "duration_ms": 142118,
+      "cost_usd": 1.124417,
+      "result": "success",
+      "prompt_tokens": 862081,
+      "completion_tokens": 7330,
+      "total_tokens": 869411,
+      "session_mode": "persistent",
+      "session_id": "019e238d-1617-78e3-80f1-15f3242d61da",
+      "agent": "codex",
+      "output_file": "plan_v1.md",
+      "artifact_hash": "sha256:d11cd2427c1488060599bfb8f6248ed9037c6b510b02d4130de4c50689bbbdc9"
+    }
+  ],
+  "meta": {
+    "significant_counts": [],
+    "weighted_scores": [],
+    "plan_deltas": [],
+    "recurring_critiques": [],
+    "total_cost_usd": 1.124417,
+    "overrides": [
+      {
+        "action": "abort",
+        "timestamp": "2026-05-13T22:55:28Z",
+        "reason": "switching to thoughtful/standard @codex"
+      }
+    ],
+    "notes": [],
+    "imported_decisions": [],
+    "current_invocation_id": "d54cdc159bed4955"
+  },
+  "last_gate": {}
+}

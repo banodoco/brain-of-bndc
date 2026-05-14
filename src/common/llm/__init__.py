@@ -9,6 +9,7 @@ from typing import List, Dict, Any, Type, Union
 # this will raise the original ImportError from the client file.
 from .claude_client import ClaudeClient
 from .openai_client import OpenAIClient
+from .deepseek_client import DeepSeekClient
 # Import BaseLLMClient from its own file for type hinting if needed
 from .base_client import BaseLLMClient
 from .gemini_client import GeminiClient  # Import the new client
@@ -19,6 +20,7 @@ logger = logging.getLogger(__name__)
 SUPPORTED_CLIENTS: Dict[str, Type[BaseLLMClient]] = {
     "claude": ClaudeClient,
     "openai": OpenAIClient,
+    "deepseek": DeepSeekClient,
     "gemini": GeminiClient,
 }
 
@@ -26,6 +28,7 @@ __all__ = [
     "BaseLLMClient",
     "OpenAIClient",
     "ClaudeClient",
+    "DeepSeekClient",
     "GeminiClient",  # Add the new client to __all__
 ]
 
@@ -89,4 +92,4 @@ async def get_llm_response(client_name: str, model: str, system_prompt: str,
     except Exception as e:
         logger.error(f"Error during LLM call via client '{client_name}' with model '{model}': {e}", exc_info=True)
         # Re-raise the exception to be handled by the caller
-        raise 
+        raise

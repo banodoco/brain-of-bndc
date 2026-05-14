@@ -1,0 +1,32 @@
+{
+  "phase": "plan",
+  "invocation_id": "d54cdc159bed4955",
+  "exit_kind": "success",
+  "blocked_tasks": [],
+  "deviations": [],
+  "artifacts_written": [
+    "plan_v1.md",
+    "plan_v1.meta.json"
+  ],
+  "cli_provenance": {
+    "phase_model": [
+      "plan=codex",
+      "prep=codex",
+      "critique=codex",
+      "revise=codex",
+      "gate=codex",
+      "finalize=codex",
+      "execute=codex",
+      "feedback=claude:low",
+      "loop_plan=codex",
+      "loop_execute=codex",
+      "review=codex",
+      "tiebreaker_researcher=codex",
+      "tiebreaker_challenger=codex"
+    ],
+    "profile": "all-codex",
+    "auto_approve": true,
+    "mode": "code",
+    "robustness": "light"
+  }
+}

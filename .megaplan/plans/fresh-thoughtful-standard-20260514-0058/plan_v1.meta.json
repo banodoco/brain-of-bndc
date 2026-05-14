@@ -1,0 +1,118 @@
+{
+  "version": 1,
+  "timestamp": "2026-05-13T23:00:56Z",
+  "hash": "sha256:cccfce191717298efa8ae6b03f99977f257d257cfd436406dcfdc453151ea97d",
+  "questions": [
+    "Should hash-based deduplication be model-specific? I assume yes, because the table primary key includes `model` and fast/best outputs may differ materially.",
+    "For video attachments, should the tool download the whole Discord media file into memory before Gemini upload, or is it acceptable to pass a temporary file path after streaming to disk? I assume temporary file materialization is acceptable and safer for larger videos.",
+    "Should payload enrichment include only fast-model cached understandings by default, or all cached models for the attachment? I assume include all cached rows if a helper supports it; otherwise include known fast/best rows."
+  ],
+  "success_criteria": [
+    {
+      "criterion": "A mirrored Supabase migration creates `public.message_media_understandings` with the requested columns, primary key, hash index, and kind/quality expression index in both migration directories.",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "`src/common/vision_clients.py` provides `describe_image` and `describe_video`, performs lazy SDK imports, returns structured dictionaries, retries once on transient errors, base64-materializes image bytes, uploads/polls Gemini videos, and sanitizes Gemini schemas without importing Astrid.",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "parse_diff",
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "`db_handler.py` and `storage_handler.py` expose cache read/upsert wrappers plus a content-hash lookup path used by the topic editor.",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "parse_diff",
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "`understand_image` and `understand_video` are present in `TOPIC_EDITOR_TOOLS`, dispatch as read tools, select fast/best model presets correctly, check primary cache then content-hash cache before API calls, persist new understandings, and return `budget_exceeded` without API calls after the vision budget is exceeded.",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "parse_diff",
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "`_build_initial_user_payload` includes `media_urls` and cached `media_understandings` for source messages with media attachments without removing existing payload fields.",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "The topic editor system prompt instructs the agent how to use cached understandings and when to call media understanding tools, including the requested `workflow_graph` and `aesthetic_quality >= 6` guidance.",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "Tests stub OpenAI and Gemini SDK/API behavior and do not perform real external API calls.",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "Cache-first, cross-message content-hash deduplication, payload enrichment, and budget-cap behavior are covered by automated tests.",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "Existing regression tests `tests/test_topic_editor_runtime.py` and `tests/test_live_storage_wrappers.py` pass after the change.",
+      "priority": "must",
+      "requires": [
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "No changes are made to `src/features/summarising/live_update_editor.py` or `src/features/summarising/live_update_prompts.py`.",
+      "priority": "must",
+      "requires": [
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "The new vision client module remains roughly within the requested 200-300 LOC target and avoids debug logging boilerplate.",
+      "priority": "should",
+      "requires": [
+        "read_files",
+        "subjective_judgment"
+      ]
+    },
+    {
+      "criterion": "Attachment normalization is small, deterministic, and tolerant of the stored Discord attachment shape (`url`, `filename`) without broad unrelated media parsing.",
+      "priority": "should",
+      "requires": [
+        "read_files",
+        "subjective_judgment"
+      ]
+    }
+  ],
+  "assumptions": [
+    "Use the engineering brief\u2019s Astrid patterns as the source design, but copy/distill helpers into this repo rather than importing Astrid.",
+    "Do not modify legacy live-update editor files or existing finalize/idempotency/lease/collision flows; all topic-editor changes are additive read-tool behavior.",
+    "Use `google-genai` for Gemini because the brief explicitly references that SDK, even though current `requirements.txt` lists `google-generativeai`.",
+    "Vision budget accounting can use deterministic estimated per-call costs rather than exact provider billing, because the requirement is to cap calls per run and tests need stable behavior.",
+    "A media URL is resolved from stored message `attachments` first; embed media extraction is optional unless existing source messages already rely on embeds for media.",
+    "Hash deduplication reuses understandings only for the same model, preserving the distinction between fast and best outputs."
+  ],
+  "structure_warnings": []
+}

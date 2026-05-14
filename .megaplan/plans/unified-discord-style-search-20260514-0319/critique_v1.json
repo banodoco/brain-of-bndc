@@ -1,0 +1,21 @@
+{
+  "checks": [],
+  "flags": [
+    {
+      "id": "FLAG-001",
+      "concern": "Archive-scope `mentions_author_id` will fail because `discord_messages` has no `mentions` column (confirmed zero hits in storage_handler.py and db_handler.py). The plan lists this as an open question but does not commit the executor to a concrete fallback. Without explicit guidance, the storage method may attempt to filter on a non-existent column, causing Supabase errors for any archive search that uses `mentions_author_id`. The implementation must fall back to content-regex matching (e.g., `.ilike('content', '%<@123%')` or Python-side filtering on `<@123>` / `<@!123>` tokens).",
+      "category": "correctness",
+      "severity_hint": "medium",
+      "evidence": "src/common/storage_handler.py: no mentions column in discord_message selects or inserts; grep for 'mentions' in src/common/storage_handler.py and src/common/db_handler.py returns 0 results."
+    },
+    {
+      "id": "verifiability-0",
+      "concern": "Criterion 9: requires human verification (subjective_judgment).",
+      "category": "verifiability",
+      "severity_hint": "likely-minor",
+      "status": "open"
+    }
+  ],
+  "verified_flag_ids": [],
+  "disputed_flag_ids": []
+}

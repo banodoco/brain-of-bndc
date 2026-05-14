@@ -1,0 +1,33 @@
+{
+  "phase": "revise",
+  "invocation_id": "3b5876f6d65b4955",
+  "exit_kind": "success",
+  "blocked_tasks": [],
+  "deviations": [],
+  "artifacts_written": [
+    "plan_v2.md",
+    "plan_v2.meta.json",
+    "faults.json"
+  ],
+  "cli_provenance": {
+    "phase_model": [
+      "plan=codex:low",
+      "prep=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "critique=hermes:fireworks:accounts/fireworks/models/kimi-k2p6",
+      "revise=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "gate=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "finalize=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "execute=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "loop_plan=codex:low",
+      "loop_execute=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "review=hermes:fireworks:accounts/fireworks/models/kimi-k2p6",
+      "tiebreaker_researcher=codex:low",
+      "tiebreaker_challenger=codex:low",
+      "feedback=claude:low"
+    ],
+    "profile": "led",
+    "auto_approve": true,
+    "mode": "code",
+    "robustness": "light"
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "output": "Completed batch 4 of 6. T8: Replaced flat string-only send loop in _publish_topic with explicit send units (_build_send_units, _send_one_unit, _resolve_external_for_publish). T10: Extended test_topic_editor_core.py with 16 new tests across 5 test classes (NormalizeMediaRef external, ResolveMediaUrlFromMetadata external, RenderTopicPublishUnits external, BuildSendUnits, SummarizeSourceMediaCounts). All 70 core + 64 resolver = 134 tests pass.",
+  "files_changed": [
+    "src/features/summarising/topic_editor.py",
+    "tests/test_topic_editor_core.py"
+  ],
+  "commands_run": [
+    "python -m pytest tests/test_topic_editor_core.py -x --tb=short -v",
+    "python -m pytest tests/test_topic_editor_runtime.py tests/test_external_media_resolver.py tests/test_live_runtime_wiring.py -k 'not test_acquire_topic_editor_run_expires_stale_running_lease' --tb=short -q",
+    "python -m pytest tests/test_topic_editor_core.py tests/test_external_media_resolver.py --tb=no -q"
+  ],
+  "deviations": [
+    "Pre-existing test failure: test_acquire_topic_editor_run_expires_stale_running_lease (assert 'expired' == 'failed') \u2014 not a regression from our changes",
+    "Advisory quality: src/features/summarising/topic_editor.py grew by 221 lines (threshold 200).",
+    "Advisory quality: tests/test_topic_editor_core.py grew by 244 lines (threshold 200).",
+    "Advisory quality: tests/test_export_hf_discord_dataset.py has similar functions select and eq (100% similarity).",
+    "Advisory quality: tests/test_export_hf_discord_dataset.py has similar functions select and neq (100% similarity).",
+    "Advisory quality: tests/test_export_hf_discord_dataset.py has similar functions select and limit (100% similarity).",
+    "Advisory quality: tests/test_export_hf_discord_dataset.py has similar functions eq and neq (100% similarity).",
+    "Advisory quality: tests/test_export_hf_discord_dataset.py has similar functions eq and limit (100% similarity).",
+    "Advisory quality: tests/test_export_hf_discord_dataset.py has similar functions neq and limit (100% similarity).",
+    "Advisory observation mismatch: git status/content hash delta found unclaimed files: scripts/export_hf_discord_dataset.py, tests/test_export_hf_discord_dataset.py",
+    "Advisory audit finding: Sense check SC11 is missing an executor acknowledgment.",
+    "Advisory audit finding: Sense check SC12 is missing an executor acknowledgment.",
+    "Advisory audit finding: Tasks left pending after execute (executor never started them): T11, T12"
+  ],
+  "task_updates": [
+    {
+      "id": "T8",
+      "status": "done",
+      "executor_notes": "Replaced flat string-only send loop in _publish_topic structured path with explicit send units. Added _build_send_units() module-level function that translates publish_units into send-unit model (text/url/file send_kinds). Added _send_one_unit() and _resolve_external_for_publish() methods to TopicEditor for lazy-resolve of external media during publish. Suppressed-mode output shape preserved (flat_messages, media_indices, source_media_counts, media_count, flat_message_count). Simple-topic path unchanged. Per-unit traces use sanitized URLs. Added Tuple to typing imports. flat_messages now includes external units (url or fallback_url) for suppressed mode. _send_one_unit handles text/url/file with per-unit trace dicts. File units lazily call resolver; on cache_hit/downloaded send discord.File; on failure send fallback URL text. All 70 core tests pass.",
+      "files_changed": [
+        "src/features/summarising/topic_editor.py"
+      ],
+      "task_id": "T8",
+      "commands_run": []
+    },
+    {
+      "id": "T10",
+      "status": "done",
+      "executor_notes": "Extended tests/test_topic_editor_core.py with 16 new tests: (1) TestNormalizeMediaRef: external kind acceptance, string-index external, invalid-kind rejection after external added; (2) TestResolveMediaUrlFromMetadata: external returns original URL from content, out-of-range returns None, multiple URLs correct index; (3) TestRenderTopicPublishUnits: external media ref produces kind=external unit with original URL, external without URL produces no media unit; (4) TestBuildSendUnits: text\u2192text, media\u2192url, external\u2192file, mixed order; (5) TestSummarizeSourceMediaCounts: separate external_links count, no external_links returns zero, external not merged into resolvable_media; (6) TestBlockHelpers: block_media_refs with external refs. All 54 original tests continue to pass identically. Total: 70 passed, 0 failed.",
+      "files_changed": [
+        "tests/test_topic_editor_core.py"
+      ],
+      "task_id": "T10",
+      "commands_run": []
+    }
+  ],
+  "sense_check_acknowledgments": [
+    {
+      "id": "SC8",
+      "task_id": "T8",
+      "question": "When publishing a structured topic with one text block and one external media ref where the resolver succeeds: does suppressed mode return flat_messages containing the text content plus the URL (not file path), with media_indices pointing to the URL position, and does actual send produce two Discord messages (one text, one file attachment) with two sent_ids?",
+      "verdict": "CONFIRMED: Suppressed mode returns flat_messages with text content + URL (not file path), media_indices points to URL position. Actual send converts external units to file send_kind with lazy resolve. _send_one_unit returns per-unit traces. Two send_units (one text, one file) each produce one Discord message ID if both succeed. File send failure falls back to URL text via _send_one_unit's exception handling.",
+      "executor_note": "Verified via code review: _build_send_units creates send_units from publish_units preserving order. Text units \u2192 send_kind: text. External units \u2192 send_kind: file with fallback_url. _send_one_unit sends each independently with trace dict. If resolver succeeds (cache_hit/downloaded), discord.File is sent. If fails, fallback URL text is sent. Each unit produces one sent_id. The outer loop accumulates sent_ids per successful unit.",
+      "sense_check_id": "SC8"
+    },
+    {
+      "id": "SC10",
+      "task_id": "T10",
+      "question": "Do all existing TestNormalizeMediaRef tests pass unchanged alongside the new external-ref tests?",
+      "verdict": "CONFIRMED: All 10 original TestNormalizeMediaRef tests pass without modification alongside 3 new external-ref tests (external_kind_accepted, external_kind_with_string_index, test_rejects_invalid_kind_after_external_added). Full suite: 70 passed, 0 failed, 0 errors.",
+      "executor_note": "Ran pytest tests/test_topic_editor_core.py -v. All original tests including test_shorthand_attachment_index_converts_to_canonical, test_canonical_embed_ref_passes_through, test_rejects_invalid_kind, etc. pass unchanged. New test_rejects_invalid_kind_after_external_added verifies else-branch rejects unknown kinds after external is added.",
+      "sense_check_id": "SC10"
+    }
+  ]
+}

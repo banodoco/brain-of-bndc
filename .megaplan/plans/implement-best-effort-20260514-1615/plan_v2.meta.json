@@ -1,0 +1,168 @@
+{
+  "version": 2,
+  "timestamp": "2026-05-14T14:51:43Z",
+  "hash": "sha256:5d694c734357e12023e2e8e0638bcb94d147481ebe96304b3b150edc44211120",
+  "changes_summary": "Revised the plan around the four critique gaps: a single shared `extract_external_urls` helper for stable external indexes, a two-tier source-domain/provenance download safety model, explicit attachment/embed/external kind branches everywhere refs are consumed, and a concrete structured publisher send-unit model that preserves suppressed output, counts, sent IDs, and fallback semantics.",
+  "flags_addressed": [
+    "issue_hints",
+    "correctness-1",
+    "correctness-2",
+    "scope",
+    "DEBT-045",
+    "DEBT-046",
+    "DEBT-047",
+    "DEBT-048",
+    "callers-1",
+    "callers-2"
+  ],
+  "questions": [
+    "Should YouTube/Vimeo/Twitch links be downloadable for TopicEditor, or should they remain fallback-link-only despite appearing in the curator safelist?",
+    "Should production cache storage remain local disk plus DB metadata, or should downloaded files also be copied to durable object storage after this implementation?"
+  ],
+  "success_criteria": [
+    {
+      "criterion": "Existing attachment and embed media refs normalize, validate, render, count, and publish exactly as before for current tests.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "`normalize_media_ref` accepts `kind: \"external\"` refs while preserving existing shorthand attachment behavior and rejecting invalid kinds.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "One shared deterministic `extract_external_urls` helper is used by source payloads, `get_message_context`, validation, `_resolve_media_url_from_metadata`, rendering fallback lookup, and publish-time resolver lookup.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "parse_diff",
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Source message payloads and `get_message_context` expose compact `media_refs_available` entries for safelisted external URLs, with Discord attachment/embed refs preserved before external refs.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Every downstream media-ref kind branch is explicit for `attachment`, `embed`, and `external`; no non-attachment branch implicitly treats refs as embeds.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "parse_diff",
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "External URL extraction and resolution enforce source-domain safelist, metadata-first yt-dlp, timeout, max-size, content-type, Discord upload compatibility, and sanitized logging behavior in unit-tested paths.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "read_files",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "yt-dlp is invoked in metadata-only mode before any download attempt, and metadata/download failures fall back without raising into TopicEditor publishing.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "Resolved external media is cached by stable URL key plus content hash so repeated publish attempts can reuse cache without re-downloading.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "read_files"
+      ]
+    },
+    {
+      "criterion": "Structured publishing uses explicit send units for text, fallback URLs, and files while preserving suppressed-mode `publish_units`, `flat_messages`, `media_indices`, `media_count`, `flat_message_count`, sent-id accounting, and partial/failure status semantics.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "On resolver, download, compatibility, or Discord file-send failure, the publisher sends the original external link in the correct interleaved block position and continues publishing remaining text/units.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "_summarize_source_media_counts preserves current attachment/embed count semantics and does not silently inflate existing counts with external fallback URLs.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "No code path reintroduces direct LiveTopCreations-style auto-posting at the reaction threshold; reaction-qualified media remains an auto-shortlist-to-watching flow.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "Logs and trace metadata describe resolved/downloaded/skipped/fallback outcomes without emitting query tokens or secrets from URLs.",
+      "priority": "must",
+      "requires": [
+        "run_tests",
+        "read_files",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "New resolver code keeps pure parsing/normalization helpers separate from subprocess, network, filesystem, and DB side effects.",
+      "priority": "should",
+      "requires": [
+        "read_files",
+        "subjective_judgment"
+      ]
+    },
+    {
+      "criterion": "Tests avoid real network calls, real yt-dlp execution, and real Discord sends by using stubs/fakes.",
+      "priority": "should",
+      "requires": [
+        "run_tests",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "A manual production smoke test can publish a structured topic containing a Reddit or X external media ref and observe either an attached file or fallback link in the expected block position.",
+      "priority": "info",
+      "requires": [
+        "verify_physical_device",
+        "observe_runtime_logs"
+      ]
+    }
+  ],
+  "assumptions": [
+    "External media resolution is lazy and publish-time only for external refs selected in structured block media_refs.",
+    "Discord attachments and embeds remain preferred and keep existing attachment/embed media_ref behavior.",
+    "The shared `extract_external_urls` helper is the only source of truth for external URL ordering and indexing.",
+    "Resolved yt-dlp CDN URLs are allowed only with safelisted source provenance plus content-type, byte-cap, timeout, and Discord upload compatibility checks.",
+    "The default byte cap should align with practical Discord bot upload limits and remain configurable with a hard maximum.",
+    "Local cache path plus DB metadata is acceptable for implementation; production durability is handled as deployment follow-up.",
+    "Structured block publishing is the only publish path that needs external media binding; legacy simple-topic publishing remains unchanged.",
+    "Tests use fakes/stubs for subprocess, HTTP, cache, and Discord sends."
+  ],
+  "delta_from_previous_percent": 86.01,
+  "structure_warnings": []
+}

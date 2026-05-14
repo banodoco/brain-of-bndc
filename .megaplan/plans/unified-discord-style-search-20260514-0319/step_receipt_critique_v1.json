@@ -1,0 +1,35 @@
+{
+  "receipt_id": "c0e105a8-152e-4ddf-ae75-c500e48c705a",
+  "plan_id": "unified-discord-style-search-20260514-0319",
+  "phase": "critique",
+  "iteration": 1,
+  "attempt": 1,
+  "timestamp_utc": "2026-05-14T01:24:24.382395+00:00",
+  "profile_name": "led",
+  "agent": "hermes",
+  "agent_mode": "persistent",
+  "model_configured": "hermes:fireworks:accounts/fireworks/models/kimi-k2p6",
+  "model_actual": "accounts/fireworks/models/kimi-k2p6",
+  "session_id": "5ad96fd1-528a-4fbe-a5b9-393da2c85595",
+  "megaplan_version": "0.8.1",
+  "schema_version": 1,
+  "prompt_hash_raw": "e10940bce081850271363934cfbe52d3d538f52730a6b0c7ea0c308dd76e00b0",
+  "prompt_hash_canonical": "fc7b1f95df7c7da8b0a3294ae7bfd221e78f133d1e538a08e55a93436f8415c1",
+  "canonicalization_version": 1,
+  "upstream_artifact_hashes": [
+    "sha256:54e720ac7127567e590d45e8a9c0d34c7d88bc7cb7703b1dd9b0b8bddebcff9e"
+  ],
+  "cost_usd": 0.7905114,
+  "duration_ms": 161412,
+  "prompt_tokens": 776972,
+  "completion_tokens": 13097,
+  "verdict": null,
+  "metrics": {
+    "findings_per_check": {},
+    "severity_distribution": {},
+    "clean_checks_count": 0,
+    "flagged_checks_count": 0,
+    "rubber_stamp_ratio": 0.0
+  },
+  "scope_drift_severity": null
+}

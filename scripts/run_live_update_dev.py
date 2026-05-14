@@ -20,21 +20,27 @@ if str(ROOT) not in sys.path:
 
 from src.common.db_handler import DatabaseHandler
 from src.common.llm.claude_client import ClaudeClient
-from src.features.summarising.live_top_creations import LiveTopCreations
-from src.features.summarising.live_update_editor import LiveUpdateEditor
+from src.common.llm.deepseek_client import DeepSeekClient
 from src.features.summarising.topic_editor import TopicEditor
 
 
 class MinimalDiscordBot:
     """Small adapter exposing only what the live preview services need."""
 
-    def __init__(self, client: discord.Client, db_handler: DatabaseHandler, logger: logging.Logger):
+    def __init__(
+        self,
+        client: discord.Client,
+        db_handler: DatabaseHandler,
+        logger: logging.Logger,
+        *,
+        llm_client: Any | None = None,
+    ):
         self.client = client
         self.db_handler = db_handler
         self.server_config = db_handler.server_config
         self.logger = logger
         self.dev_mode = True
-        self.claude_client = ClaudeClient()
+        self.claude_client = llm_client or ClaudeClient()
 
     @property
     def user(self):
@@ -66,19 +72,6 @@ def _resolve_token() -> str:
         "DEV_DISCORD_BOT_TOKEN is required. Set ALLOW_PROD_DISCORD_TOKEN_IN_DEV=true "
         "only for this minimal preview runner if you intentionally want to reuse DISCORD_BOT_TOKEN."
     )
-
-
-async def _run_pass(editor: LiveUpdateEditor, top_creations: LiveTopCreations, *, trigger: str) -> None:
-    editor_result = await editor.run_once(trigger)
-    logging.info("Live editor result: %s", editor_result)
-    top_result = await top_creations.run_once(trigger)
-    logging.info("Top creations result: %s", top_result)
-    # Send the deferred reasoning embed last so it appears at the bottom of
-    # the channel timeline (after both editor's compact embed and top_creations).
-    try:
-        await editor.flush_pending_reasoning()
-    except Exception as exc:
-        logging.warning("flush_pending_reasoning failed: %s", exc, exc_info=True)
 
 
 async def _run_topic_editor_scheduled_pass(editor: "TopicEditor", *, trigger: str) -> None:
@@ -128,7 +121,13 @@ async def _run_topic_editor_replay(args: argparse.Namespace) -> None:
     db_handler = DatabaseHandler(dev_mode=False)
     messages = _fetch_latest_prod_source_window(db_handler, guild_id=guild_id, limit=args.source_limit)
     _attach_latest_window_replay(db_handler, messages)
-    bot = MinimalDiscordBot(_new_discord_client(), db_handler, logging.getLogger("topic-editor-replay"))
+    llm_client = _build_topic_llm_client(args.llm_client)
+    bot = MinimalDiscordBot(
+        _new_discord_client(),
+        db_handler,
+        logging.getLogger("topic-editor-replay"),
+        llm_client=llm_client,
+    )
     bot.dev_mode = False
     editor = TopicEditor(
         bot=bot,
@@ -141,10 +140,12 @@ async def _run_topic_editor_replay(args: argparse.Namespace) -> None:
     )
     editor.trace_channel_id = None
     logging.info(
-        "Starting topic-editor publishing-off replay: prod source_count=%s guild=%s live_channel=%s",
+        "Starting topic-editor publishing-off replay: prod source_count=%s guild=%s live_channel=%s llm=%s model=%s",
         len(messages),
         guild_id,
         live_channel_id,
+        args.llm_client,
+        editor.model,
     )
     result = await editor.run_once("prod_replay_publishing_off")
     print("=== Topic editor replay result ===")
@@ -165,6 +166,16 @@ async def _run_topic_editor_replay(args: argparse.Namespace) -> None:
 
 def _new_discord_client() -> discord.Client:
     return discord.Client(intents=discord.Intents.none())
+
+
+def _build_topic_llm_client(provider: str) -> Any:
+    provider = (provider or "claude").strip().lower()
+    if provider == "claude":
+        return ClaudeClient()
+    if provider == "deepseek":
+        os.environ.setdefault("TOPIC_EDITOR_MODEL", "deepseek-v4-pro")
+        return DeepSeekClient()
+    raise ValueError("Unsupported --llm-client value. Use 'claude' or 'deepseek'.")
 
 
 async def _login_with_backoff(token: str) -> discord.Client:
@@ -200,7 +211,7 @@ async def main() -> None:
     parser.add_argument("--once", action="store_true", help="Run one pass and exit")
     parser.add_argument("--art-channel-id", help="Override DEV_ART_CHANNEL_ID for this run")
     parser.add_argument("--summary-channel-id", help="Override DEV_SUMMARY_CHANNEL_ID for this run")
-    parser.add_argument("--top-gens-channel-id", help="Override DEV_TOP_GENS_CHANNEL_ID for this run")
+    parser.add_argument("--top-gens-channel-id", help=argparse.SUPPRESS)
     parser.add_argument(
         "--topic-editor-replay-prod",
         action="store_true",
@@ -209,20 +220,28 @@ async def main() -> None:
     parser.add_argument("--source-limit", type=int, default=200, help="Source message count for TopicEditor replay")
     parser.add_argument("--guild-id", help="Override prod guild id for TopicEditor replay")
     parser.add_argument("--live-channel-id", help="Override prod live update channel id for TopicEditor replay")
+    parser.add_argument(
+        "--llm-client",
+        choices=["claude", "deepseek"],
+        default=None,
+        help="LLM backend for TopicEditor. Can also be set with TOPIC_EDITOR_LLM_CLIENT.",
+    )
     args = parser.parse_args()
 
     load_dotenv(ROOT / ".env", override=True)
+    args.llm_client = args.llm_client or os.getenv("TOPIC_EDITOR_LLM_CLIENT", "claude")
     if args.art_channel_id:
         os.environ["DEV_ART_CHANNEL_ID"] = str(args.art_channel_id)
     if args.summary_channel_id:
         os.environ["DEV_SUMMARY_CHANNEL_ID"] = str(args.summary_channel_id)
     if args.top_gens_channel_id:
-        os.environ["DEV_TOP_GENS_CHANNEL_ID"] = str(args.top_gens_channel_id)
+        logging.warning("--top-gens-channel-id is ignored; media is now auto-shortlisted by TopicEditor.")
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     for noisy_logger in ("httpx", "httpcore", "supabase", "postgrest"):
         logging.getLogger(noisy_logger).setLevel(logging.WARNING)
     if args.topic_editor_replay_prod:
+        os.environ["TOPIC_EDITOR_LLM_CLIENT"] = args.llm_client
         await _run_topic_editor_replay(args)
         return
 
@@ -231,7 +250,8 @@ async def main() -> None:
     client = await _login_with_backoff(token)
 
     try:
-        bot = MinimalDiscordBot(client, db_handler, logging.getLogger("live-update-dev"))
+        llm_client = _build_topic_llm_client(args.llm_client)
+        bot = MinimalDiscordBot(client, db_handler, logging.getLogger("live-update-dev"), llm_client=llm_client)
 
         guild_id = int(os.getenv("DEV_GUILD_ID") or os.getenv("GUILD_ID") or "0") or None
         live_channel_id = int(os.getenv("DEV_LIVE_UPDATE_CHANNEL_ID") or os.getenv("LIVE_UPDATE_TRACE_CHANNEL_ID") or "0") or None
@@ -244,12 +264,14 @@ async def main() -> None:
             environment="dev",
         )
         logging.info(
-            "Starting local TopicEditor dev runner: guild=%s live_channel=%s trace=%s publishing=%s interval=%sm",
+            "Starting local TopicEditor dev runner: guild=%s live_channel=%s trace=%s publishing=%s interval=%sm llm=%s model=%s",
             guild_id,
             live_channel_id,
             editor.trace_channel_id,
             editor.publishing_enabled,
             args.interval_minutes,
+            args.llm_client,
+            editor.model,
         )
         await _run_topic_editor_scheduled_pass(editor, trigger="local_dev_once" if args.once else "local_dev_scheduled")
         while not args.once:

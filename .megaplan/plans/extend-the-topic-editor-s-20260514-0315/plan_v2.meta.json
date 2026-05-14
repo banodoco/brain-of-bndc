@@ -1,0 +1,102 @@
+{
+  "version": 2,
+  "timestamp": "2026-05-14T01:21:23Z",
+  "hash": "sha256:d80cb59251ee7772e6aebcd0acee55b54f2401002fc48bf8bed1e53995df8b07",
+  "changes_summary": "Added an explicit step in Step 5 to update the hardcoded assertion `assert len(llm_call[\"tools\"]) == 13` at line 273 of tests/test_topic_editor_runtime.py to `16`, since FLAG-001 identified this as a guaranteed test failure when 3 new tools are added to TOPIC_EDITOR_TOOLS. Also noted the line-272 assertion already compares to the list itself, so the length check is redundant but updating it to 16 is the lowest-risk fix.",
+  "flags_addressed": [
+    "FLAG-001"
+  ],
+  "questions": [
+    "Does the live `discord_messages` table actually have a `reply_to_message_id` column, or should implementation use the existing `reference_id` column and expose it as `reply_to_message_id`? Repo evidence strongly points to `reference_id`.",
+    "Should `environment` be ignored for `discord_messages` because stored message rows do not appear to include an environment column, or is there an environment column in production that this checkout's ingestion code does not populate?"
+  ],
+  "success_criteria": [
+    {
+      "criterion": "`TOPIC_EDITOR_TOOLS` includes exactly three new read tool definitions with the requested names and schemas, while the four existing read tool definitions remain behaviorally unchanged (total: 16 tools).",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "`_dispatch_read_tool` dispatches `search_archive_messages`, `get_reply_chain`, and `get_author_recent_messages` through DB handler methods with guild/environment context and documented defaults.",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "Archive search and author recent-message storage reads query `discord_messages`, enforce `limit <= 50` and `hours_back <= 720`, support optional channel/author filters where specified, and return compact rows with `reply_to_message_id`.",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "Reply-chain storage read follows parent links iteratively, caps `max_depth <= 15`, detects cycles, and returns ancestors root-first.",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "DB handler exposes synchronous wrappers for all three storage methods via `_run_async_in_thread`.",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "Topic editor system prompt teaches when to use all three new archive/context tools.",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "`tests/test_topic_editor_runtime.py` exercises each new tool with `FakeDB` through the topic editor dispatcher and verifies structured results/tool-result JSON behavior.",
+      "priority": "must",
+      "requires": [
+        "read_files",
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "Existing focused topic-editor runtime tests pass after the change, including the updated line-273 assertion (`len(llm_call[\"tools\"]) == 16`).",
+      "priority": "must",
+      "requires": [
+        "run_tests"
+      ]
+    },
+    {
+      "criterion": "No files in the hard-guarded live-update editor/prompt paths (`live_update_editor.py`, `live_update_prompts.py`) are modified.",
+      "priority": "must",
+      "requires": [
+        "parse_diff"
+      ]
+    },
+    {
+      "criterion": "Implementation avoids broad refactors and keeps any helper extraction local to topic-editor archive result compaction.",
+      "priority": "should",
+      "requires": [
+        "read_files",
+        "subjective_judgment"
+      ]
+    }
+  ],
+  "assumptions": [
+    "Use the existing `reference_id` database field for Discord replies and expose it as `reply_to_message_id` in tool results, matching current `get_topic_editor_message_context` behavior.",
+    "Do not filter `discord_messages` by `environment` unless direct schema evidence shows that column exists; still accept/pass the `environment` parameter for API consistency with other topic-editor reads.",
+    "Use Supabase query-builder APIs already used in `StorageHandler`; do not add raw SQL just to express the interval because the repo already computes `since = datetime.utcnow() - timedelta(...)` for time-windowed reads.",
+    "The existing `_tool_result_content` 2KB truncation is sufficient once the new tool names are added to `READ_TOOL_NAMES`.",
+    "The line-273 assertion `assert len(llm_call[\"tools\"]) == 13` is the only hardcoded tool count in the test suite; updating it to 16 is sufficient."
+  ],
+  "delta_from_previous_percent": 37.0,
+  "structure_warnings": []
+}

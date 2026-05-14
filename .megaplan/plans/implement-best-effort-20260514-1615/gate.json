@@ -1,0 +1,274 @@
+{
+  "passed": true,
+  "criteria_check": {
+    "count": 16,
+    "items": [
+      {
+        "criterion": "Existing attachment and embed media refs normalize, validate, render, count, and publish exactly as before for current tests.",
+        "priority": "must",
+        "requires": [
+          "run_tests",
+          "parse_diff"
+        ]
+      },
+      {
+        "criterion": "`normalize_media_ref` accepts `kind: \"external\"` refs while preserving existing shorthand attachment behavior and rejecting invalid kinds.",
+        "priority": "must",
+        "requires": [
+          "run_tests",
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "One shared deterministic `extract_external_urls` helper is used by source payloads, `get_message_context`, validation, `_resolve_media_url_from_metadata`, rendering fallback lookup, and publish-time resolver lookup.",
+        "priority": "must",
+        "requires": [
+          "run_tests",
+          "parse_diff",
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Source message payloads and `get_message_context` expose compact `media_refs_available` entries for safelisted external URLs, with Discord attachment/embed refs preserved before external refs.",
+        "priority": "must",
+        "requires": [
+          "run_tests",
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Every downstream media-ref kind branch is explicit for `attachment`, `embed`, and `external`; no non-attachment branch implicitly treats refs as embeds.",
+        "priority": "must",
+        "requires": [
+          "run_tests",
+          "parse_diff",
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "External URL extraction and resolution enforce source-domain safelist, metadata-first yt-dlp, timeout, max-size, content-type, Discord upload compatibility, and sanitized logging behavior in unit-tested paths.",
+        "priority": "must",
+        "requires": [
+          "run_tests",
+          "read_files",
+          "parse_diff"
+        ]
+      },
+      {
+        "criterion": "yt-dlp is invoked in metadata-only mode before any download attempt, and metadata/download failures fall back without raising into TopicEditor publishing.",
+        "priority": "must",
+        "requires": [
+          "run_tests",
+          "parse_diff"
+        ]
+      },
+      {
+        "criterion": "Resolved external media is cached by stable URL key plus content hash so repeated publish attempts can reuse cache without re-downloading.",
+        "priority": "must",
+        "requires": [
+          "run_tests",
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Structured publishing uses explicit send units for text, fallback URLs, and files while preserving suppressed-mode `publish_units`, `flat_messages`, `media_indices`, `media_count`, `flat_message_count`, sent-id accounting, and partial/failure status semantics.",
+        "priority": "must",
+        "requires": [
+          "run_tests",
+          "parse_diff"
+        ]
+      },
+      {
+        "criterion": "On resolver, download, compatibility, or Discord file-send failure, the publisher sends the original external link in the correct interleaved block position and continues publishing remaining text/units.",
+        "priority": "must",
+        "requires": [
+          "run_tests",
+          "parse_diff"
+        ]
+      },
+      {
+        "criterion": "_summarize_source_media_counts preserves current attachment/embed count semantics and does not silently inflate existing counts with external fallback URLs.",
+        "priority": "must",
+        "requires": [
+          "run_tests",
+          "parse_diff"
+        ]
+      },
+      {
+        "criterion": "No code path reintroduces direct LiveTopCreations-style auto-posting at the reaction threshold; reaction-qualified media remains an auto-shortlist-to-watching flow.",
+        "priority": "must",
+        "requires": [
+          "run_tests",
+          "parse_diff"
+        ]
+      },
+      {
+        "criterion": "Logs and trace metadata describe resolved/downloaded/skipped/fallback outcomes without emitting query tokens or secrets from URLs.",
+        "priority": "must",
+        "requires": [
+          "run_tests",
+          "read_files",
+          "parse_diff"
+        ]
+      },
+      {
+        "criterion": "New resolver code keeps pure parsing/normalization helpers separate from subprocess, network, filesystem, and DB side effects.",
+        "priority": "should",
+        "requires": [
+          "read_files",
+          "subjective_judgment"
+        ]
+      },
+      {
+        "criterion": "Tests avoid real network calls, real yt-dlp execution, and real Discord sends by using stubs/fakes.",
+        "priority": "should",
+        "requires": [
+          "run_tests",
+          "parse_diff"
+        ]
+      },
+      {
+        "criterion": "A manual production smoke test can publish a structured topic containing a Reddit or X external media ref and observe either an attached file or fallback link in the expected block position.",
+        "priority": "info",
+        "requires": [
+          "verify_physical_device",
+          "observe_runtime_logs"
+        ]
+      }
+    ]
+  },
+  "preflight_results": {
+    "project_dir_exists": true,
+    "project_dir_writable": true,
+    "success_criteria_present": true,
+    "claude_available": true,
+    "codex_available": true
+  },
+  "unresolved_flags": [],
+  "recommendation": "PROCEED",
+  "rationale": "All 15 flags from the previous iteration are resolved. The critique check summary confirms issue_hints, correctness, scope, all_locations, and callers are clear. The weighted score trajectory went from 18.0 to 0. The plan now addresses all four original critique gaps: (1) a single shared `extract_external_urls` helper in `src/common/external_media.py` avoiding feature\u2192common dependency inversion, (2) explicit two-tier safety with source-domain safelist plus provenance-bound CDN download under content-type/byte-cap/timeout/Discord-upload checks, (3) explicit attachment/embed/external branches at every media-ref consumption point eliminating implicit embed fallthrough, and (4) a concrete send-unit model preserving suppressed-mode output, sent-id accounting, media counts, flat_message_count, and partial failure semantics. The iteration pressure analysis shows no groups meeting TIEBREAKER thresholds (0 reopened across all groups), no escalated debt subsystems overlap with this plan's domain, and the execution order is logically sequenced from shared helpers through staged migration through payload wiring to publisher refactoring to tests. Preflight confirms writable project directory, success criteria present, and both Claude and Codex available.",
+  "signals_assessment": "Score trajectory 18.0\u21920 (clean). All 15 flags resolved this iteration with no unresolved significant flags remaining. Plan delta is 86.86%, indicating substantial revision. No recurring critiques, no scope creep flags, no debt overlaps with this plan's subsystem. Preflight passed. The plan is mature and ready for execution.",
+  "warnings": [
+    "The staged migration .migrations_staging/20260514160000_external_media_cache.sql must be applied to production Supabase before deploying code that reads/writes the external_media_cache table. This is noted as deployment follow-up (U1).",
+    "EXTERNAL_MEDIA_CACHE_DIR and the external media byte cap must be configured in production before the resolver can persist and serve cached downloads. This is noted as deployment follow-up (U2).",
+    "Long-form domains (YouTube, Vimeo, Twitch) are explicitly fallback-link-only by default per the platform policy defined in Step 1.5, which resolves the earlier ambiguity. Ensure the executor does not attempt yt-dlp metadata/download for these domains."
+  ],
+  "settled_decisions": [
+    {
+      "decision": "Shared `extract_external_urls` helper lives in `src/common/external_media.py` so both `src/common/storage_handler.py` and TopicEditor can import it without common depending on features.",
+      "context": "Resolved layering concern FLAG-005 / DEBT-047 about feature\u2192common dependency inversion."
+    },
+    {
+      "decision": "Long-form domains (YouTube, Vimeo, Twitch) are safelisted for external link ref exposure but are fallback-link-only for TopicEditor Discord publishing. Short-form/social domains may attempt lazy yt-dlp resolution.",
+      "context": "Resolved correctness / FLAG-006 ambiguity about YouTube/Vimeo/Twitch download policy."
+    },
+    {
+      "decision": "Resolved CDN URLs from yt-dlp are trusted only when the original URL passes source-domain safelist AND the downloaded content passes content-type, byte-cap, timeout, and Discord upload compatibility checks. The CDN host itself is not safelisted.",
+      "context": "Resolved DEBT-046 about false fallbacks vs unsafe arbitrary downloads with two-tier provenance model."
+    },
+    {
+      "decision": "Structured publisher send-unit model: text units (`send_kind: text`), URL fallback units (`send_kind: url`), and file units (`send_kind: file`). Suppressed mode preserves flat_messages, media_indices, media_count, and flat_message_count.",
+      "context": "Resolved DEBT-045 about the flattened string-only publisher being incompatible with discord.File sends."
+    }
+  ],
+  "override_forced": false,
+  "orchestrator_guidance": "Plan passed gate and preflight. Proceed to finalize.",
+  "robustness": "standard",
+  "signals": {
+    "iteration": 2,
+    "idea": "Implement best-effort external linked media extraction for TopicEditor live updates. Current behavior: TopicEditor can attach Discord attachments/embeds by source-local media_refs, auto-shortlists media-bearing Discord posts with >=5 reactions as watching topics, and disabled the old LiveTopCreations auto-post loop. New goal: when a source message links to Reddit, Twitter/X, or similar external posts that contain media, provide a safe, consistent best-effort way to resolve/download that media for TopicEditor use. Requirements: prefer archived Discord attachments/embeds first; detect external URLs in source messages and embeds; use a resolver tier such as yt-dlp metadata/download with strict timeout, file-size, content-type, and domain safeguards; cache resolved results so repeated runs do not re-download; expose available external media refs to the agent in message context/source payload; allow structured blocks to bind external resolved media to the relevant section; when publishing, attach or post the resolved media in the same interleaved block flow, falling back to the original link if extraction fails; never make external extraction failure block text publishing; add clear logs/trace metadata explaining resolved/downloaded/skipped/fallback cases; include tests for Reddit/Twitter-like URLs, resolver failures, cache hits, oversize media, and publisher fallback. Keep secrets out of logs and do not reintroduce direct auto-posting at five reactions.",
+    "significant_flags": 4,
+    "unresolved_flags": [],
+    "resolved_flags": [
+      {
+        "id": "FLAG-001",
+        "concern": "Schema infrastructure: Plan treats `external_media_cache` DDL as optional documentation if no migration system exists, but this repo has `.migrations_staging`; without a staged migration, DB/storage cache wrappers can pass unit fakes while failing in production.",
+        "resolution": "Found `.migrations_staging/20260514010000_message_media_understandings.sql` and existing wrapper pairs in `src/common/db_handler.py` / `src/common/storage_handler.py`; plan Step 3 says to document DDL if no migration system is present."
+      },
+      {
+        "id": "issue_hints",
+        "concern": "Did the work fully address the issue hints, user notes, and approved plan requirements?: The brief still says downloads should have a strict domain safelist, but revised Step 2 explicitly says not to domain-safelist ephemeral yt-dlp CDN hosts and instead to rely on source provenance plus content-type, byte cap, and timeout. That is an intentional tradeoff and may be pragmatic, but it diverges from the literal domain-safelist-on-downloads constraint.",
+        "resolution": "Revised the plan around the four critique gaps: a single shared `extract_external_urls` helper for stable external indexes, a two-tier source-domain/provenance download safety model, explicit attachment/embed/external kind branches everywhere refs are consumed, and a concrete structured publisher send-unit model that preserves suppressed output, counts, sent IDs, and fallback semantics."
+      },
+      {
+        "id": "correctness-1",
+        "concern": "Are the proposed changes technically correct?: Recurring debt: Checked the structured publish path in `src/features/summarising/topic_editor.py`: `_publish_topic` currently turns every `render_topic_publish_units` media unit into a string in `flat_messages` and sends it with `channel.send(message_text)`. The revised plan still says to send `discord.File` on resolver success, but it does not define the concrete replacement send-unit model for mixed text, fallback URL strings, and file sends, including suppressed-mode return shape, sent-id accounting, and partial status.",
+        "resolution": "Revised the plan around the four critique gaps: a single shared `extract_external_urls` helper for stable external indexes, a two-tier source-domain/provenance download safety model, explicit attachment/embed/external kind branches everywhere refs are consumed, and a concrete structured publisher send-unit model that preserves suppressed output, counts, sent IDs, and fallback semantics."
+      },
+      {
+        "id": "correctness-2",
+        "concern": "Are the proposed changes technically correct?: Checked the existing validation branch around `topic_editor.py:1621`. Because the current code handles `kind == \"attachment\"` and treats every other kind as embed, the executor must add an explicit external branch before the embed fallback; the plan calls for validating external refs separately, so the intended direction is correct, but this is a real caller-sensitive edge that should remain in the critique.",
+        "resolution": "Revised the plan around the four critique gaps: a single shared `extract_external_urls` helper for stable external indexes, a two-tier source-domain/provenance download safety model, explicit attachment/embed/external kind branches everywhere refs are consumed, and a concrete structured publisher send-unit model that preserves suppressed output, counts, sent IDs, and fallback semantics."
+      },
+      {
+        "id": "scope",
+        "concern": "Search for related code that handles the same concept. Is the reported issue a symptom of something broader?: Recurring debt: Checked the three source-message paths that would need external URL indexing: `TopicEditor._message_payload`, `StorageHandler.get_topic_editor_message_context`, and publish/validation hydration through `get_topic_editor_source_messages`. The revised plan still describes detecting URLs separately in multiple places and does not explicitly require one shared deterministic extraction helper, so `kind: \"external\", index: N` can drift between prompt exposure, validation, rendering, and fallback resolution.",
+        "resolution": "Revised the plan around the four critique gaps: a single shared `extract_external_urls` helper for stable external indexes, a two-tier source-domain/provenance download safety model, explicit attachment/embed/external kind branches everywhere refs are consumed, and a concrete structured publisher send-unit model that preserves suppressed output, counts, sent IDs, and fallback semantics."
+      },
+      {
+        "id": "all_locations",
+        "concern": "Does the change touch all locations AND supporting infrastructure?: Checked repository layering around `src/common/storage_handler.py` and `src/features/summarising/topic_editor.py`. The plan places `extract_external_urls` in `src/features/summarising/external_media_resolver.py` but also requires `StorageHandler.get_topic_editor_message_context` in `src/common` to use it; importing a feature module from common storage would invert the existing dependency direction and risks circular or broad feature coupling.",
+        "resolution": "Checked repository layering around `src/common/storage_handler.py` and `src/features/summarising/topic_editor.py`. The plan places `extract_external_urls` in `src/features/summarising/external_media_resolver.py` but also requires `StorageHandler.get_topic_editor_message_context` in `src/common` to use it; importing a feature module from common storage would invert the existing dependency direction and risks circular or broad feature coupling."
+      },
+      {
+        "id": "DEBT-045",
+        "concern": "Publish integration: Recurring debt: Plan says to send `discord.File` for resolved external media but still does not specify the concrete revised send loop/status model for the existing structured publisher, which currently flattens every unit into text and calls `channel.send(message_text)`.",
+        "resolution": "Revised the plan around the four critique gaps: a single shared `extract_external_urls` helper for stable external indexes, a two-tier source-domain/provenance download safety model, explicit attachment/embed/external kind branches everywhere refs are consumed, and a concrete structured publisher send-unit model that preserves suppressed output, counts, sent IDs, and fallback semantics."
+      },
+      {
+        "id": "DEBT-046",
+        "concern": "External media host safety: Recurring debt: Revised plan resolves the false-fallback side by not safelisting yt-dlp CDN hosts, but that intentionally diverges from the brief's strict download-domain-safelist requirement and leaves provenance/content checks as the only resolved-URL boundary.",
+        "resolution": "Revised the plan around the four critique gaps: a single shared `extract_external_urls` helper for stable external indexes, a two-tier source-domain/provenance download safety model, explicit attachment/embed/external kind branches everywhere refs are consumed, and a concrete structured publisher send-unit model that preserves suppressed output, counts, sent IDs, and fallback semantics."
+      },
+      {
+        "id": "DEBT-047",
+        "concern": "External URL indexing: Recurring debt: Plan still does not explicitly require a single shared deterministic extraction helper across prompt payload, read-tool payload, validation, rendering, and publish fallback resolution.",
+        "resolution": "Revised the plan around the four critique gaps: a single shared `extract_external_urls` helper for stable external indexes, a two-tier source-domain/provenance download safety model, explicit attachment/embed/external kind branches everywhere refs are consumed, and a concrete structured publisher send-unit model that preserves suppressed output, counts, sent IDs, and fallback semantics."
+      },
+      {
+        "id": "DEBT-048",
+        "concern": "External media ref callers: Recurring debt: Every downstream branch that currently treats non-attachment media refs as embeds must become an explicit attachment/embed/external branch.",
+        "resolution": "Revised the plan around the four critique gaps: a single shared `extract_external_urls` helper for stable external indexes, a two-tier source-domain/provenance download safety model, explicit attachment/embed/external kind branches everywhere refs are consumed, and a concrete structured publisher send-unit model that preserves suppressed output, counts, sent IDs, and fallback semantics."
+      },
+      {
+        "id": "callers-1",
+        "concern": "Find the callers of the changed function. What arguments do they actually pass? Does the fix handle all of them?: Grep found `normalize_media_ref` feeds `normalize_topic_document` and `block_media_refs`, and `block_media_refs` feeds both validation and `render_topic_publish_units`. Extending `normalize_media_ref` is the correct choke point, but the downstream attachment/embed assumptions must be updated in every caller that branches on `kind`.",
+        "resolution": "Revised the plan around the four critique gaps: a single shared `extract_external_urls` helper for stable external indexes, a two-tier source-domain/provenance download safety model, explicit attachment/embed/external kind branches everywhere refs are consumed, and a concrete structured publisher send-unit model that preserves suppressed output, counts, sent IDs, and fallback semantics."
+      },
+      {
+        "id": "callers-2",
+        "concern": "Find the callers of the changed function. What arguments do they actually pass? Does the fix handle all of them?: Grep found `_resolve_media_url_from_metadata` is called from `render_topic_publish_units`, `_summarize_source_media_counts`, and unit tests. The plan's rule to keep extraction out of this function is correct for purity, but adding external fallback URL lookup here will also affect source media counts unless the summary function deliberately excludes external refs or reports them separately.",
+        "resolution": "Revised the plan around the four critique gaps: a single shared `extract_external_urls` helper for stable external indexes, a two-tier source-domain/provenance download safety model, explicit attachment/embed/external kind branches everywhere refs are consumed, and a concrete structured publisher send-unit model that preserves suppressed output, counts, sent IDs, and fallback semantics."
+      },
+      {
+        "id": "FLAG-005",
+        "concern": "Layering: `extract_external_urls` is planned under `src/features/summarising`, but `src/common/storage_handler.py` is required to call it; that would make common storage depend on a feature module and risks circular or broad feature coupling.",
+        "resolution": "Plan Step 1 creates `src/features/summarising/external_media_resolver.py`; Step 5 requires `StorageHandler.get_topic_editor_message_context` in `src/common/storage_handler.py` to use the same helper. Existing imports show summarising imports common patterns, while `src/common/storage_handler.py` does not import `src.features.*`."
+      },
+      {
+        "id": "FLAG-006",
+        "concern": "Long-form platform policy: The plan safelists YouTube/Vimeo/Twitch for resolver processing while still leaving open whether those platforms should be downloadable or fallback-link-only, so executor behavior may be inconsistent for sources that commonly exceed Discord upload limits.",
+        "resolution": "Step 1 includes YouTube, Vimeo, and Twitch from the curator safelist; Step 2 processes safelisted originals; plan metadata still asks whether YouTube/Vimeo/Twitch should be downloadable or only fallback links."
+      },
+      {
+        "id": "correctness",
+        "concern": "Are the proposed changes technically correct?: Checked the unresolved YouTube/Vimeo/Twitch question against Step 1 and Step 2. The plan includes those curator safelist domains and says all safelisted originals may proceed to metadata resolution/download, but metadata still lists whether they should be downloadable or fallback-only as an open question; that ambiguity can make implementation behavior inconsistent for long-form platforms with practical Discord upload limits.",
+        "resolution": "Checked the unresolved YouTube/Vimeo/Twitch question against Step 1 and Step 2. The plan includes those curator safelist domains and says all safelisted originals may proceed to metadata resolution/download, but metadata still lists whether they should be downloadable or fallback-only as an open question; that ambiguity can make implementation behavior inconsistent for long-form platforms with practical Discord upload limits."
+      }
+    ],
+    "weighted_score": 0,
+    "weighted_history": [
+      18.0
+    ],
+    "plan_delta_from_previous": 86.86,
+    "recurring_critiques": [],
+    "scope_creep_flags": [],
+    "loop_summary": "Iteration 2. Weighted score trajectory: 18.0 -> 0. Plan deltas: 86.0%. Recurring critiques: 0. Resolved flags: 15. Open significant flags: 0.",
+    "debt_overlaps": [],
+    "escalated_debt_subsystems": []
+  },
+  "flag_resolutions": [],
+  "resolved_flag_ids": [],
+  "resolution_summary": "",
+  "reprompted": false
+}

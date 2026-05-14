@@ -645,6 +645,176 @@
       "resolved": false,
       "resolved_by": null,
       "resolved_at": null
+    },
+    {
+      "id": "DEBT-039",
+      "subsystem": "media-discovery-outside-the-initial-source-window",
+      "concern": "media discovery outside the initial source window: `get_message_context` currently returns no attachments, so vision tools that only resolve media from `context['messages']` will not work for media-bearing messages discovered by that read tool.",
+      "flag_ids": [
+        "FLAG-002"
+      ],
+      "plan_ids": [
+        "fresh-thoughtful-standard-20260514-0058"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-13T23:05:48Z",
+      "updated_at": "2026-05-13T23:05:48Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
+    },
+    {
+      "id": "DEBT-040",
+      "subsystem": "did-the-work-fully-address-the-issue-hints-user-notes-and-approved-plan-requirements",
+      "concern": "did the work fully address the issue hints, user notes, and approved plan requirements?: the brief requires source-payload enrichment to inline any existing media understandings. the plan only guarantees looping over known fast/best model presets unless a new all-understandings helper is added, so cached rows created by another valid model string or a future preset could be omitted from `_build_initial_user_payload` even though the data already exists.",
+      "flag_ids": [
+        "issue_hints"
+      ],
+      "plan_ids": [
+        "fresh-thoughtful-standard-20260514-0058"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-13T23:05:48Z",
+      "updated_at": "2026-05-13T23:05:48Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
+    },
+    {
+      "id": "DEBT-041",
+      "subsystem": "does-the-change-touch-all-locations-and-supporting-infrastructure",
+      "concern": "does the change touch all locations and supporting infrastructure?: checked archived message selection in `storage_handler.py`: `get_archived_messages_after_checkpoint` selects `*` and current compact live-context helpers include `attachments` and `embeds`, but `get_topic_editor_message_context` selects only text/reply/thread fields. the plan resolves vision tools from `context['messages']`, so initial-window attachments are covered; however, if an agent discovers a media-bearing message only through `get_message_context`, that returned context will not include attachments unless this read tool is also enriched.",
+      "flag_ids": [
+        "all_locations"
+      ],
+      "plan_ids": [
+        "fresh-thoughtful-standard-20260514-0058"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-13T23:05:48Z",
+      "updated_at": "2026-05-13T23:05:48Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
+    },
+    {
+      "id": "DEBT-042",
+      "subsystem": "external-media-host-safety",
+      "concern": "external media host safety: plan does not define a separate resolved-media cdn allowlist or provenance rule, creating a tradeoff between false fallbacks for legitimate yt-dlp cdn urls and unsafe arbitrary downloads.",
+      "flag_ids": [
+        "FLAG-002"
+      ],
+      "plan_ids": [
+        "implement-best-effort-20260514-1615"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-14T14:33:12Z",
+      "updated_at": "2026-05-14T14:33:12Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
+    },
+    {
+      "id": "DEBT-043",
+      "subsystem": "publish-integration",
+      "concern": "publish integration: plan says to send `discord.file` for resolved external media but does not specify the revised send loop/status model needed because the existing structured publisher flattens every unit into text and sends only `channel.send(message_text)`.",
+      "flag_ids": [
+        "FLAG-003"
+      ],
+      "plan_ids": [
+        "implement-best-effort-20260514-1615"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-14T14:33:12Z",
+      "updated_at": "2026-05-14T14:33:12Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
+    },
+    {
+      "id": "DEBT-044",
+      "subsystem": "external-url-indexing",
+      "concern": "external url indexing: plan relies on external url indexes across payload exposure, validation, rendering, and publishing but does not explicitly require all locations to use one shared deterministic extraction helper.",
+      "flag_ids": [
+        "FLAG-004"
+      ],
+      "plan_ids": [
+        "implement-best-effort-20260514-1615"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-14T14:33:12Z",
+      "updated_at": "2026-05-14T14:33:12Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
+    },
+    {
+      "id": "DEBT-045",
+      "subsystem": "are-the-proposed-changes-technically-correct",
+      "concern": "are the proposed changes technically correct?: checked the publish path in `src/features/summarising/topic_editor.py` around `_publish_topic`: structured topics are rendered into text/media units, flattened into strings, and then sent with `channel.send(message_text)`. the plan's step 8 says external resolver success should send `discord.file`, but it does not spell out how to preserve the current `flat_messages`, `media_indices`, suppressed-mode return shape, sent-id accounting, and partial-failure status when some units become file sends and some remain text fallback links.",
+      "flag_ids": [
+        "correctness-1"
+      ],
+      "plan_ids": [
+        "implement-best-effort-20260514-1615"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-14T14:33:12Z",
+      "updated_at": "2026-05-14T14:33:12Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
+    },
+    {
+      "id": "DEBT-046",
+      "subsystem": "are-the-proposed-changes-technically-correct",
+      "concern": "are the proposed changes technically correct?: checked the resolver safeguard proposal against likely yt-dlp output. the plan says to safelist the original url and the resolved media host \"where applicable\", but yt-dlp often returns signed cdn hosts such as reddit/twitter/instagram/tiktok media cdns that are not the same as the source domains; using the curator source-domain safelist for resolved media urls would cause valid links to fall back, while skipping resolved-host validation entirely would weaken the ssrf/download boundary.",
+      "flag_ids": [
+        "correctness-2"
+      ],
+      "plan_ids": [
+        "implement-best-effort-20260514-1615"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-14T14:33:12Z",
+      "updated_at": "2026-05-14T14:33:12Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
+    },
+    {
+      "id": "DEBT-047",
+      "subsystem": "search-for-related-code-that-handles-the-same-concept-is-the-reported-issue-a-symptom-of-something-broader",
+      "concern": "search for related code that handles the same concept. is the reported issue a symptom of something broader?: checked source-message hydration paths used by validation and publishing. the plan covers `_message_payload`, `get_topic_editor_message_context`, and `get_topic_editor_source_messages`, but it should require one shared extraction helper across all three paths; otherwise external url index assignment can drift between the initial payload, read-tool payload, validation, and publish-time fallback resolution.",
+      "flag_ids": [
+        "scope"
+      ],
+      "plan_ids": [
+        "implement-best-effort-20260514-1615"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-14T14:33:12Z",
+      "updated_at": "2026-05-14T14:33:12Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
+    },
+    {
+      "id": "DEBT-048",
+      "subsystem": "find-the-callers-of-the-changed-function-what-arguments-do-they-actually-pass-does-the-fix-handle-all-of-them",
+      "concern": "find the callers of the changed function. what arguments do they actually pass? does the fix handle all of them?: grep found `normalize_media_ref` is used directly by tests, `normalize_topic_document`, and `block_media_refs`; `block_media_refs` feeds both validation and `render_topic_publish_units`. extending `normalize_media_ref` to `kind: \"external\"` is the right choke point, but every downstream branch that currently treats non-attachment as embed must be made explicit or external refs will be validated/resolved through the embed path.",
+      "flag_ids": [
+        "callers"
+      ],
+      "plan_ids": [
+        "implement-best-effort-20260514-1615"
+      ],
+      "occurrence_count": 1,
+      "created_at": "2026-05-14T14:33:12Z",
+      "updated_at": "2026-05-14T14:33:12Z",
+      "resolved": false,
+      "resolved_by": null,
+      "resolved_at": null
     }
   ]
 }

@@ -1,0 +1,35 @@
+{
+  "receipt_id": "b09a1819-3c14-493b-a770-2f2eed015ff8",
+  "plan_id": "implement-best-effort-20260514-1615",
+  "phase": "gate",
+  "iteration": 2,
+  "attempt": 1,
+  "timestamp_utc": "2026-05-14T14:57:21.400975+00:00",
+  "profile_name": "thoughtful",
+  "agent": "hermes",
+  "agent_mode": "persistent",
+  "model_configured": "hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+  "model_actual": "accounts/fireworks/models/deepseek-v4-pro",
+  "session_id": "21cba18f-e0f7-4a08-965d-9621723c9a1c",
+  "megaplan_version": "0.8.1",
+  "schema_version": 1,
+  "prompt_hash_raw": "e774a9075f042f108be7364c11218240e9048de87d89b8e360e6767188da110e",
+  "prompt_hash_canonical": "a581dbfd04ec07a98cc94807121aaca0f85b34bb45db69aba05bde538a16d27a",
+  "canonicalization_version": 1,
+  "upstream_artifact_hashes": [
+    "sha256:65892d96fede068de94c978c64293b92b7a6decc9c187f7d9da27b93b15c4dae",
+    "sha256:ff7796d29b17aeb73c47b21bdaf30296366d728754b88fd3dbbae3218182a079"
+  ],
+  "cost_usd": 0.045767220000000004,
+  "duration_ms": 45418,
+  "prompt_tokens": 23831,
+  "completion_tokens": 1236,
+  "verdict": null,
+  "metrics": {
+    "recommendation": "PROCEED",
+    "blocking_flags_resolved": 0,
+    "blocking_flags_remaining": 0,
+    "override_forced": false
+  },
+  "scope_drift_severity": null
+}

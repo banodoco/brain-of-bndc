@@ -9,17 +9,21 @@ Anthropic or Discord dependencies.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import os
 import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import discord
 
 from src.features.summarising.live_update_prompts import DEFAULT_LIVE_UPDATE_MODEL
+from src.common.external_media import extract_external_urls  # T6: shared helper
 
+
+logger = logging.getLogger("DiscordBot")
 
 SIMILARITY_COLLISION_THRESHOLD = 0.55
 
@@ -28,6 +32,9 @@ READ_TOOL_NAMES = {
     "search_messages",
     "get_author_profile",
     "get_message_context",
+    "get_reply_chain",
+    "understand_image",
+    "understand_video",
 }
 
 WRITE_TOOL_NAMES = {
@@ -44,8 +51,15 @@ WRITE_TOOL_NAMES = {
 TOPIC_EDITOR_SYSTEM_PROMPT = """You are the BNDC live-update topic editor.
 
 Review the supplied archived Discord messages and active topics. Use read tools
-(search_topics, search_messages, get_author_profile, get_message_context) when
-you need more context. For every concrete development worth acting on, call a
+(search_topics, search_messages, get_author_profile, get_message_context,
+get_reply_chain) when you need more context.
+
+`search_messages` supports Discord-style filter params. Examples:
+- `search_messages(query="Wan 2.5", from_author_id=*** has=["video"], scope="archive", after="7d")` to find a user's recent video posts about a tool
+- `search_messages(in_channel_id=456, after="24h", has=["image"])` to scan a channel for recent generations
+- `get_reply_chain(message_id="789")` when a source message has `reply_to_message_id` set
+
+For every concrete development worth acting on, call a
 decision tool (post_simple_topic, post_sectioned_topic, watch_topic,
 update_topic_source_messages, discard_topic, record_observation).
 
@@ -58,6 +72,71 @@ REQUIRED to end the run: call the `finalize_run` tool exactly once, with
 considered, what you skipped and why, and what (if anything) you acted on
 (minimum 80 characters, full sentences). The run does not close until you
 call `finalize_run` — you cannot end the turn by emitting plain text alone.
+
+Media-bearing messages in the source payload may include pre-computed
+`media_understandings` (cached from prior runs, keyed by message and
+attachment index). These are surfaced in the ``media_understandings``
+list on each source message so you can read them for free without calling
+a vision tool. For uncached media that could affect editorial judgment,
+call `understand_image` or `understand_video`. Use ``kind`` to
+discriminate: skip ``workflow_graph`` items entirely; consider
+``generation`` items with ``aesthetic_quality >= 6`` for editorial
+framing; cite ``technical_signal`` and ``subject`` when writing about
+any media-backed topic.
+
+The runtime may auto-shortlist media posts that crossed the reaction threshold.
+These appear in `auto_shortlisted_media` and as active topics with
+`state="watching"`. For each shortlisted media item, explicitly decide what to
+do: use `get_message_context`, `get_reply_chain`, `search_messages`, and
+`understand_image`/`understand_video` when the media could be publishable; then
+publish it with a compact header/context if there is a real story, keep
+watching if signal is still forming, or call `discard_topic` if it is just a
+fun throwaway that is not worth the live feed. If it is publishable but mostly
+visual, the vision result may support a short, playful caption, but do not make
+up details not present in the source or understanding.
+
+## Structured Document Topics (post_sectioned_topic with blocks)
+
+For multi-source / multi-section topics, and for ANY topic that includes an
+image, video, embed, or external media link, use the new `blocks` array in
+`post_sectioned_topic` over `post_simple_topic` or the legacy `sections` field.
+Rules:
+
+1. **Every factual block gets its own sources.**  Each block object in the
+   `blocks` array must include a `source_message_ids` list citing the
+   Discord messages that support that specific block.  Do NOT rely on a
+   global topic-level `source_message_ids` for blocks — the global field is
+   a backwards-compat fallback only.
+
+2. **Media is attached to the relevant block.**  If a block discusses a
+   specific image or video from a source message, include it in that
+   block's `media_refs`.  Do NOT put all media in a global list — each
+   media ref lives with the block that owns it.
+
+3. **Canonical media-ref shape:** `{"message_id": "...", "kind": "attachment"|"embed"|"external", "index": N}`.
+   Shorthand `{"message_id": "...", "attachment_index": N}` is accepted and
+   normalised to `{"kind": "attachment", "index": N}` automatically.
+   `kind: "external"` refs point to off-platform media links (Reddit, X, etc.)
+   that are resolved best-effort — they are secondary to Discord attachments
+   and always bound to a specific block.
+
+4. **No global Sources footer.**  For structured (blocks) topics, source
+   citations are rendered inline as bracketed links (e.g. `[[1]](url)`)
+   next to the relevant block.  Do NOT append a "Sources: ..." line at the
+   end of the topic — the publisher handles citation rendering per block.
+
+5. **Block types:** Use `"type": "intro"` for the opening/intro block and
+   `"type": "section"` for each following section.  Each block must have
+   `"text"` (the prose content) and may have an optional `"title"`.
+
+6. **Media refs use message_id, not CDN URLs.**  Reference media by the
+   stable `{message_id, kind, index}` tuple — do NOT copy raw CDN URLs.
+   The publisher resolves media URLs at publish time from stored message
+   metadata.
+
+Legacy `sections` field is still accepted for backward compatibility; when
+used the global `source_message_ids` list applies to all sections equally,
+and no per-section media refs are available.
 """
 
 
@@ -77,17 +156,30 @@ TOPIC_EDITOR_TOOLS: List[Dict[str, Any]] = [
     },
     {
         "name": "search_messages",
-        "description": "Search archived Discord messages in the current source window.",
+        "description": (
+            "Search Discord messages. Filter parameters are AND-combined; any combination is valid (all are optional). "
+            "Use `scope` to choose: 'window' (current source-message window, cheap, default) or 'archive' (full discord_messages, broader context). "
+            "Use this when you need 'from:author has:video after:Xd' style queries to ground editorial framing."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "query": {"type": "string"},
-                "channel_id": {"type": "integer"},
-                "author_id": {"type": "integer"},
-                "hours_back": {"type": "integer"},
-                "limit": {"type": "integer"},
+                "query": {"type": "string", "description": "free-text content match (ILIKE)"},
+                "from_author_id": {"type": "integer", "description": "equivalent to Discord 'from:' — restrict to messages this author wrote"},
+                "in_channel_id": {"type": "integer", "description": "equivalent to Discord 'in:' — restrict to one channel"},
+                "mentions_author_id": {"type": "integer", "description": "equivalent to Discord 'mentions:' — restrict to messages that mention this author"},
+                "has": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["image", "video", "audio", "link", "embed", "file"]},
+                    "description": "equivalent to Discord 'has:' — filter by attachment/embed kind. Array combines AND.",
+                },
+                "after": {"type": "string", "description": "lower-bound time. Accepts ISO timestamp OR relative like '24h', '7d', '30d'"},
+                "before": {"type": "string", "description": "upper-bound time. Same format as after"},
+                "is_reply": {"type": "boolean", "description": "if true, only messages that are replies (reply_to_message_id IS NOT NULL)"},
+                "limit": {"type": "integer", "description": "default 20, max 50"},
+                "scope": {"type": "string", "enum": ["window", "archive"], "description": "default 'window'"},
             },
-            "required": ["query"],
+            "required": [],
         },
     },
     {
@@ -109,8 +201,24 @@ TOPIC_EDITOR_TOOLS: List[Dict[str, Any]] = [
         },
     },
     {
+        "name": "get_reply_chain",
+        "description": "Walk the reply chain backwards from a message. Returns ancestor messages root-first. Use when a generation or post is a reply and you want to understand what it's responding to.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message_id": {"type": "string"},
+                "max_depth": {"type": "integer", "description": "default 5, max 15"},
+            },
+            "required": ["message_id"],
+        },
+    },
+    {
         "name": "post_simple_topic",
-        "description": "Publish a single-author, one or two source-message topic.",
+        "description": (
+            "Publish a text-only single-author, one or two source-message topic. "
+            "Do not use this for images, videos, embeds, or media refs; use "
+            "post_sectioned_topic with blocks[].media_refs instead."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -128,7 +236,18 @@ TOPIC_EDITOR_TOOLS: List[Dict[str, Any]] = [
     },
     {
         "name": "post_sectioned_topic",
-        "description": "Publish a multi-source or multi-contributor topic.",
+        "description": (
+            "Publish a multi-source or multi-contributor topic. Prefer the new "
+            "`blocks` array for structured document topics; `sections` is still "
+            "accepted for backwards compatibility. Every factual block MUST include "
+            "its own `source_message_ids`; media (images, video, embeds) MUST be "
+            "attached to the relevant block via `media_refs`, not to a global list. "
+            "Media refs use a stable reference shape: "
+            "`{\"message_id\": \"...\", \"kind\": \"attachment\"|\"embed\", \"index\": N}` "
+            "(shorthand `{\"message_id\": \"...\", \"attachment_index\": N}` is also "
+            "accepted). Do NOT include a global Sources footer — citations are "
+            "rendered inline per block."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -136,12 +255,39 @@ TOPIC_EDITOR_TOOLS: List[Dict[str, Any]] = [
                 "headline": {"type": "string"},
                 "body": {"type": "string"},
                 "sections": {"type": "array", "items": {"type": "object"}},
+                "blocks": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "type": {"type": "string", "enum": ["intro", "section"]},
+                            "title": {"type": "string"},
+                            "text": {"type": "string"},
+                            "source_message_ids": {"type": "array", "items": {"type": "string"}},
+                            "media_refs": {
+                                "description": "Media references for this block. Use kind='attachment'/'embed' for Discord-hosted media (preferred, indexed first) and kind='external' for off-platform links (Reddit, X, etc.) that are resolved best-effort. External refs are always block-bound and secondary.",
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "message_id": {"type": "string"},
+                                        "kind": {"type": "string", "enum": ["attachment", "embed", "external"]},
+                                        "index": {"type": "integer"},
+                                        "attachment_index": {"type": "integer"},
+                                    },
+                                    "required": ["message_id"],
+                                },
+                            },
+                        },
+                        "required": ["type", "text"],
+                    },
+                },
                 "source_message_ids": {"type": "array", "items": {"type": "string"}},
                 "parent_topic_id": {"type": "string"},
                 "notes": {"type": "string"},
                 "override_collisions": {"type": "array", "items": {"type": "object"}},
             },
-            "required": ["proposed_key", "headline", "body", "sections", "source_message_ids"],
+            "required": ["proposed_key", "headline", "body", "source_message_ids"],
         },
     },
     {
@@ -193,6 +339,41 @@ TOPIC_EDITOR_TOOLS: List[Dict[str, Any]] = [
                 "reason": {"type": "string"},
             },
             "required": ["source_message_ids", "observation_kind", "reason"],
+        },
+    },
+    {
+        "name": "understand_image",
+        "description": (
+            "Analyze an image attachment from a source message. Returns structured "
+            "JSON with kind, subject, technical_signal, aesthetic_quality (0-10), "
+            "and discriminator_notes. Cached results are reused across runs."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message_id": {"type": "integer"},
+                "attachment_index": {"type": "integer", "default": 0},
+                "mode": {"type": "string", "enum": ["fast", "best"], "default": "fast"},
+            },
+            "required": ["message_id"],
+        },
+    },
+    {
+        "name": "understand_video",
+        "description": (
+            "Analyze a video attachment from a source message. Returns structured "
+            "JSON with summary, visual_read, audio_read, edit_value, highlight_score, "
+            "energy, pacing, production_quality, boundary_notes, cautions, and kind. "
+            "Cached results are reused across runs."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message_id": {"type": "integer"},
+                "attachment_index": {"type": "integer", "default": 0},
+                "mode": {"type": "string", "enum": ["fast", "best"], "default": "fast"},
+            },
+            "required": ["message_id"],
         },
     },
     {
@@ -250,6 +431,8 @@ class TopicEditor:
         self.source_limit = int(source_limit or os.getenv("TOPIC_EDITOR_SOURCE_LIMIT", "200"))
         self.publishing_enabled = os.getenv("TOPIC_EDITOR_PUBLISHING_ENABLED", "false").lower() == "true"
         self.trace_channel_id = os.getenv("LIVE_UPDATE_TRACE_CHANNEL_ID")
+        self.media_shortlist_min_reactions = self._env_int("TOPIC_EDITOR_MEDIA_SHORTLIST_MIN_REACTIONS", 5)
+        self.media_shortlist_limit = self._env_int("TOPIC_EDITOR_MEDIA_SHORTLIST_LIMIT", 5)
 
     async def run_once(self, trigger: str = "scheduled") -> Dict[str, Any]:
         if not self.db:
@@ -281,6 +464,19 @@ class TopicEditor:
         if not run:
             return {"status": "skipped", "reason": "lease_not_acquired", "checkpoint_key": checkpoint_key}
         run_id = str(run.get("run_id"))
+        logger.info(
+            "TopicEditor run acquired: run_id=%s env=%s guild=%s live_channel=%s checkpoint=%s publishing=%s model=%s",
+            run_id,
+            self.environment,
+            guild_id,
+            live_channel_id,
+            {
+                "last_message_id": (checkpoint or {}).get("last_message_id"),
+                "last_message_created_at": (checkpoint or {}).get("last_message_created_at"),
+            },
+            self.publishing_enabled,
+            self.model,
+        )
 
         metadata: Dict[str, Any] = {
             "tool_calls": [],
@@ -291,6 +487,11 @@ class TopicEditor:
             # Cold-start no longer short-circuits to zero — the seeded checkpoint
             # is anchored to (lookback_minutes ago), so the same query returns
             # the last interval's worth of messages.
+            logger.info(
+                "TopicEditor fetching source messages: run_id=%s source_limit=%s",
+                run_id,
+                self.source_limit,
+            )
             messages = self.db.get_archived_messages_after_checkpoint(
                 checkpoint=checkpoint,
                 guild_id=guild_id,
@@ -298,13 +499,53 @@ class TopicEditor:
                 limit=self.source_limit,
                 exclude_author_ids=self._excluded_author_ids(),
             )
-            active_topics = self.db.get_topics(
+            logger.info(
+                "TopicEditor fetched source messages: run_id=%s count=%s",
+                run_id,
+                len(messages or []),
+            )
+            logger.info("TopicEditor fetching known topics: run_id=%s", run_id)
+            known_topics = self.db.get_topics(
                 guild_id=guild_id,
-                states=["posted", "watching"],
-                limit=100,
+                states=["posted", "watching", "discarded"],
+                limit=300,
                 environment=self.environment,
             )
+            logger.info(
+                "TopicEditor fetched known topics: run_id=%s count=%s",
+                run_id,
+                len(known_topics or []),
+            )
+            auto_shortlisted_media = self._auto_shortlist_media_messages(
+                messages,
+                known_topics,
+                run_id=run_id,
+                guild_id=guild_id,
+            )
+            active_topics = [
+                topic for topic in known_topics
+                if topic.get("state") in {"posted", "watching"}
+            ]
+            active_keys = {str(topic.get("canonical_key") or "") for topic in active_topics}
+            for entry in auto_shortlisted_media:
+                topic = entry.get("topic")
+                key = str((topic or {}).get("canonical_key") or "")
+                if topic and key not in active_keys:
+                    active_topics.append(topic)
+                    active_keys.add(key)
+            logger.info(
+                "TopicEditor active topic set ready: run_id=%s active=%s auto_shortlisted=%s",
+                run_id,
+                len(active_topics),
+                len(auto_shortlisted_media),
+            )
+            logger.info("TopicEditor fetching aliases: run_id=%s", run_id)
             aliases = self.db.get_topic_aliases(guild_id=guild_id, environment=self.environment)
+            logger.info(
+                "TopicEditor fetched aliases: run_id=%s count=%s",
+                run_id,
+                len(aliases or []),
+            )
             if not messages:
                 updates = self._run_updates(
                     checkpoint_before=checkpoint,
@@ -327,7 +568,11 @@ class TopicEditor:
 
             # --- Agent loop with 100-turn budget ---
             max_turns = int(os.getenv("TOPIC_EDITOR_MAX_TURNS", "100"))
-            initial_payload = self._build_initial_user_payload(messages, active_topics)
+            initial_payload = self._build_initial_user_payload(
+                messages,
+                active_topics,
+                auto_shortlisted_media=auto_shortlisted_media,
+            )
             messages_arg: List[Dict[str, Any]] = [
                 {"role": "user", "content": [{"type": "text", "text": repr(initial_payload)}]}
             ]
@@ -343,6 +588,8 @@ class TopicEditor:
                 "observation_count": 0,
                 "created_topics": [],
                 "finalize": None,
+                "vision_budget_usd": self._env_float("TOPIC_EDITOR_VISION_BUDGET_PER_RUN", 1.0),
+                "vision_cost_usd": 0.0,
             }
             tool_calls: List[Dict[str, Any]] = []
             outcomes: List[Dict[str, Any]] = []
@@ -358,8 +605,21 @@ class TopicEditor:
             max_cost_usd = self._env_float("TOPIC_EDITOR_MAX_COST_USD", 5.0)
             max_tokens = self._env_int("TOPIC_EDITOR_MAX_TOKENS", 500000)
             for turn_count in range(1, max_turns + 1):
+                logger.info(
+                    "TopicEditor invoking LLM: run_id=%s turn=%s messages=%s",
+                    run_id,
+                    turn_count,
+                    len(messages_arg),
+                )
                 response = await self._invoke_anthropic(messages_arg)
                 turn_tool_calls = self._extract_tool_calls(response)
+                logger.info(
+                    "TopicEditor LLM turn complete: run_id=%s turn=%s tool_calls=%s tools=%s",
+                    run_id,
+                    turn_count,
+                    len(turn_tool_calls),
+                    [call.get("name") for call in turn_tool_calls],
+                )
                 turn_reasoning = self._extract_reasoning_text(response)
                 if turn_reasoning:
                     text_chunks.append(turn_reasoning)
@@ -476,6 +736,17 @@ class TopicEditor:
             metadata["source_message_timestamps"] = [m.get("created_at") for m in messages if m.get("created_at")]
             metadata["source_channel_counts"] = self._tally_channels(messages)
             metadata["active_topics_count"] = len(active_topics)
+            metadata["auto_shortlisted_media"] = [
+                {
+                    "topic_id": entry.get("topic_id"),
+                    "message_id": entry.get("message_id"),
+                    "reaction_count": entry.get("reaction_count"),
+                    "media_ref": entry.get("media_ref"),
+                    "headline": entry.get("headline"),
+                    "status": entry.get("status"),
+                }
+                for entry in auto_shortlisted_media
+            ]
 
             publish_results = await self._publish_created_topics(dispatcher_context["created_topics"])
             metadata["publish_results"] = publish_results
@@ -539,24 +810,112 @@ class TopicEditor:
             tools=TOPIC_EDITOR_TOOLS,
         )
 
+    # Known model presets for enrichment — image models for image understanding,
+    # video models for video understanding.  We loop over all four so any cached
+    # row produced by the dispatcher is surfaced in the initial payload.
+    _IMAGE_MODEL_PRESETS = ("gpt-4o-mini", "gpt-5.4")
+    _VIDEO_MODEL_PRESETS = ("gemini-2.5-flash", "gemini-2.5-pro")
+    _ALL_MODEL_PRESETS = _IMAGE_MODEL_PRESETS + _VIDEO_MODEL_PRESETS
+
     def _build_initial_user_payload(
         self,
         messages: Sequence[Dict[str, Any]],
         active_topics: Sequence[Dict[str, Any]],
+        auto_shortlisted_media: Optional[Sequence[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
+        source_messages: List[Dict[str, Any]] = []
+        for message in messages:
+            payload = self._message_payload(message)
+            payload["media_understandings"] = self._enrich_media_understandings(message)
+            source_messages.append(payload)
         return {
-            "source_messages": [self._message_payload(message) for message in messages],
+            "source_messages": source_messages,
             "active_topics": [
                 {
                     "topic_id": topic.get("topic_id"),
                     "canonical_key": topic.get("canonical_key"),
                     "headline": topic.get("headline"),
                     "state": topic.get("state"),
+                    "summary": topic.get("summary"),
+                    "revisit_at": topic.get("revisit_at"),
+                    "source_message_ids": topic.get("source_message_ids") or [],
                     "aliases": topic.get("aliases") or [],
                 }
                 for topic in active_topics
             ],
+            "auto_shortlisted_media": [
+                {
+                    "topic_id": item.get("topic_id"),
+                    "message_id": item.get("message_id"),
+                    "reaction_count": item.get("reaction_count"),
+                    "headline": item.get("headline"),
+                    "reason": item.get("reason"),
+                    "media_ref": item.get("media_ref"),
+                    "next_action": (
+                        "Inspect with message/reply/search context plus understand_image or "
+                        "understand_video if not already cached; then publish, keep watching, "
+                        "or discard_topic."
+                    ),
+                }
+                for item in auto_shortlisted_media or []
+            ],
         }
+
+    def _enrich_media_understandings(
+        self, message: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """Best-effort: query cache for known model presets.
+
+        Returns a list of understanding dicts (one per cached row).
+        Missing rows produce an empty list — never a failure.
+        """
+        message_id = message.get("message_id")
+        if message_id is None:
+            return []
+
+        attachments = TopicEditor._normalize_attachment_list(message.get("attachments"))
+        if not attachments:
+            return []
+
+        results: List[Dict[str, Any]] = []
+        for idx in range(len(attachments)):
+            for model in self._ALL_MODEL_PRESETS:
+                try:
+                    row = self.db.get_message_media_understanding(
+                        message_id, idx, model
+                    )
+                except Exception:
+                    continue  # best-effort — skip this preset
+                if row is None:
+                    continue
+
+                understanding = row.get("understanding") or {}
+                item: Dict[str, Any] = {
+                    "attachment_index": idx,
+                    "kind": understanding.get("kind"),
+                    "subject": understanding.get("subject"),
+                    "technical_signal": understanding.get("technical_signal"),
+                    "aesthetic_quality": understanding.get("aesthetic_quality"),
+                    "model": model,
+                }
+                # Attach video-specific fields when present (Gemini models).
+                for vf in (
+                    "summary",
+                    "visual_read",
+                    "audio_read",
+                    "edit_value",
+                    "highlight_score",
+                    "energy",
+                    "pacing",
+                    "production_quality",
+                    "boundary_notes",
+                    "cautions",
+                ):
+                    if vf in understanding:
+                        item[vf] = understanding[vf]
+                results.append(item)
+
+        return results
 
     def _extract_reasoning_text(self, response: Any) -> str:
         chunks: List[str] = []
@@ -580,7 +939,7 @@ class TopicEditor:
             return f"tool={name} status=tool_error error={err}"
         if outcome_name == "idempotent_replay":
             return f"tool={name} status=idempotent_replay (already executed in this run)"
-        if name in {"search_topics", "search_messages", "get_author_profile", "get_message_context"}:
+        if name in READ_TOOL_NAMES:
             result = outcome.get("result")
             encoded = json.dumps(result, default=str, ensure_ascii=False, separators=(",", ":"))
             if len(encoded) > 2000:
@@ -603,10 +962,24 @@ class TopicEditor:
         out: List[Dict[str, Any]] = []
         for block in getattr(response, "content", []) or []:
             block_type = getattr(block, "type", None) or (block.get("type") if isinstance(block, dict) else None)
+            if block_type == "openai_assistant_message":
+                raw_message = getattr(block, "message", None) or (block.get("message") if isinstance(block, dict) else None)
+                if isinstance(raw_message, dict):
+                    return [{"type": "openai_assistant_message", "message": raw_message}]
+
+        for block in getattr(response, "content", []) or []:
+            block_type = getattr(block, "type", None) or (block.get("type") if isinstance(block, dict) else None)
             if block_type == "text":
                 text = getattr(block, "text", None) or (block.get("text") if isinstance(block, dict) else "")
                 if text:
                     out.append({"type": "text", "text": text})
+            elif block_type == "reasoning_content":
+                reasoning_content = (
+                    getattr(block, "reasoning_content", None)
+                    or (block.get("reasoning_content") if isinstance(block, dict) else "")
+                )
+                if reasoning_content:
+                    out.append({"type": "reasoning_content", "reasoning_content": reasoning_content})
             elif block_type == "tool_use":
                 out.append(
                     {
@@ -691,14 +1064,37 @@ class TopicEditor:
                     limit=10,
                 )
             elif name == "search_messages":
-                result = self._search_source_messages(
-                    context.get("messages") or [],
-                    query=args.get("query") or "",
-                    channel_id=args.get("channel_id"),
-                    author_id=args.get("author_id"),
-                    hours_back=int(args.get("hours_back") or 24),
-                    limit=int(args.get("limit") or 20),
-                )
+                scope = str(args.get("scope") or "window").lower()
+                if scope == "window":
+                    result = self._search_window_messages(
+                        context.get("messages") or [],
+                        query=args.get("query"),
+                        from_author_id=args.get("from_author_id"),
+                        in_channel_id=args.get("in_channel_id"),
+                        mentions_author_id=args.get("mentions_author_id"),
+                        has=args.get("has"),
+                        after=args.get("after"),
+                        before=args.get("before"),
+                        is_reply=args.get("is_reply"),
+                        limit=int(args.get("limit") if args.get("limit") is not None else 20),
+                    )
+                elif scope == "archive":
+                    result = self.db.search_messages_unified(
+                        scope="archive",
+                        guild_id=context.get("guild_id"),
+                        environment=self.environment,
+                        query=args.get("query"),
+                        from_author_id=args.get("from_author_id"),
+                        in_channel_id=args.get("in_channel_id"),
+                        mentions_author_id=args.get("mentions_author_id"),
+                        has=args.get("has"),
+                        after=args.get("after"),
+                        before=args.get("before"),
+                        is_reply=args.get("is_reply"),
+                        limit=int(args.get("limit") if args.get("limit") is not None else 20),
+                    )
+                else:
+                    raise ValueError(f"Unknown scope: {scope}")
             elif name == "get_author_profile":
                 result = self.db.get_topic_editor_author_profile(
                     args.get("author_id"),
@@ -712,54 +1108,403 @@ class TopicEditor:
                     environment=self.environment,
                     limit=10,
                 )
+            elif name == "understand_image":
+                return self._dispatch_understand_media(call, context, "image")
+            elif name == "understand_video":
+                return self._dispatch_understand_media(call, context, "video")
+            elif name == "get_reply_chain":
+                max_depth = max(1, min(int(args.get("max_depth") or 5), 15))
+                result = self.db.get_reply_chain(
+                    message_id=str(args.get("message_id") or ""),
+                    guild_id=context.get("guild_id"),
+                    environment=self.environment,
+                    max_depth=max_depth,
+                )
             else:
                 result = None
             return {"tool_call_id": call["id"], "tool": name, "outcome": "read", "result": result}
         except Exception as exc:
             return {"tool_call_id": call.get("id"), "tool": name, "outcome": "tool_error", "error": str(exc)}
 
-    def _search_source_messages(
+    # ------------------------------------------------------------------
+    # Image / video understanding tool dispatcher
+    # ------------------------------------------------------------------
+
+    # Fixed estimated costs in USD (deducted from the per-run vision budget
+    # only when an actual API call is made, never on cache hits).
+    _VISION_COST_IMAGE = 0.01
+    _VISION_COST_VIDEO = 0.05
+
+    # mode → model mapping
+    _IMAGE_MODEL_MAP = {"fast": "gpt-4o-mini", "best": "gpt-5.4"}
+    _VIDEO_MODEL_MAP = {"fast": "gemini-2.5-flash", "best": "gemini-2.5-pro"}
+
+    def _dispatch_understand_media(
+        self, call: Dict[str, Any], context: Dict[str, Any], media_kind: str
+    ) -> Dict[str, Any]:
+        """Shared dispatch for understand_image / understand_video.
+
+        (a) Resolve source message from context['messages'] by message_id.
+        (b) Resolve attachment URL.
+        (c) Download bytes via sync ``requests.get(url)``.
+        (d) Compute sha256.
+        (e) Check PK cache → hash cache → budget.
+        (f) Budget exceeded → return ``{outcome: budget_exceeded}``.
+        (g) Call vision_clients.describe_image / describe_video.
+        (h) Persist result, return compact JSON.
+        """
+        import requests
+
+        from src.common.vision_clients import describe_image, describe_video, _sha256
+
+        name = call["name"]
+        args = call.get("input") or {}
+        message_id = args.get("message_id")
+        attachment_index = int(args.get("attachment_index") or 0)
+        mode = args.get("mode") or "fast"
+
+        # (a) resolve source message
+        messages = context.get("messages") or []
+        source = None
+        for msg in messages:
+            if str(msg.get("message_id")) == str(message_id):
+                source = msg
+                break
+        if source is None:
+            try:
+                resolved = self.db.get_topic_editor_source_messages(
+                    [str(message_id)],
+                    guild_id=context.get("guild_id"),
+                    environment=self.environment,
+                    limit=1,
+                )
+            except Exception:
+                resolved = []
+            if resolved:
+                source = resolved[0]
+            else:
+                return {
+                    "tool_call_id": call["id"],
+                    "tool": name,
+                    "outcome": "tool_error",
+                    "error": f"message_id={message_id} not found in source window or archive",
+                }
+
+        # (b) resolve attachment URL
+        attachments = TopicEditor._normalize_attachment_list(source.get("attachments"))
+        if attachment_index < 0 or attachment_index >= len(attachments):
+            return {
+                "tool_call_id": call["id"],
+                "tool": name,
+                "outcome": "tool_error",
+                "error": (
+                    f"attachment_index={attachment_index} out of range "
+                    f"(message has {len(attachments)} attachment(s))"
+                ),
+            }
+        attachment = attachments[attachment_index]
+        media_url = attachment.get("url") or attachment.get("proxy_url") or ""
+        if not media_url:
+            return {
+                "tool_call_id": call["id"],
+                "tool": name,
+                "outcome": "tool_error",
+                "error": f"attachment {attachment_index} has no url field",
+            }
+
+        # model preset
+        if media_kind == "image":
+            model = self._IMAGE_MODEL_MAP.get(mode, "gpt-4o-mini")
+        else:
+            model = self._VIDEO_MODEL_MAP.get(mode, "gemini-2.5-flash")
+
+        # (e) PK cache check
+        try:
+            cached = self.db.get_message_media_understanding(message_id, attachment_index, model)
+        except Exception:
+            cached = None
+        if cached is not None:
+            understanding = cached.get("understanding") or {}
+            return {
+                "tool_call_id": call["id"],
+                "tool": name,
+                "outcome": "read",
+                "result": {"cached": True, "understanding": understanding},
+            }
+
+        # (c) download bytes via sync requests.get
+        try:
+            resp = requests.get(media_url, timeout=30)
+            resp.raise_for_status()
+            media_bytes = resp.content
+        except Exception as exc:
+            return {
+                "tool_call_id": call["id"],
+                "tool": name,
+                "outcome": "tool_error",
+                "error": f"failed to download media: {exc}",
+            }
+
+        # (d) compute sha256
+        content_hash = _sha256(media_bytes)
+
+        # (e) hash cache check
+        try:
+            cached_by_hash = self.db.get_message_media_understanding_by_hash(content_hash, model=model)
+        except Exception:
+            cached_by_hash = None
+        if cached_by_hash is not None:
+            understanding = cached_by_hash.get("understanding") or {}
+            # Persist the row for this (message_id, attachment_index) so future
+            # PK lookups hit immediately, without another download.
+            try:
+                self.db.upsert_message_media_understanding({
+                    "message_id": message_id,
+                    "attachment_index": attachment_index,
+                    "media_url": media_url,
+                    "media_kind": media_kind,
+                    "content_hash": content_hash,
+                    "model": model,
+                    "understanding": understanding,
+                })
+            except Exception:
+                pass  # best-effort write
+            return {
+                "tool_call_id": call["id"],
+                "tool": name,
+                "outcome": "read",
+                "result": {"cached": True, "dedup": True, "understanding": understanding},
+            }
+
+        # (f) budget check
+        budget = float(context.get("vision_budget_usd") or 1.0)
+        spent = float(context.get("vision_cost_usd") or 0.0)
+        cost_estimate = self._VISION_COST_IMAGE if media_kind == "image" else self._VISION_COST_VIDEO
+        if spent + cost_estimate > budget:
+            return {
+                "tool_call_id": call["id"],
+                "tool": name,
+                "outcome": "budget_exceeded",
+                "error": (
+                    f"vision budget spent ${spent:.2f} of ${budget:.2f}; "
+                    f"estimated cost ${cost_estimate:.2f} would exceed cap"
+                ),
+            }
+
+        # (g) call vision API
+        try:
+            if media_kind == "image":
+                understanding = describe_image(media_bytes, model)
+            else:
+                understanding = describe_video(media_bytes, model)
+        except Exception as exc:
+            return {
+                "tool_call_id": call["id"],
+                "tool": name,
+                "outcome": "tool_error",
+                "error": f"vision API call failed: {exc}",
+            }
+
+        # deduct cost
+        context["vision_cost_usd"] = round(spent + cost_estimate, 4)
+
+        # (h) persist and return
+        try:
+            self.db.upsert_message_media_understanding({
+                "message_id": message_id,
+                "attachment_index": attachment_index,
+                "media_url": media_url,
+                "media_kind": media_kind,
+                "content_hash": content_hash,
+                "model": model,
+                "understanding": understanding,
+            })
+        except Exception:
+            pass  # best-effort write; still return the understanding
+
+        return {
+            "tool_call_id": call["id"],
+            "tool": name,
+            "outcome": "read",
+            "result": {"cached": False, "understanding": understanding},
+        }
+
+    def _parse_time_bound(self, value: Optional[str], default: datetime) -> datetime:
+        """Parse a time-bound string: ISO timestamp or relative like '24h', '7d'.
+
+        Returns the parsed datetime or *default* if value is None.
+        Raises ValueError for malformed input (surfaces as tool_error).
+        """
+        if value is None:
+            return default
+        # Try ISO timestamp first
+        try:
+            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except (ValueError, TypeError):
+            pass
+        # Try relative pattern: number + h/d
+        m = re.match(r'^(\d+)\s*([hd])$', str(value).strip().lower())
+        if m:
+            amount = int(m.group(1))
+            unit = m.group(2)
+            if unit == 'h':
+                return datetime.now(timezone.utc) - timedelta(hours=amount)
+            else:
+                return datetime.now(timezone.utc) - timedelta(days=amount)
+        raise ValueError(f"Invalid time format: {value}")
+
+    def _search_window_messages(
         self,
         messages: Sequence[Dict[str, Any]],
         *,
-        query: str,
-        channel_id: Optional[Any] = None,
-        author_id: Optional[Any] = None,
-        hours_back: int = 24,
+        query: Optional[str] = None,
+        from_author_id: Optional[Any] = None,
+        in_channel_id: Optional[Any] = None,
+        mentions_author_id: Optional[Any] = None,
+        has: Optional[List[str]] = None,
+        after: Optional[str] = None,
+        before: Optional[str] = None,
+        is_reply: Optional[bool] = None,
         limit: int = 20,
     ) -> List[Dict[str, Any]]:
-        needle = str(query or "").lower()
-        safe_limit = max(1, min(int(limit or 20), 10))
-        since = datetime.now(timezone.utc) - timedelta(hours=max(1, int(hours_back or 24)))
+        """Search in-memory source messages with AND-combined Discord-style filters."""
+        # --- helpers --------------------------------------------------
+        _IMAGE_EXT = {'.png', '.jpg', '.jpeg', '.gif', '.webp'}
+        _VIDEO_EXT = {'.mp4', '.mov', '.webm', '.mkv'}
+        _AUDIO_EXT = {'.mp3', '.wav', '.ogg', '.flac'}
+
+        def _ext(filename: str) -> str:
+            return (os.path.splitext(filename or '')[1] or '').lower()
+
+        def _is_media_kind(attachments: List[Dict[str, Any]], kind: str) -> bool:
+            for a in attachments:
+                ct = str(a.get('content_type') or '').lower()
+                fn = str(a.get('filename') or '').lower()
+                if kind == 'image' and (ct.startswith('image/') or _ext(fn) in _IMAGE_EXT):
+                    return True
+                if kind == 'video' and (ct.startswith('video/') or _ext(fn) in _VIDEO_EXT):
+                    return True
+                if kind == 'audio' and (ct.startswith('audio/') or _ext(fn) in _AUDIO_EXT):
+                    return True
+                if kind == 'file':
+                    return True  # any attachment exists
+            return False
+
+        # --- defaults -------------------------------------------------
+        needle = str(query or '').lower()
+        safe_limit = max(1, min(int(limit) if limit is not None else 20, 50))
+        has_set = set(has or [])
+
+        # Parse time bounds
+        far_past = datetime(2000, 1, 1, tzinfo=timezone.utc)
+        far_future = datetime(2099, 12, 31, tzinfo=timezone.utc)
+        after_dt = self._parse_time_bound(after, far_past)
+        before_dt = self._parse_time_bound(before, far_future)
+
         rows: List[Dict[str, Any]] = []
         for message in messages or []:
-            if channel_id is not None and str(message.get("channel_id")) != str(channel_id):
+            # --- from_author_id filter ---
+            if from_author_id is not None and str(message.get('author_id')) != str(from_author_id):
                 continue
-            if author_id is not None and str(message.get("author_id")) != str(author_id):
+
+            # --- in_channel_id filter ---
+            if in_channel_id is not None and str(message.get('channel_id')) != str(in_channel_id):
                 continue
-            if not self._message_is_since(message.get("created_at"), since):
-                continue
-            content = str(message.get("content") or "")
+
+            # --- mentions_author_id filter ---
+            if mentions_author_id is not None:
+                content = str(message.get('content') or '')
+                if not re.search(rf'<@!?{mentions_author_id}>', content):
+                    continue
+
+            # --- content query filter ---
+            content = str(message.get('content') or '')
             if needle and needle not in content.lower():
                 continue
-            author = message.get("author_context_snapshot") or {}
-            rows.append(
-                {
-                    "message_id": str(message.get("message_id")),
-                    "channel_name": message.get("channel_name"),
-                    "author_name": (
-                        message.get("author_name")
-                        or author.get("server_nick")
-                        or author.get("global_name")
-                        or author.get("display_name")
-                        or author.get("username")
-                    ),
-                    "content_preview": self._cap_text(content, 200),
-                    "created_at": message.get("created_at"),
-                }
-            )
+
+            # --- has filter ---
+            if has_set:
+                atts = self._normalize_attachment_list(message.get('attachments'))
+                embs = self._normalize_attachment_list(message.get('embeds'))
+                filter_pass = True
+                for h in has_set:
+                    if h == 'image' and not _is_media_kind(atts, 'image'):
+                        filter_pass = False; break
+                    if h == 'video' and not _is_media_kind(atts, 'video'):
+                        filter_pass = False; break
+                    if h == 'audio' and not _is_media_kind(atts, 'audio'):
+                        filter_pass = False; break
+                    if h == 'link' and not ('http://' in content or 'https://' in content):
+                        filter_pass = False; break
+                    if h == 'embed' and len(embs) == 0:
+                        filter_pass = False; break
+                    if h == 'file' and len(atts) == 0:
+                        filter_pass = False; break
+                if not filter_pass:
+                    continue
+
+            # --- after / before filter ---
+            created = message.get('created_at')
+            if created:
+                try:
+                    text = str(created).replace('Z', '+00:00')
+                    dt = datetime.fromisoformat(text)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    if dt < after_dt or dt > before_dt:
+                        continue
+                except (ValueError, TypeError):
+                    pass  # If we can't parse, include the message
+
+            # --- is_reply filter ---
+            if is_reply is not None:
+                has_reply = bool(message.get('reply_to_message_id') or message.get('reference_id'))
+                if is_reply and not has_reply:
+                    continue
+                if not is_reply and has_reply:
+                    continue
+
+            # --- build compact row ---
+            author = message.get('author_context_snapshot') or message.get('author') or {}
+            atts = self._normalize_attachment_list(message.get('attachments'))
+            embs = self._normalize_attachment_list(message.get('embeds'))
+
+            row = {
+                'message_id': str(message.get('message_id')),
+                'channel_id': str(message.get('channel_id')),
+                'channel_name': message.get('channel_name'),
+                'author_id': str(message.get('author_id')),
+                'author_name': (
+                    message.get('author_name')
+                    or author.get('server_nick')
+                    or author.get('global_name')
+                    or author.get('display_name')
+                    or author.get('username')
+                ),
+                'content_preview': self._cap_text(content, 200),
+                'created_at': message.get('created_at'),
+                'reaction_count': self._message_reaction_count(message),
+                'reply_to_message_id': message.get('reply_to_message_id') or message.get('reference_id'),
+                'has_attachments': len(atts) > 0,
+                'has_links': bool(re.search(r'https?://', content)),
+                'has_image': _is_media_kind(atts, 'image'),
+                'has_video': _is_media_kind(atts, 'video'),
+                'has_audio': _is_media_kind(atts, 'audio'),
+                'has_embed': len(embs) > 0,
+            }
+            rows.append(row)
             if len(rows) >= safe_limit:
                 break
+
+        # 2KB JSON cap
+        while rows:
+            payload = json.dumps(rows, default=str)
+            if len(payload.encode('utf-8')) <= 2048:
+                break
+            rows.pop()
         return rows
 
     def _message_is_since(self, created_at: Any, since: datetime) -> bool:
@@ -829,16 +1574,294 @@ class TopicEditor:
 
     def _dispatch_create_topic_tool(self, call: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
         args = call["input"]
+
+        # Normalize blocks before source_id derivation (T6: structured blocks path)
+        normalized_blocks: List[Dict[str, Any]] = []
+        if args.get("blocks"):
+            try:
+                normalized_blocks = normalize_document_blocks(
+                    {"blocks": args["blocks"]},
+                    topic_source_message_ids=None,
+                )
+            except (ValueError, TypeError):
+                normalized_blocks = []
+
+        # Derive topic-level source_ids: args source_message_ids + union from blocks
         source_ids = self._unique_ids(args.get("source_message_ids") or [])
-        source_messages = self._messages_by_id(context["messages"], source_ids)
-        source_authors = self._source_authors(source_messages)
+        if normalized_blocks:
+            block_sids = collect_document_source_ids(normalized_blocks)
+            for sid in block_sids:
+                if sid not in source_ids:
+                    source_ids.append(sid)
+
+        # Pre‑compute canonical_key early — T7 validation rejections need it
         canonical_key = canonicalize_proposed_key(args.get("proposed_key"), args.get("headline") or "")
+
+        # ── T7: Build merged resolved-message map (window + archive) ──────
+        resolved_by_id: Dict[str, Dict[str, Any]] = {}
+        for msg in context.get("messages") or []:
+            mid = str(msg.get("message_id"))
+            if mid and mid not in resolved_by_id:
+                resolved_by_id[mid] = msg
+
+        # Fill gaps from archive resolver (get_topic_editor_source_messages,
+        # limit=50 – separate from the 10‑message read-tool cap).
+        missing_ids = [sid for sid in source_ids if sid not in resolved_by_id]
+        if missing_ids:
+            try:
+                archive_rows = self.db.get_topic_editor_source_messages(
+                    message_ids=missing_ids,
+                    guild_id=context.get("guild_id"),
+                    environment=self.environment,
+                )
+            except Exception:
+                archive_rows = []
+            for row in (archive_rows or []):
+                mid = str(row.get("message_id"))
+                if mid and mid not in resolved_by_id:
+                    resolved_by_id[mid] = row
+
+        # ── T7: Validate block-level source_message_ids ────────────────────
+        if normalized_blocks:
+            for block in normalized_blocks:
+                block_sids = block_source_ids(block)
+                for sid in block_sids:
+                    if sid not in resolved_by_id:
+                        return self._reject_create_tool(
+                            call,
+                            context,
+                            action="rejected_post_sectioned",
+                            reason="unresolved_block_source_message",
+                            canonical_key=canonical_key,
+                            source_message_ids=source_ids,
+                            extra={
+                                "unresolved_message_id": sid,
+                                "block_type": block.get("type"),
+                                "block_title": block.get("title"),
+                            },
+                        )
+
+                # ── T7: Validate block-level media_refs ────────────────────
+                for ref in block_media_refs(block):
+                    ref_mid = ref["message_id"]
+                    ref_msg = resolved_by_id.get(ref_mid)
+                    if not ref_msg:
+                        return self._reject_create_tool(
+                            call,
+                            context,
+                            action="rejected_post_sectioned",
+                            reason="unresolved_media_ref",
+                            canonical_key=canonical_key,
+                            source_message_ids=source_ids,
+                            extra={
+                                "media_ref": ref,
+                                "block_type": block.get("type"),
+                            },
+                        )
+                    if ref_mid not in block_sids:
+                        return self._reject_create_tool(
+                            call,
+                            context,
+                            action="rejected_post_sectioned",
+                            reason="invalid_media_ref",
+                            canonical_key=canonical_key,
+                            source_message_ids=source_ids,
+                            extra={
+                                "media_ref": ref,
+                                "block_type": block.get("type"),
+                                "error": (
+                                    f"media_ref message_id {ref_mid!r} is not "
+                                    "in block source_message_ids"
+                                ),
+                            },
+                        )
+
+                    kind = ref["kind"]
+                    idx = ref["index"]
+                    if kind == "attachment":
+                        atts = self._normalize_attachment_list(
+                            ref_msg.get("attachments")
+                        )
+                        if idx < 0 or idx >= len(atts):
+                            return self._reject_create_tool(
+                                call,
+                                context,
+                                action="rejected_post_sectioned",
+                                reason="invalid_media_ref",
+                                canonical_key=canonical_key,
+                                source_message_ids=source_ids,
+                                extra={
+                                    "media_ref": ref,
+                                    "block_type": block.get("type"),
+                                    "error": (
+                                        f"attachment index {idx} out of range "
+                                        f"(message has {len(atts)} attachments)"
+                                    ),
+                                },
+                            )
+                        url = atts[idx].get("url") or atts[idx].get("proxy_url")
+                        if not url:
+                            return self._reject_create_tool(
+                                call,
+                                context,
+                                action="rejected_post_sectioned",
+                                reason="invalid_media_ref",
+                                canonical_key=canonical_key,
+                                source_message_ids=source_ids,
+                                extra={
+                                    "media_ref": ref,
+                                    "block_type": block.get("type"),
+                                    "error": (
+                                        f"attachment at index {idx} has "
+                                        f"no url / proxy_url"
+                                    ),
+                                },
+                            )
+                    elif kind == "embed":
+                        embs = self._normalize_attachment_list(
+                            ref_msg.get("embeds")
+                        )
+                        if idx < 0 or idx >= len(embs):
+                            return self._reject_create_tool(
+                                call,
+                                context,
+                                action="rejected_post_sectioned",
+                                reason="invalid_media_ref",
+                                canonical_key=canonical_key,
+                                source_message_ids=source_ids,
+                                extra={
+                                    "media_ref": ref,
+                                    "block_type": block.get("type"),
+                                    "error": (
+                                        f"embed index {idx} out of range "
+                                        f"(message has {len(embs)} embeds)"
+                                    ),
+                                },
+                            )
+                        # Discord embeds may have url at top level or
+                        # inside a thumbnail / image sub-object.
+                        url = (
+                            embs[idx].get("url")
+                            or (embs[idx].get("thumbnail") or {}).get("url")
+                            or (embs[idx].get("image") or {}).get("url")
+                        )
+                        if not url:
+                            return self._reject_create_tool(
+                                call,
+                                context,
+                                action="rejected_post_sectioned",
+                                reason="invalid_media_ref",
+                                canonical_key=canonical_key,
+                                source_message_ids=source_ids,
+                                extra={
+                                    "media_ref": ref,
+                                    "block_type": block.get("type"),
+                                    "error": (
+                                        f"embed at index {idx} has no url"
+                                    ),
+                                },
+                            )
+                    elif kind == "external":
+                        # Validate external ref: source message must exist and
+                        # extract_external_urls(ref_msg)[index] must exist and
+                        # be source-domain safelisted. No resolver call here.
+                        external_urls = extract_external_urls(ref_msg)
+                        if idx < 0 or idx >= len(external_urls):
+                            return self._reject_create_tool(
+                                call,
+                                context,
+                                action="rejected_post_sectioned",
+                                reason="invalid_media_ref",
+                                canonical_key=canonical_key,
+                                source_message_ids=source_ids,
+                                extra={
+                                    "media_ref": ref,
+                                    "block_type": block.get("type"),
+                                    "error": (
+                                        f"external index {idx} out of range "
+                                        f"(message has {len(external_urls)} "
+                                        f"external URLs)"
+                                    ),
+                                },
+                            )
+                        ext_entry = external_urls[idx]
+                        if ext_entry.get("platform_policy") == "unknown":
+                            return self._reject_create_tool(
+                                call,
+                                context,
+                                action="rejected_post_sectioned",
+                                reason="invalid_media_ref",
+                                canonical_key=canonical_key,
+                                source_message_ids=source_ids,
+                                extra={
+                                    "media_ref": ref,
+                                    "block_type": block.get("type"),
+                                    "error": (
+                                        f"external ref domain "
+                                        f"\"{ext_entry.get('domain')}\" "
+                                        f"not safelisted"
+                                    ),
+                                },
+                            )
+                        # No URL resolution here — external refs are resolved
+                        # lazily at publish time.
+                    else:
+                        return self._reject_create_tool(
+                            call,
+                            context,
+                            action="rejected_post_sectioned",
+                            reason="invalid_media_ref",
+                            canonical_key=canonical_key,
+                            source_message_ids=source_ids,
+                            extra={
+                                "media_ref": ref,
+                                "block_type": block.get("type"),
+                                "error": f"unknown media_ref kind: {kind!r}",
+                            },
+                        )
+
+        # ── Rebuild source_messages / source_authors from merged set ─────
+        source_messages = [
+            resolved_by_id[sid] for sid in source_ids if sid in resolved_by_id
+        ]
+        source_authors = self._source_authors(source_messages)
+        if normalized_blocks:
+            normalized_blocks = self._attach_default_media_refs_to_blocks(
+                normalized_blocks,
+                resolved_by_id,
+            )
+            if call["name"] == "post_sectioned_topic":
+                args["blocks"] = normalized_blocks
+
         action_by_tool = {
             "post_simple_topic": "post_simple",
             "post_sectioned_topic": "post_sectioned",
             "watch_topic": "watch",
         }
         state = "watching" if call["name"] == "watch_topic" else "posted"
+        simple_media_items = args.get("media") or []
+        simple_body = str(args.get("body") or "")
+        if (
+            call["name"] == "post_simple_topic"
+            and (
+                bool(simple_media_items)
+                or re.search(r"\b\d{15,25}:(?:attachment|embed|external):\d+\b", simple_body)
+            )
+        ):
+            return self._reject_create_tool(
+                call,
+                context,
+                action="rejected_post_simple",
+                reason="post_simple_cannot_attach_media_use_post_sectioned_topic",
+                canonical_key=canonical_key,
+                source_message_ids=source_ids,
+                extra={
+                    "media_count": len(simple_media_items),
+                    "has_raw_media_ref": bool(
+                        re.search(r"\b\d{15,25}:(?:attachment|embed|external):\d+\b", simple_body)
+                    ),
+                },
+            )
         if call["name"] == "post_simple_topic" and (len(source_ids) >= 3 or len(set(source_authors)) >= 2):
             return self._reject_create_tool(
                 call,
@@ -849,12 +1872,18 @@ class TopicEditor:
                 source_message_ids=source_ids,
                 extra={"distinct_author_count": len(set(source_authors)), "source_count": len(source_ids)},
             )
-        if call["name"] == "post_sectioned_topic" and not args.get("sections"):
+
+        # T6: Relax guard — allow blocks-only calls, reject only when BOTH
+        # sections and blocks are missing or normalize to zero publishable blocks.
+        sections = args.get("sections") or []
+        has_sections = bool(sections and any(isinstance(s, dict) for s in sections))
+        has_blocks = bool(normalized_blocks)
+        if call["name"] == "post_sectioned_topic" and not has_sections and not has_blocks:
             return self._reject_create_tool(
                 call,
                 context,
                 action="rejected_post_sectioned",
-                reason="post_sectioned_requires_sections",
+                reason="post_sectioned_requires_sections_or_blocks",
                 canonical_key=canonical_key,
                 source_message_ids=source_ids,
             )
@@ -927,6 +1956,9 @@ class TopicEditor:
                 canonical_key=canonical_key,
                 proposed_key=args.get("proposed_key"),
                 source_message_ids=source_ids,
+                extra={
+                    "blocks": normalized_blocks or None,
+                } if normalized_blocks else None,
             ),
             "model": self.model,
         })
@@ -955,6 +1987,252 @@ class TopicEditor:
             "action": action_by_tool[call["name"]],
             "override_count": len(override_rows),
         }
+
+    def _attach_default_media_refs_to_blocks(
+        self,
+        blocks: Sequence[Dict[str, Any]],
+        resolved_by_id: Dict[str, Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Add one source-local media ref per block when the agent omitted it.
+
+        The fallback is deliberately conservative: it only uses media from the
+        block's own cited sources, preserves explicit refs, and adds at most one
+        media item per block.
+        """
+        hydrated: List[Dict[str, Any]] = []
+        for block in blocks:
+            next_block = dict(block)
+            if not block_media_refs(next_block):
+                default_ref = self._first_available_media_ref_for_sources(
+                    block_source_ids(next_block),
+                    resolved_by_id,
+                )
+                if default_ref:
+                    next_block["media_refs"] = [default_ref]
+            hydrated.append(next_block)
+        return hydrated
+
+    def _first_available_media_ref_for_sources(
+        self,
+        source_ids: Sequence[str],
+        resolved_by_id: Dict[str, Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        for sid in source_ids:
+            message = resolved_by_id.get(str(sid)) or {}
+            attachments = self._normalize_attachment_list(message.get("attachments"))
+            for idx, attachment in enumerate(attachments):
+                if isinstance(attachment, dict) and (attachment.get("url") or attachment.get("proxy_url")):
+                    return {"message_id": str(sid), "kind": "attachment", "index": idx}
+            embeds = self._normalize_attachment_list(message.get("embeds"))
+            for idx, embed in enumerate(embeds):
+                if not isinstance(embed, dict):
+                    continue
+                url = (
+                    embed.get("url")
+                    or (embed.get("thumbnail") or {}).get("url")
+                    or (embed.get("thumbnail") or {}).get("proxy_url")
+                    or (embed.get("image") or {}).get("url")
+                    or (embed.get("image") or {}).get("proxy_url")
+                    or (embed.get("video") or {}).get("url")
+                    or (embed.get("video") or {}).get("proxy_url")
+                )
+                if url:
+                    return {"message_id": str(sid), "kind": "embed", "index": idx}
+        return None
+
+    def _auto_shortlist_media_messages(
+        self,
+        messages: Sequence[Dict[str, Any]],
+        known_topics: Sequence[Dict[str, Any]],
+        *,
+        run_id: str,
+        guild_id: Optional[int],
+    ) -> List[Dict[str, Any]]:
+        """Create watching topics for reaction-qualified media posts.
+
+        This replaces the old direct top-creations auto-post path. The shortlist
+        is intentionally conservative and idempotent: one topic per source
+        message, skipped forever once the operator/agent discards it.
+        """
+        threshold = max(0, int(self.media_shortlist_min_reactions or 0))
+        limit = max(0, int(self.media_shortlist_limit or 0))
+        if threshold <= 0 or limit <= 0:
+            return []
+
+        existing_by_key = {
+            str(topic.get("canonical_key") or ""): topic
+            for topic in known_topics or []
+            if topic.get("canonical_key")
+        }
+
+        candidates: List[Dict[str, Any]] = []
+        for message in messages or []:
+            message_id = str(message.get("message_id") or "").strip()
+            if not message_id:
+                continue
+            canonical_key = self._media_shortlist_key(message_id)
+            existing = existing_by_key.get(canonical_key)
+            if existing:
+                # Posted/watching/discarded all mean this message was already
+                # intentionally handled. Discarded is the explicit ignore path.
+                continue
+            channel_name = str(message.get("channel_name") or "").lower()
+            if "nsfw" in channel_name:
+                continue
+            reaction_count = self._message_reaction_count(message)
+            if reaction_count < threshold:
+                continue
+            media_ref = self._first_available_media_ref_for_sources(
+                [message_id],
+                {message_id: message},
+            )
+            if not media_ref:
+                continue
+            candidates.append({
+                "message": message,
+                "message_id": message_id,
+                "canonical_key": canonical_key,
+                "reaction_count": reaction_count,
+                "media_ref": media_ref,
+            })
+
+        candidates.sort(
+            key=lambda item: (
+                int(item.get("reaction_count") or 0),
+                str((item.get("message") or {}).get("created_at") or ""),
+                str(item.get("message_id") or ""),
+            ),
+            reverse=True,
+        )
+
+        shortlisted: List[Dict[str, Any]] = []
+        for item in candidates[:limit]:
+            message = item["message"]
+            message_id = item["message_id"]
+            author = self._author_name(message) or "community member"
+            reaction_count = int(item["reaction_count"] or 0)
+            headline = f"Shortlisted media from {author} ({reaction_count} reactions)"
+            reason = (
+                f"Auto-shortlisted because source message {message_id} has media "
+                f"and {reaction_count} reactions. Investigate context and media "
+                "understanding before deciding whether to publish, keep watching, or discard."
+            )
+            revisit_at = (datetime.now(timezone.utc) + timedelta(hours=6)).isoformat()
+            topic = self.db.upsert_topic({
+                "guild_id": guild_id,
+                "canonical_key": item["canonical_key"],
+                "display_slug": item["canonical_key"],
+                "state": "watching",
+                "headline": headline,
+                "summary": {
+                    "why_interesting": reason,
+                    "auto_shortlist": True,
+                    "shortlist_kind": "media_reaction_threshold",
+                    "reaction_count": reaction_count,
+                    "source_message_id": message_id,
+                    "media_refs": [item["media_ref"]],
+                    "suggested_actions": [
+                        "get_message_context",
+                        "get_reply_chain when it is a reply",
+                        "search_messages for related posts by the author/tool",
+                        "understand_image or understand_video",
+                        "post_sectioned_topic, watch_topic/update sources, or discard_topic",
+                    ],
+                },
+                "source_authors": [author] if author else [],
+                "parent_topic_id": None,
+                "publication_status": None,
+                "revisit_at": revisit_at,
+                "source_message_ids": [message_id],
+            }, environment=self.environment)
+            topic_id = topic.get("topic_id") if topic else None
+            if topic_id:
+                topic.setdefault("source_message_ids", [message_id])
+                self.db.add_topic_source({
+                    "topic_id": topic_id,
+                    "message_id": message_id,
+                    "guild_id": guild_id,
+                    "run_id": run_id,
+                }, environment=self.environment)
+                self.db.upsert_topic_alias({
+                    "topic_id": topic_id,
+                    "alias_key": item["canonical_key"],
+                    "alias_kind": "auto_shortlist",
+                    "guild_id": guild_id,
+                }, environment=self.environment)
+            self._store_transition({
+                "topic_id": topic_id,
+                "run_id": run_id,
+                "guild_id": guild_id,
+                "tool_call_id": f"auto-media-shortlist:{message_id}",
+                "to_state": "watching",
+                "action": "watch",
+                "reason": reason,
+                "payload": shape_transition_payload(
+                    outcome="accepted",
+                    tool_name="auto_media_shortlist",
+                    canonical_key=item["canonical_key"],
+                    proposed_key=item["canonical_key"],
+                    source_message_ids=[message_id],
+                    extra={
+                        "reaction_count": reaction_count,
+                        "media_ref": item["media_ref"],
+                    },
+                ),
+                "model": self.model,
+            })
+            shortlisted.append({
+                "status": "added",
+                "topic": topic,
+                "topic_id": topic_id,
+                "message_id": message_id,
+                "reaction_count": reaction_count,
+                "headline": headline,
+                "reason": reason,
+                "media_ref": item["media_ref"],
+            })
+
+        if shortlisted:
+            logger.info(
+                "TopicEditor auto-shortlisted %s media item(s) at >=%s reactions: %s",
+                len(shortlisted),
+                threshold,
+                [
+                    {
+                        "message_id": item.get("message_id"),
+                        "reaction_count": item.get("reaction_count"),
+                        "topic_id": item.get("topic_id"),
+                    }
+                    for item in shortlisted
+                ],
+            )
+        return shortlisted
+
+    @staticmethod
+    def _media_shortlist_key(message_id: str) -> str:
+        return f"media-shortlist-{_slugify(str(message_id))}"
+
+    @staticmethod
+    def _message_reaction_count(message: Dict[str, Any]) -> int:
+        for key in ("reaction_count", "unique_reactor_count", "reactions"):
+            value = message.get(key)
+            if value is None:
+                continue
+            if isinstance(value, (int, float)):
+                return int(value)
+            try:
+                return int(str(value))
+            except (TypeError, ValueError):
+                pass
+        reactors = message.get("reactors") or []
+        if isinstance(reactors, str):
+            try:
+                reactors = json.loads(reactors)
+            except json.JSONDecodeError:
+                reactors = []
+        if isinstance(reactors, list):
+            return len(reactors)
+        return 0
 
     def _dispatch_update_sources(self, call: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
         args = call["input"]
@@ -1066,6 +2344,12 @@ class TopicEditor:
         return {"tool_call_id": call["id"], "tool": call["name"], "outcome": action, "action": action, "error": reason}
 
     def _store_transition(self, transition: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        transition = dict(transition)
+        if transition.get("action") in {"finalize_run", "rejected_finalize_run"}:
+            payload = transition.get("payload") if isinstance(transition.get("payload"), dict) else {}
+            payload = {**payload, "original_action": transition.get("action")}
+            transition["payload"] = payload
+            transition["action"] = "observation"
         try:
             return self.db.store_topic_transition(transition, environment=self.environment)
         except Exception as exc:
@@ -1099,7 +2383,10 @@ class TopicEditor:
             return None
         payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
         action = row.get("action")
-        if action == "finalize_run" and payload.get("outcome") == "accepted":
+        if (
+            payload.get("tool_name") == "finalize_run"
+            and payload.get("outcome") == "accepted"
+        ):
             context["finalize"] = {
                 "overall_reasoning": payload.get("overall_reasoning") or row.get("reason") or "",
                 "topics_considered": list(payload.get("topics_considered") or []),
@@ -1108,7 +2395,7 @@ class TopicEditor:
             "tool_call_id": str(tool_call_id),
             "tool": call.get("name"),
             "outcome": "idempotent_replay",
-            "action": action,
+            "action": payload.get("original_action") or action,
             "topic_id": payload.get("topic_id") or row.get("topic_id"),
         }
 
@@ -1276,7 +2563,13 @@ class TopicEditor:
         for result in publish_results or []:
             status = result.get("status")
             topic_id = result.get("topic_id")
-            publish_lines.append(f"- `{topic_id}`: {status}")
+            media_counts = result.get("source_media_counts") or {}
+            publish_lines.append(
+                f"- `{topic_id}`: {status} "
+                f"media_sent={result.get('media_count', 0)} "
+                f"flat={result.get('flat_message_count', len(result.get('discord_message_ids') or []))} "
+                f"source_resolvable_media={media_counts.get('resolvable_media', 0)}"
+            )
             for message in result.get("messages") or []:
                 publish_lines.append(_indent_trace_block(f"would-publish: {message}"))
 
@@ -1296,7 +2589,15 @@ class TopicEditor:
                 5,
                 f"cumulative_tokens={metadata.get('cumulative_tokens')} cumulative_cost_usd={metadata.get('cumulative_cost_usd')}",
             )
+        shortlist_lines = [
+            (
+                f"- `{item.get('message_id')}` -> `{item.get('topic_id')}` "
+                f"reactions={item.get('reaction_count')} status={item.get('status')}"
+            )
+            for item in metadata.get("auto_shortlisted_media") or []
+        ]
         sections = [
+            ("Auto-shortlisted media", shortlist_lines),
             ("Tool calls", tool_lines),
             ("Rejections", rejection_lines),
             ("Overrides", override_lines),
@@ -1390,6 +2691,7 @@ class TopicEditor:
             f"accepted: `{accepted_count}` · rejected: `{rejected_count}`",
             f"overrides: `{updates.get('override_count', 0)}` · observations: `{updates.get('observation_count', 0)}`",
             f"published: `{published_count}` · failed_publish: `{failed_publish}`",
+            f"auto-shortlisted media: `{len(metadata.get('auto_shortlisted_media') or [])}`",
         ]
         embed.add_field(name="summary", value="\n".join(summary_lines)[:1024], inline=True)
 
@@ -1466,7 +2768,13 @@ class TopicEditor:
             publish_lines = []
             for result in publish_results:
                 topic_id = result.get("topic_id") or "?"
-                publish_lines.append(f"`{topic_id}` · {result.get('status') or '?'}")
+                media_counts = result.get("source_media_counts") or {}
+                publish_lines.append(
+                    f"`{topic_id}` · {result.get('status') or '?'} · "
+                    f"media_sent `{result.get('media_count', 0)}` · "
+                    f"source_media `{media_counts.get('resolvable_media', 0)}` · "
+                    f"messages `{result.get('flat_message_count', len(result.get('discord_message_ids') or []))}`"
+                )
             embed.add_field(name=f"publishing ({len(publish_results)})", value="\n".join(publish_lines)[:1024], inline=False)
 
         trigger_label = metadata.get("trigger") or updates.get("trigger") or "n/a"
@@ -1497,11 +2805,19 @@ class TopicEditor:
     def _format_tool_input_hint(self, tool: str, tool_input: Dict[str, Any]) -> str:
         if not tool_input:
             return ""
-        if tool in {"search_topics", "search_messages"}:
+        if tool == "search_topics":
             query = tool_input.get("query")
             if query:
                 snippet = str(query)[:80]
                 return f"query=`{snippet}`"
+        if tool == "search_messages":
+            query = tool_input.get("query")
+            scope = tool_input.get("scope") or "window"
+            parts = []
+            if query:
+                parts.append(f"query=`{str(query)[:60]}`")
+            parts.append(f"scope={scope}")
+            return " ".join(parts)
         if tool == "get_author_profile":
             author_id = tool_input.get("author_id")
             if author_id is not None:
@@ -1512,6 +2828,10 @@ class TopicEditor:
                 preview = ", ".join(str(x) for x in list(ids)[:3])
                 more = "…" if len(ids) > 3 else ""
                 return f"messages=`{preview}{more}`"
+        if tool == "get_reply_chain":
+            message_id = tool_input.get("message_id")
+            if message_id:
+                return f"message_id=`{str(message_id)[:40]}`"
         if tool in {"post_simple_topic", "post_sectioned_topic", "watch_topic"}:
             slug = tool_input.get("proposed_key")
             if slug:
@@ -1520,24 +2840,158 @@ class TopicEditor:
 
     async def _publish_topic(self, topic: Dict[str, Any]) -> Dict[str, Any]:
         topic_id = str(topic.get("topic_id"))
-        rendered_messages = render_topic(topic)
+        guild_id = topic.get("guild_id") or self._resolve_guild_id()
         current_attempts = int(topic.get("publication_attempts") or 0)
+
+        # Determine whether this is a structured-document topic
+        summary = topic.get("summary") or {}
+        has_blocks = isinstance(summary, dict) and bool(summary.get("blocks"))
+
+        if has_blocks:
+            # --- Structured block-by-block publishing ---
+            # Collect all source IDs and hydrate metadata for jump URLs + media
+            blocks = normalize_topic_document(topic)
+            all_source_ids = collect_document_source_ids(blocks)
+            source_metadata: Dict[str, Dict[str, Any]] = {}
+            if all_source_ids:
+                try:
+                    rows = self.db.get_topic_editor_source_messages(
+                        message_ids=all_source_ids,
+                        guild_id=guild_id,
+                        environment=self.environment,
+                    )
+                except Exception:
+                    rows = []
+                for row in rows:
+                    source_metadata[str(row.get("message_id"))] = row
+
+            # Build ordered publish units (text + media interleaved)
+            publish_units = render_topic_publish_units(topic, source_metadata=source_metadata)
+
+            # Flatten units through paragraph-aware chunking (used for suppressed
+            # mode and fallback text display — NOT the primary send path).
+            flat_messages: List[str] = []
+            media_indices: Set[int] = set()
+            _media_count = 0
+            for idx, unit in enumerate(publish_units):
+                if unit.get("kind") in ("media", "external"):
+                    media_indices.add(len(flat_messages))
+                    flat_messages.append(unit.get("url") or unit.get("fallback_url", ""))
+                else:
+                    for chunk in chunk_text_for_discord(unit["content"]):
+                        flat_messages.append(chunk)
+            media_source_counts = self._summarize_source_media_counts(source_metadata)
+            logger.info(
+                "TopicEditor publish plan: topic_id=%s structured=true blocks=%s sources=%s "
+                "source_media=%s units=%s flat_messages=%s media_messages=%s publishing_enabled=%s",
+                topic_id,
+                len(blocks),
+                len(all_source_ids),
+                media_source_counts,
+                len(publish_units),
+                len(flat_messages),
+                len(media_indices),
+                self.publishing_enabled,
+            )
+
+            if not self.publishing_enabled:
+                self.db.update_topic(
+                    topic_id,
+                    {
+                        "guild_id": guild_id,
+                        "publication_status": "suppressed",
+                        "publication_error": None,
+                    },
+                    guild_id=guild_id,
+                    environment=self.environment,
+                )
+                return {
+                    "topic_id": topic_id,
+                    "status": "suppressed",
+                    "publish_units": publish_units,
+                    "flat_messages": flat_messages,
+                    "media_indices": sorted(media_indices),
+                    "source_media_counts": media_source_counts,
+                }
+
+            # Build send units from publish_units.
+            # Send-unit model:
+            #   {'send_kind': 'text',   'content': str}
+            #   {'send_kind': 'url',    'content': str, 'ref': dict}
+            #   {'send_kind': 'file',   'file_path': str, 'filename': str,
+            #     'fallback_url': str, 'ref': dict, 'trace': str}
+            send_units: List[Dict[str, Any]] = []
+            _build_send_units(publish_units, send_units, source_metadata)
+            total_units = len(send_units)
+
+            # Send block-by-block via send units
+            sent_ids: List[int] = []
+            error: Optional[str] = None
+            publish_traces: List[Dict[str, str]] = []
+            channel_id = self._resolve_live_channel_id(guild_id)
+            try:
+                channel = await self._resolve_discord_channel(channel_id)
+                if channel is None:
+                    raise RuntimeError(f"live_update_channel_not_found:{channel_id}")
+                for unit in send_units:
+                    unit_sent_id, unit_error, unit_trace = await self._send_one_unit(
+                        channel, unit, topic_id
+                    )
+                    if unit_sent_id is not None:
+                        sent_ids.append(unit_sent_id)
+                    if unit_trace:
+                        publish_traces.append(unit_trace)
+                    if unit_error:
+                        error = unit_error  # last error for top-level reporting
+            except Exception as exc:
+                error = str(exc)
+
+            status = (
+                "sent" if sent_ids and len(sent_ids) == total_units and not error
+                else "partial" if sent_ids else "failed"
+            )
+            if publish_traces:
+                logger.info(
+                    "TopicEditor publish traces: topic_id=%s traces=%s",
+                    topic_id, publish_traces,
+                )
+            updates = {
+                "guild_id": guild_id,
+                "publication_status": status,
+                "publication_error": error,
+                "discord_message_ids": sent_ids,
+                "publication_attempts": current_attempts + 1,
+                "last_published_at": datetime.now(timezone.utc).isoformat() if sent_ids else None,
+            }
+            self.db.update_topic(topic_id, updates, guild_id=guild_id, environment=self.environment)
+            return {
+                "topic_id": topic_id,
+                "status": status,
+                "discord_message_ids": sent_ids,
+                "error": error,
+                "media_count": len(media_indices),
+                "flat_message_count": len(flat_messages),
+                "source_media_counts": media_source_counts,
+            }
+
+        # --- Legacy simple-topic path (no blocks) ---
+        rendered_messages = render_topic(topic)
         if not self.publishing_enabled:
             self.db.update_topic(
                 topic_id,
                 {
-                    "guild_id": topic.get("guild_id") or self._resolve_guild_id(),
+                    "guild_id": guild_id,
                     "publication_status": "suppressed",
                     "publication_error": None,
                 },
-                guild_id=topic.get("guild_id") or self._resolve_guild_id(),
+                guild_id=guild_id,
                 environment=self.environment,
             )
             return {"topic_id": topic_id, "status": "suppressed", "messages": rendered_messages}
 
         sent_ids: List[int] = []
         error: Optional[str] = None
-        channel_id = self._resolve_live_channel_id(topic.get("guild_id") or self._resolve_guild_id())
+        channel_id = self._resolve_live_channel_id(guild_id)
         try:
             channel = await self._resolve_discord_channel(channel_id)
             if channel is None:
@@ -1550,22 +3004,210 @@ class TopicEditor:
         except Exception as exc:
             error = str(exc)
 
-        status = "sent" if sent_ids and len(sent_ids) == len(rendered_messages) and not error else "partial" if sent_ids else "failed"
+        status = (
+            "sent" if sent_ids and len(sent_ids) == len(rendered_messages) and not error
+            else "partial" if sent_ids else "failed"
+        )
         updates = {
-            "guild_id": topic.get("guild_id") or self._resolve_guild_id(),
+            "guild_id": guild_id,
             "publication_status": status,
             "publication_error": error,
             "discord_message_ids": sent_ids,
             "publication_attempts": current_attempts + 1,
             "last_published_at": datetime.now(timezone.utc).isoformat() if sent_ids else None,
         }
-        self.db.update_topic(
-            topic_id,
-            updates,
-            guild_id=topic.get("guild_id") or self._resolve_guild_id(),
-            environment=self.environment,
-        )
+        self.db.update_topic(topic_id, updates, guild_id=guild_id, environment=self.environment)
         return {"topic_id": topic_id, "status": status, "discord_message_ids": sent_ids, "error": error}
+
+    async def _send_one_unit(
+        self,
+        channel: Any,
+        unit: Dict[str, Any],
+        topic_id: str,
+    ) -> Tuple[Optional[int], Optional[str], Optional[Dict[str, str]]]:
+        """Send a single send-unit to a Discord channel.
+
+        Returns (sent_id, error, trace_dict).
+        ``sent_id`` is the Discord message ID on success, or None.
+        ``error`` is an error string on failure, or None.
+        ``trace_dict`` is a per-unit trace for external-media resolution steps.
+
+        Send-kinds:
+          - ``text``  → ``channel.send(content)``
+          - ``url``   → ``channel.send(content)`` (URL as plain text)
+          - ``file``  → lazily resolve external media then send
+            :class:`discord.File` on success; fallback to URL text on failure.
+        """
+        from src.common.external_media import sanitise_url_for_logs
+
+        send_kind = unit.get("send_kind", "text")
+        trace: Optional[Dict[str, str]] = None
+
+        try:
+            if send_kind == "text":
+                sent = await channel.send(unit["content"])
+                mid = getattr(sent, "id", None)
+                return (int(mid) if mid else None, None, None)
+
+            if send_kind == "url":
+                sent = await channel.send(unit["content"])
+                mid = getattr(sent, "id", None)
+                return (int(mid) if mid else None, None, None)
+
+            if send_kind == "file":
+                fallback_url = unit.get("fallback_url", "")
+                ref = unit.get("ref", {})
+                safe_url = sanitise_url_for_logs(fallback_url)
+
+                # ---- lazy-resolve external media ----
+                result = await self._resolve_external_for_publish(fallback_url, ref)
+                outcome = result.outcome.value if hasattr(result, "outcome") else "unknown"
+
+                if outcome in ("cache_hit", "downloaded") and result.file_path:
+                    # Send as discord.File
+                    try:
+                        filename = os.path.basename(result.file_path)
+                        with open(result.file_path, "rb") as fh:
+                            discord_file = discord.File(fh, filename=filename)
+                        sent = await channel.send(file=discord_file)
+                        mid = getattr(sent, "id", None)
+                        trace = {
+                            "url": safe_url,
+                            "status": outcome,
+                            "action": "file_sent",
+                        }
+                        return (int(mid) if mid else None, None, trace)
+                    except Exception as file_exc:
+                        logger.warning(
+                            "TopicEditor: discord.File send failed for %s, "
+                            "falling back to URL: %s",
+                            safe_url, file_exc,
+                        )
+                        trace = {
+                            "url": safe_url,
+                            "status": "file_send_failed",
+                            "action": "fallback_url",
+                            "detail": str(file_exc)[:200],
+                        }
+                        # Fall through to send URL text
+                        sent = await channel.send(fallback_url)
+                        mid = getattr(sent, "id", None)
+                        return (int(mid) if mid else None, None, trace)
+
+                # ---- any other outcome: send the fallback URL ----
+                trace = {
+                    "url": safe_url,
+                    "status": outcome,
+                    "action": "fallback_url",
+                    "detail": getattr(result, "failure_reason", "") or "",
+                }
+                sent = await channel.send(fallback_url)
+                mid = getattr(sent, "id", None)
+                return (int(mid) if mid else None, None, trace)
+
+            return (None, f"unknown send_kind: {send_kind}", None)
+
+        except Exception as exc:
+            # Last-resort: try the fallback URL if we still have one
+            error_str = str(exc)
+            if send_kind == "file":
+                fallback_url = unit.get("fallback_url", "")
+                if fallback_url:
+                    try:
+                        sent = await channel.send(fallback_url)
+                        mid = getattr(sent, "id", None)
+                        trace = {
+                            "url": sanitise_url_for_logs(fallback_url),
+                            "status": "exception_fallback",
+                            "action": "fallback_url",
+                            "detail": error_str[:200],
+                        }
+                        return (int(mid) if mid else None, None, trace)
+                    except Exception:
+                        pass
+            return (None, error_str, trace)
+
+    async def _resolve_external_for_publish(
+        self, source_url: str, ref: Dict[str, Any]
+    ) -> Any:
+        """Lazily resolve an external media URL for publishing.
+
+        Returns a :class:`ResolverResult` (or compatible duck-type).
+
+        This is the only place where the T2 resolver is invoked during
+        publishing. On failure the caller falls back to sending the original
+        URL as text.
+        """
+        from src.features.summarising.external_media_resolver import (
+            ExternalMediaResolver,
+            ResolverResult,
+            ResolveOutcome,
+        )
+        from src.common.external_media import make_cache_key
+
+        resolver = ExternalMediaResolver()
+        # Wire DB cache if available
+        if self.db is not None and hasattr(self.db, "get_external_media_cache"):
+            resolver._get_cache = self.db.get_external_media_cache
+            resolver._upsert_cache = self.db.upsert_external_media_cache
+
+        try:
+            result = resolver.resolve(source_url)
+            return result
+        except Exception as exc:
+            logger.warning(
+                "TopicEditor: external resolver exception for %s: %s",
+                source_url[:120], exc,
+            )
+            # Return a synthetic failure result
+            return ResolverResult(
+                outcome=ResolveOutcome.DOWNLOAD_FAILED,
+                url_key=make_cache_key(source_url),
+                source_url=source_url[:200],
+                source_domain="unknown",
+                status="download_failed",
+                failure_reason=str(exc),
+                trace=f"resolver exception: {exc}",
+            )
+
+    def _summarize_source_media_counts(self, source_metadata: Dict[str, Dict[str, Any]]) -> Dict[str, int]:
+        messages_with_media = 0
+        attachments = 0
+        embeds = 0
+        resolvable_media = 0
+        external_links = 0
+        for row in source_metadata.values():
+            row_attachments = self._normalize_attachment_list(row.get("attachments"))
+            row_embeds = self._normalize_attachment_list(row.get("embeds"))
+            attachment_urls = sum(
+                1
+                for item in row_attachments
+                if isinstance(item, dict) and (item.get("url") or item.get("proxy_url"))
+            )
+            embed_urls = 0
+            for idx, item in enumerate(row_embeds):
+                if not isinstance(item, dict):
+                    continue
+                if _resolve_media_url_from_metadata(
+                    {"message_id": str(row.get("message_id")), "kind": "embed", "index": idx},
+                    {"embeds": row_embeds},
+                ):
+                    embed_urls += 1
+            attachments += len(row_attachments)
+            embeds += len(row_embeds)
+            resolvable_media += attachment_urls + embed_urls
+            # Count external links separately using the shared helper
+            external_urls = extract_external_urls(row)
+            external_links += len(external_urls)
+            if row_attachments or row_embeds or external_urls:
+                messages_with_media += 1
+        return {
+            "messages_with_media": messages_with_media,
+            "attachments": attachments,
+            "embeds": embeds,
+            "resolvable_media": resolvable_media,
+            "external_links": external_links,
+        }
 
     async def _resolve_discord_channel(self, channel_id: Optional[int]) -> Any:
         if not self.bot or not channel_id:
@@ -1693,14 +3335,91 @@ class TopicEditor:
             "state": {"source_count": len(messages)},
         }
 
+    @staticmethod
+    def _normalize_attachment_list(attachments: Any) -> List[Dict[str, Any]]:
+        """Return a list of attachment dicts from list, dict, or JSON-string inputs."""
+        if attachments is None:
+            return []
+        if isinstance(attachments, list):
+            return attachments
+        if isinstance(attachments, dict):
+            # Single attachment passed as a dict (e.g. from some archive shapes).
+            return [attachments]
+        if isinstance(attachments, str):
+            try:
+                parsed = json.loads(attachments)
+            except (json.JSONDecodeError, TypeError):
+                return []
+            return TopicEditor._normalize_attachment_list(parsed)
+        return []
+
     def _message_payload(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        attachments = self._normalize_attachment_list(message.get("attachments"))
+        embeds = self._normalize_attachment_list(message.get("embeds"))
+        media_urls: List[str] = []
+        media_refs_available: List[Dict[str, Any]] = []
+
+        for idx, attachment in enumerate(attachments):
+            url = attachment.get("url") or attachment.get("proxy_url")
+            if url and isinstance(url, str):
+                media_urls.append(url)
+            media_refs_available.append({
+                "kind": "attachment",
+                "index": idx,
+                "url_present": bool(attachment.get("url") or attachment.get("proxy_url")),
+                "content_type": attachment.get("content_type"),
+                "filename": attachment.get("filename"),
+            })
+
+        for embed_idx, embed in enumerate(embeds if isinstance(embeds, list) else []):
+            if isinstance(embed, dict):
+                for key in ("url", "thumbnail", "image", "video"):
+                    value = embed.get(key)
+                    if isinstance(value, dict):
+                        url = value.get("url") or value.get("proxy_url")
+                        if url and isinstance(url, str):
+                            media_urls.append(url)
+                    elif isinstance(value, str) and value:
+                        media_urls.append(value)
+            media_refs_available.append({
+                "kind": "embed",
+                "index": embed_idx,
+                "url_present": (
+                    isinstance(embed, dict) and bool(
+                        (isinstance(embed.get("url"), dict) and (embed["url"].get("url") or embed["url"].get("proxy_url")))
+                        or (isinstance(embed.get("thumbnail"), dict) and (embed["thumbnail"].get("url") or embed["thumbnail"].get("proxy_url")))
+                        or (isinstance(embed.get("image"), dict) and (embed["image"].get("url") or embed["image"].get("proxy_url")))
+                        or (isinstance(embed.get("video"), dict) and (embed["video"].get("url") or embed["video"].get("proxy_url")))
+                    )
+                ),
+                "content_type": None,
+                "filename": None,
+            })
+
+        # ── External linked media refs (after attachment/embed for priority indexing) ──
+        # Uses the shared extract_external_urls helper so external index N
+        # is deterministic regardless of caller.
+        for external_entry in extract_external_urls(message):
+            media_refs_available.append({
+                "kind": external_entry["kind"],
+                "index": external_entry["index"],
+                "domain": external_entry["domain"],
+                "url_present": external_entry["url_present"],
+                "source": external_entry["source"],
+            })
+            # external URLs are resolved lazily, not pre-fetched into media_urls
+
         return {
             "message_id": message.get("message_id"),
+            "guild_id": message.get("guild_id"),
             "channel_id": message.get("channel_id"),
             "author_id": message.get("author_id"),
             "author": self._author_name(message),
             "content": message.get("content") or message.get("clean_content"),
             "created_at": message.get("created_at"),
+            "reaction_count": self._message_reaction_count(message),
+            "media_urls": media_urls,
+            "media_refs_available": media_refs_available,
         }
 
     def _messages_by_id(self, messages: Sequence[Dict[str, Any]], ids: Sequence[str]) -> List[Dict[str, Any]]:
@@ -1721,7 +3440,15 @@ class TopicEditor:
 
     def _summary_for_tool(self, tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         if tool_name == "post_sectioned_topic":
-            return {"body": args.get("body"), "sections": args.get("sections") or []}
+            summary: Dict[str, Any] = {
+                "body": args.get("body"),
+                "sections": args.get("sections") or [],
+            }
+            # Store blocks when provided alongside preserving body/sections for
+            # backwards-compat readability.
+            if args.get("blocks"):
+                summary["blocks"] = args["blocks"]
+            return summary
         if tool_name == "watch_topic":
             return {"why_interesting": args.get("why_interesting")}
         return {"body": args.get("body"), "media": args.get("media") or []}
@@ -1966,6 +3693,180 @@ def build_override_transitions(
     return rows
 
 
+# ------------------------------------------------------------------
+# Document normalization helpers (T1)
+# ------------------------------------------------------------------
+
+def normalize_media_ref(ref: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert a media ref to canonical shape: {message_id, kind: 'attachment'|'embed'|'external', index}.
+
+    Accepts shorthand {message_id, attachment_index} which normalizes to
+    {kind: 'attachment', index: attachment_index}.  Rejects invalid kind values.
+    """
+    if not isinstance(ref, dict):
+        raise ValueError(f"media_ref must be a dict, got {type(ref).__name__}")
+
+    message_id = str(ref.get("message_id") or "")
+    if not message_id:
+        raise ValueError("media_ref missing required 'message_id'")
+
+    # Shorthand: {message_id, attachment_index}  →  canonical attachment ref
+    if "attachment_index" in ref and "kind" not in ref:
+        index = ref.get("attachment_index", 0)
+        try:
+            index = int(index)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"media_ref attachment_index must be an integer, got {index!r}"
+            )
+        return {"message_id": message_id, "kind": "attachment", "index": index}
+
+    kind = ref.get("kind", "attachment")
+    if kind not in ("attachment", "embed", "external"):
+        raise ValueError(
+            f"media_ref kind must be 'attachment', 'embed', or 'external', got {kind!r}"
+        )
+
+    index = ref.get("index", 0)
+    try:
+        index = int(index)
+    except (TypeError, ValueError):
+        raise ValueError(f"media_ref index must be an integer, got {index!r}")
+
+    return {"message_id": message_id, "kind": kind, "index": index}
+
+
+
+def normalize_document_blocks(
+    summary: Dict[str, Any],
+    topic_source_message_ids: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Normalize a topic summary into ordered document blocks.
+
+    Handles legacy summaries with body/sections/source_message_ids by converting:
+      * body       → intro block
+      * sections   → section blocks
+      * topic-level source_message_ids used as fallback when a block has no
+        local sources.
+
+    If *summary.blocks* is already present each block is individually
+    normalized and returned.
+    """
+    if isinstance(summary, dict) and summary.get("blocks"):
+        # Already has blocks — normalise each one individually
+        blocks: List[Dict[str, Any]] = []
+        for b in summary["blocks"]:
+            if not isinstance(b, dict):
+                continue
+            block_type = b.get("type", "section")
+            if block_type not in ("intro", "section"):
+                continue
+            blocks.append({
+                "type": block_type,
+                "title": b.get("title"),
+                "text": str(b.get("text") or b.get("body") or ""),
+                "source_message_ids": [
+                    str(sid)
+                    for sid in (b.get("source_message_ids") or [])
+                    if sid
+                ],
+                "media_refs": [
+                    normalize_media_ref(r) for r in (b.get("media_refs") or [])
+                ],
+            })
+        return blocks
+
+    # Legacy path: convert body + sections into blocks
+    body = (
+        (summary.get("body") or "").strip()
+        if isinstance(summary, dict)
+        else ""
+    )
+    sections = (
+        summary.get("sections") or []
+        if isinstance(summary, dict)
+        else []
+    )
+    fallback_ids = [
+        str(sid) for sid in (topic_source_message_ids or []) if sid
+    ]
+
+    blocks = []
+
+    if body:
+        blocks.append({
+            "type": "intro",
+            "title": None,
+            "text": body,
+            "source_message_ids": list(fallback_ids),
+            "media_refs": [],
+        })
+
+    for sec in sections:
+        if not isinstance(sec, dict):
+            continue
+        title = sec.get("title") or sec.get("heading")
+        text = (
+            sec.get("body")
+            or sec.get("text")
+            or sec.get("summary")
+            or ""
+        )
+        sec_source_ids = [
+            str(sid) for sid in (sec.get("source_message_ids") or []) if sid
+        ]
+        if not sec_source_ids:
+            sec_source_ids = list(fallback_ids)
+        blocks.append({
+            "type": "section",
+            "title": title,
+            "text": str(text),
+            "source_message_ids": sec_source_ids,
+            "media_refs": [],
+        })
+
+    return blocks
+
+
+def normalize_topic_document(topic: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Normalize a full topic dict into ordered document blocks.
+
+    Handles both legacy topics (body / sections) and new-style topics
+    (summary.blocks).
+    """
+    summary = topic.get("summary") or {}
+    if not isinstance(summary, dict):
+        summary = {"body": str(summary)}
+    topic_source_ids = topic.get("source_message_ids") or []
+    return normalize_document_blocks(summary, topic_source_ids)
+
+
+def block_source_ids(block: Dict[str, Any]) -> List[str]:
+    """Extract distinct source message IDs from a single block."""
+    return list(
+        dict.fromkeys(
+            str(sid) for sid in (block.get("source_message_ids") or []) if sid
+        )
+    )
+
+
+def block_media_refs(block: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Extract normalized media refs from a single block."""
+    return [normalize_media_ref(r) for r in (block.get("media_refs") or [])]
+
+
+def collect_document_source_ids(blocks: List[Dict[str, Any]]) -> List[str]:
+    """Return the distinct union of all block-level source message IDs."""
+    seen: Set[str] = set()
+    result: List[str] = []
+    for block in blocks:
+        for sid in block_source_ids(block):
+            if sid not in seen:
+                seen.add(sid)
+                result.append(sid)
+    return result
+
+
 def render_topic(topic: Dict[str, Any]) -> List[str]:
     """Render a topic into Discord message text without DB or Discord effects."""
     headline = _clean_render_text(topic.get("headline") or topic.get("display_slug") or "Live update")
@@ -1977,7 +3878,7 @@ def render_topic(topic: Dict[str, Any]) -> List[str]:
 
     sections = summary.get("sections") or []
     if sections:
-        lines = [f"**{prefix}: {headline}**"]
+        lines = [f"## {prefix}: {headline}"]
         body = _clean_render_text(summary.get("body"))
         if body:
             lines.extend(["", body])
@@ -1994,17 +3895,216 @@ def render_topic(topic: Dict[str, Any]) -> List[str]:
         return [_trim_discord_message("\n".join(lines))]
 
     body = _clean_render_text(summary.get("body") or summary.get("why_interesting") or topic.get("body"))
-    lines = [f"**{prefix}: {headline}**"]
+    lines = [f"## {prefix}: {headline}"]
     if body:
         lines.extend(["", body])
-    media = summary.get("media") or topic.get("media") or []
-    for item in media:
-        text = _clean_render_text(item)
-        if text:
-            lines.append(text)
+    # Simple topics are text-only. Media refs belong in structured block
+    # media_refs so they can be validated, chunked, and sent separately.
     if source_suffix:
         lines.extend(["", source_suffix])
     return [_trim_discord_message("\n".join(lines))]
+
+
+def render_topic_publish_units(
+    topic: Dict[str, Any],
+    source_metadata: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    """Render a structured topic into ordered publish units for block-by-block sending.
+
+    Returns a list of units, each of which is either:
+
+        {"kind": "text", "content": "..."}
+
+    or
+
+        {"kind": "media", "url": "https://...", "ref": {...}}
+
+    The order is deterministic: header, intro text with inline linked
+    citations, intro media, each section text with inline citations, that
+    section media.
+
+    Citations are per-block, deduped, and ordered by first appearance.
+    No global Sources footer is emitted for structured topics.
+
+    This function is only called when the topic summary contains ``blocks``.
+    For simple/legacy topics, use the existing ``render_topic`` function.
+    """
+    blocks = normalize_topic_document(topic)
+    if not blocks:
+        # Fallback: use legacy render_topic for simple topics
+        rendered = render_topic(topic)
+        return [{"kind": "text", "content": msg} for msg in rendered]
+
+    headline = _clean_render_text(
+        topic.get("headline") or topic.get("display_slug") or "Live update"
+    )
+    prefix = "Update" if topic.get("parent_topic_id") else "Live update"
+    header = f"## {prefix}: {headline}"
+
+    units: List[Dict[str, Any]] = []
+
+    # Build a lookup: global source_id → metadata row (for jump URL construction)
+    meta_by_id: Dict[str, Dict[str, Any]] = source_metadata or {}
+    emitted_media_keys: Set[Tuple[str, ...]] = set()
+
+    for block in blocks:
+        block_text = block.get("text", "").strip()
+        block_title = block.get("title")
+        block_sids = block_source_ids(block)
+
+        # Build inline citation map for this block
+        # Dedupe + preserve order of first appearance
+        seen: Set[str] = set()
+        ordered_ids: List[str] = []
+        for sid in block_sids:
+            if sid not in seen:
+                seen.add(sid)
+                ordered_ids.append(sid)
+
+        # Build the text content for this block
+        lines: List[str] = []
+        if block["type"] == "section" and block_title:
+            lines.append(f"**{_clean_render_text(block_title)}**")
+        elif block["type"] == "intro":
+            # Intro block gets the header; subsequent intro blocks are unusual
+            # but handled gracefully (no duplicate header).
+            pass
+
+        if block_text:
+            lines.append(block_text)
+
+        # Inline citations
+        if ordered_ids:
+            citation_parts: List[str] = []
+            for idx, sid in enumerate(ordered_ids, start=1):
+                meta = meta_by_id.get(sid, {})
+                guild_id = meta.get("guild_id") or topic.get("guild_id")
+                channel_id = meta.get("channel_id")
+                url = ""
+                if guild_id and channel_id and sid:
+                    url = (
+                        f"https://discord.com/channels/{guild_id}/"
+                        f"{channel_id}/{sid}"
+                    )
+                if url:
+                    citation_parts.append(f"[[{idx}]]({url})")
+                else:
+                    citation_parts.append(f"[[{idx}]]")
+            lines.append(" ".join(citation_parts))
+
+        block_content = "\n".join(lines)
+        if block["type"] == "intro":
+            block_content = header + "\n\n" + block_content
+
+        units.append({"kind": "text", "content": block_content})
+
+        # Media refs for this block
+        for ref in block_media_refs(block):
+            meta = meta_by_id.get(ref["message_id"], {})
+            url = _resolve_media_url_from_metadata(ref, meta)
+            if url:
+                if url in block_content:
+                    continue
+                media_key = (str(url),)
+                if not media_key[0]:
+                    media_key = (
+                        str(ref.get("message_id")),
+                        str(ref.get("kind", "attachment")),
+                        str(ref.get("index", 0)),
+                    )
+                if media_key in emitted_media_keys:
+                    continue
+                emitted_media_keys.add(media_key)
+                # External refs carry their kind so the publisher can
+                # distinguish lazy-resolve (external) from direct-attach media.
+                unit_kind = "media"
+                if ref.get("kind") == "external":
+                    unit_kind = "external"
+                units.append({
+                    "kind": unit_kind,
+                    "url": url,
+                    "ref": ref,
+                })
+
+    return units
+
+
+def _build_send_units(
+    publish_units: List[Dict[str, Any]],
+    send_units_out: List[Dict[str, Any]],
+    source_metadata: Dict[str, Dict[str, Any]],
+) -> None:
+    """Build explicit send units from publish_units.
+
+    Populates ``send_units_out`` in-place with dicts following the send-unit model:
+
+        {'send_kind': 'text',   'content': str}
+        {'send_kind': 'url',    'content': str, 'ref': dict}
+        {'send_kind': 'file',   'file_path': str, 'filename': str,
+         'fallback_url': str, 'ref': dict, 'trace': str}
+
+    Text units contain the block content (already header-wrapped). Media units
+    that are NOT external become ``url`` send units (the URL is sent as text).
+    External units become ``file`` send units; the actual resolution/download
+    happens lazily in :meth:`TopicEditor._send_one_unit` so the caller can
+    decide whether to invoke the resolver.
+    """
+    from src.common.external_media import sanitise_url_for_logs
+
+    for unit in publish_units:
+        kind = unit.get("kind", "text")
+        if kind == "text":
+            send_units_out.append({"send_kind": "text", "content": unit["content"]})
+        elif kind == "media":
+            # Discord-hosted attachment/embed: send the URL as plain text.
+            send_units_out.append({
+                "send_kind": "url",
+                "content": unit["url"],
+                "ref": unit.get("ref", {}),
+            })
+        elif kind == "external":
+            url = unit.get("url", "")
+            ref = unit.get("ref", {})
+            safe = sanitise_url_for_logs(url)
+            send_units_out.append({
+                "send_kind": "file",
+                "file_path": "",          # filled by _send_one_unit after resolve
+                "filename": "",           # filled by _send_one_unit after resolve
+                "fallback_url": url,
+                "ref": ref,
+                "trace": f"external: pending resolve for {safe}",
+            })
+
+
+def _resolve_media_url_from_metadata(
+    ref: Dict[str, Any], meta: Dict[str, Any]
+) -> Optional[str]:
+    """Resolve a media ref to an actual URL using source message metadata."""
+    kind = ref.get("kind", "attachment")
+    index = ref.get("index", 0)
+    if kind == "attachment":
+        attachments = meta.get("attachments") or []
+        if isinstance(attachments, list) and 0 <= index < len(attachments):
+            att = attachments[index]
+            if isinstance(att, dict):
+                return att.get("url") or att.get("proxy_url")
+    elif kind == "embed":
+        embeds = meta.get("embeds") or []
+        if isinstance(embeds, list) and 0 <= index < len(embeds):
+            emb = embeds[index]
+            if isinstance(emb, dict):
+                for key in ("url", "thumbnail", "image", "video"):
+                    value = emb.get(key)
+                    if isinstance(value, dict):
+                        url = value.get("url") or value.get("proxy_url")
+                        if url:
+                            return url
+                    elif isinstance(value, str) and value:
+                        return value
+    elif kind == "external":
+        from src.common.external_media import extract_external_url_at_index
+        return extract_external_url_at_index(meta, index)
+    return None
 
 
 def _indent_trace_block(text: str) -> str:
@@ -2108,3 +4208,60 @@ def _trim_discord_message(value: str) -> str:
     if len(text) <= 2000:
         return text
     return text[:1997].rstrip() + "..."
+
+
+def chunk_text_for_discord(text: str, limit: int = 2000) -> List[str]:
+    """Split text into Discord-safe chunks preserving paragraph boundaries.
+
+    Strategy (applied only to blocks exceeding *limit*):
+      1. Split on blank-line paragraph boundaries first.
+      2. Within an oversized paragraph, split on single newlines.
+      3. Individual lines that are still too long are hard-split.
+
+    Normal blocks that fit within *limit* are returned as a single-element list.
+    """
+    if len(text) <= limit:
+        return [text]
+
+    paragraphs = re.split(r"\n\n+", text)
+    chunks: List[str] = []
+    current: List[str] = []
+
+    def _flush() -> None:
+        if current:
+            chunks.append("\n\n".join(current))
+            current.clear()
+
+    for para in paragraphs:
+        trial = "\n\n".join(current + [para]) if current else para
+        if len(trial) <= limit:
+            current.append(para)
+            continue
+        # Current paragraph would overflow — flush what we have
+        _flush()
+        if len(para) <= limit:
+            current.append(para)
+            continue
+
+        # Strategy 2: split oversized paragraph on single newlines
+        lines = para.split("\n")
+        sub_buf: List[str] = []
+        for line in lines:
+            trial2 = "\n".join(sub_buf + [line]) if sub_buf else line
+            if len(trial2) <= limit:
+                sub_buf.append(line)
+                continue
+            if sub_buf:
+                chunks.append("\n".join(sub_buf))
+                sub_buf.clear()
+            # Strategy 3: hard-split individual long line
+            if len(line) > limit:
+                for i in range(0, len(line), limit - 3):
+                    chunks.append(line[i : i + limit - 3].rstrip())
+            else:
+                sub_buf.append(line)
+        if sub_buf:
+            chunks.append("\n".join(sub_buf))
+
+    _flush()
+    return chunks

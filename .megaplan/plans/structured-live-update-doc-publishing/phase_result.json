@@ -1,0 +1,42 @@
+{
+  "phase": "finalize",
+  "invocation_id": "4fd1885db00a4cd8",
+  "exit_kind": "success",
+  "blocked_tasks": [],
+  "deviations": [
+    {
+      "kind": "quality_gate",
+      "message": "Plan question remains open: should new structured writes store only `blocks` or preserve legacy `body`/`sections` alongside? Settle during implementation \u2014 `blocks`-only is cleaner but preserving both fields costs little and aids rollback."
+    },
+    {
+      "kind": "quality_gate",
+      "message": "The `topic_sources` union derivation in Step 6.1 uses merged current-window + archive rows. Ensure the implementation does not silently truncate source IDs beyond the archive resolver's limit (50). If a structured document legitimately exceeds 50 distinct source IDs, either raise the limit or explicitly reject with a clear error rather than silently omitting sources."
+    }
+  ],
+  "artifacts_written": [
+    "final.md",
+    "finalize.json",
+    "user_actions.md"
+  ],
+  "cli_provenance": {
+    "phase_model": [
+      "plan=codex:medium",
+      "prep=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "critique=codex:low",
+      "revise=codex:medium",
+      "gate=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "finalize=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "execute=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "loop_plan=codex:medium",
+      "loop_execute=hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+      "review=codex:low",
+      "tiebreaker_researcher=codex:medium",
+      "tiebreaker_challenger=codex:medium",
+      "feedback=claude:low"
+    ],
+    "profile": "thoughtful",
+    "auto_approve": true,
+    "mode": "code",
+    "robustness": "standard"
+  }
+}

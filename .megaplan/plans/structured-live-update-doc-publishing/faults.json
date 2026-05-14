@@ -1,0 +1,138 @@
+{
+  "flags": [
+    {
+      "id": "FLAG-001",
+      "concern": "TopicEditor source resolution: archive-resolved block sources must feed source_authors and collision checks, not only validation/publishing hydration.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "Resolved the critique by making the media-ref schema explicit for attachments and embeds, requiring read-tool media metadata, relaxing the blocks-only `post_sectioned_topic` guard, and ensuring archive-resolved source rows feed author and collision logic rather than only validation/publishing.",
+      "raised_in": "critique_v1.json",
+      "status": "verified",
+      "severity": "significant",
+      "verified": true,
+      "addressed_in": "plan_v2.md",
+      "verified_in": "critique_v2.json"
+    },
+    {
+      "id": "FLAG-002",
+      "concern": "Media ref discovery: archive `get_message_context` output lacks attachments/embeds, so agents may not have enough metadata to produce stable media_refs for messages found through read tools.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "Resolved the critique by making the media-ref schema explicit for attachments and embeds, requiring read-tool media metadata, relaxing the blocks-only `post_sectioned_topic` guard, and ensuring archive-resolved source rows feed author and collision logic rather than only validation/publishing.",
+      "raised_in": "critique_v1.json",
+      "status": "verified",
+      "severity": "significant",
+      "verified": true,
+      "addressed_in": "plan_v2.md",
+      "verified_in": "critique_v2.json"
+    },
+    {
+      "id": "FLAG-003",
+      "concern": "Media ref schema: attachment-only `{message_id, attachment_index}` does not define how embed URLs are addressed despite the requirement to resolve attachment/embed URLs.",
+      "category": "completeness",
+      "severity_hint": "uncertain",
+      "evidence": "Resolved the critique by making the media-ref schema explicit for attachments and embeds, requiring read-tool media metadata, relaxing the blocks-only `post_sectioned_topic` guard, and ensuring archive-resolved source rows feed author and collision logic rather than only validation/publishing.",
+      "raised_in": "critique_v1.json",
+      "status": "verified",
+      "severity": "significant",
+      "verified": true,
+      "addressed_in": "plan_v2.md",
+      "verified_in": "critique_v2.json"
+    },
+    {
+      "id": "FLAG-004",
+      "concern": "Structured blocks acceptance: existing `post_sectioned_topic` rejection on missing `sections` must be relaxed for valid `blocks` payloads.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "Resolved the critique by making the media-ref schema explicit for attachments and embeds, requiring read-tool media metadata, relaxing the blocks-only `post_sectioned_topic` guard, and ensuring archive-resolved source rows feed author and collision logic rather than only validation/publishing.",
+      "raised_in": "critique_v1.json",
+      "status": "verified",
+      "severity": "significant",
+      "verified": true,
+      "addressed_in": "plan_v2.md",
+      "verified_in": "critique_v2.json"
+    },
+    {
+      "id": "verifiability-0",
+      "concern": "Criterion 12: requires human verification (subjective_judgment).",
+      "category": "other",
+      "severity_hint": "likely-minor",
+      "evidence": "",
+      "raised_in": "critique_v2.json",
+      "status": "open",
+      "severity": "minor",
+      "verified": false
+    },
+    {
+      "id": "issue_hints",
+      "concern": "Did the work fully address the issue hints, user notes, and approved plan requirements?: Issue hints require media refs to resolve to attachment/embed URLs at publish time, but the plan leaves embed addressing unresolved in its questions and assumptions while still saying validation should resolve attachments/embeds. A schema with only `{message_id, attachment_index}` can address attachments, but it cannot unambiguously address embeds unless the implementation defines a combined namespace or adds a `{kind, index}` field.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "Resolved the critique by making the media-ref schema explicit for attachments and embeds, requiring read-tool media metadata, relaxing the blocks-only `post_sectioned_topic` guard, and ensuring archive-resolved source rows feed author and collision logic rather than only validation/publishing.",
+      "raised_in": "critique_v1.json",
+      "status": "gate_disputed",
+      "severity": "significant",
+      "verified": false,
+      "addressed_in": "plan_v2.md"
+    },
+    {
+      "id": "correctness",
+      "concern": "Are the proposed changes technically correct?: The plan's internal resolver wording is slightly ambiguous: it says to add `get_topic_editor_source_messages(..., limit=50)` or extend the existing `get_topic_editor_message_context` path. The existing storage method clamps `limit` to at most 10 and slices requested IDs before querying, so any implementation that merely reuses that method without removing the cap for internal validation/hydration could miss sources beyond the first 10 in a structured document.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "The plan's internal resolver wording is slightly ambiguous: it says to add `get_topic_editor_source_messages(..., limit=50)` or extend the existing `get_topic_editor_message_context` path. The existing storage method clamps `limit` to at most 10 and slices requested IDs before querying, so any implementation that merely reuses that method without removing the cap for internal validation/hydration could miss sources beyond the first 10 in a structured document.",
+      "raised_in": "critique_v2.json",
+      "status": "gate_disputed",
+      "severity": "significant",
+      "verified": false,
+      "addressed_in": "plan_v2.md"
+    },
+    {
+      "id": "scope",
+      "concern": "Search for related code that handles the same concept. Is the reported issue a symptom of something broader?: Searched TopicEditor media handling and found existing `_message_payload`, `_filter_source_messages`, `_dispatch_understand_media_tool`, and `_enrich_media_understandings` paths already work with `attachments`/`embeds` or attachment indices. The plan updates publishing hydration, but should also preserve or reuse these existing source-window media conventions so new `media_refs` do not diverge from the current `understand_media` tool's `{message_id, attachment_index}` contract.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "Resolved the critique by making the media-ref schema explicit for attachments and embeds, requiring read-tool media metadata, relaxing the blocks-only `post_sectioned_topic` guard, and ensuring archive-resolved source rows feed author and collision logic rather than only validation/publishing.",
+      "raised_in": "critique_v1.json",
+      "status": "gate_disputed",
+      "severity": "significant",
+      "verified": false,
+      "addressed_in": "plan_v2.md"
+    },
+    {
+      "id": "all_locations",
+      "concern": "Does the change touch all locations AND supporting infrastructure?: Checked `storage_handler.get_topic_editor_message_context`: it selects only `message_id,channel_id,author_id,content,created_at,reference_id,thread_id`, so archive/read-tool messages currently do not include `guild_id`, `attachments`, or `embeds`. The plan adds a publishing lookup with those fields, but it does not explicitly update the `get_message_context` read tool output that the agent would use to discover exact attachment indices for archive messages.",
+      "category": "completeness",
+      "severity_hint": "likely-significant",
+      "evidence": "Resolved the critique by making the media-ref schema explicit for attachments and embeds, requiring read-tool media metadata, relaxing the blocks-only `post_sectioned_topic` guard, and ensuring archive-resolved source rows feed author and collision logic rather than only validation/publishing.",
+      "raised_in": "critique_v1.json",
+      "status": "gate_disputed",
+      "severity": "significant",
+      "verified": false,
+      "addressed_in": "plan_v2.md"
+    },
+    {
+      "id": "callers",
+      "concern": "Find the callers of the changed function. What arguments do they actually pass? Does the fix handle all of them?: Checked `_summary_for_tool` callers through `_dispatch_create_topic_tool`: all create tools currently pass raw tool args, and `post_sectioned_topic` currently rejects calls without `sections`. The plan says new `blocks` inputs should be accepted, but the dispatch rejection condition must be changed from `not args.get(\"sections\")` to allow valid `blocks`; otherwise new structured calls would be rejected before normalization.",
+      "category": "correctness",
+      "severity_hint": "likely-significant",
+      "evidence": "Resolved the critique by making the media-ref schema explicit for attachments and embeds, requiring read-tool media metadata, relaxing the blocks-only `post_sectioned_topic` guard, and ensuring archive-resolved source rows feed author and collision logic rather than only validation/publishing.",
+      "raised_in": "critique_v1.json",
+      "status": "gate_disputed",
+      "severity": "significant",
+      "verified": false,
+      "addressed_in": "plan_v2.md"
+    },
+    {
+      "id": "FLAG-005",
+      "concern": "TopicEditor source resolver: internal validation/hydration must not inherit the existing `get_topic_editor_message_context` 10-message cap.",
+      "category": "correctness",
+      "severity_hint": "uncertain",
+      "evidence": "`storage_handler.get_topic_editor_message_context` currently computes `safe_limit = max(1, min(int(limit or 10), 10))` and slices `message_ids` to that cap. The revised plan allows either a new `get_topic_editor_source_messages(..., limit=50)` resolver or extending the existing path; if the existing capped path is reused for block source validation, author derivation, citation hydration, or media hydration, structured topics with more than 10 source IDs can incorrectly reject or omit later refs.",
+      "raised_in": "critique_v2.json",
+      "status": "gate_disputed",
+      "severity": "significant",
+      "verified": false
+    }
+  ]
+}

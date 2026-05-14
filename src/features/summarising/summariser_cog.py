@@ -57,26 +57,23 @@ class SummarizerCog(commands.Cog):
         if db_handler is None:
             raise RuntimeError("SummarizerCog requires bot.db_handler for live-update runtime")
         self.dev_mode = bool(getattr(bot, "dev_mode", False))
-        # Single combined loop covers both editor and top_creations so they run
-        # together every hour. The old design had two independent loops on
-        # different intervals (editor 15min, top_creations 6hr) which made the
-        # debug-channel timeline unreadable and prevented the editor's
-        # reasoning embed from being interleaved with top_creations correctly.
         self.live_updates_enabled = self.dev_mode or _env_flag("LIVE_UPDATES_ENABLED", False)
-        self.live_top_creations_enabled = self.dev_mode or _env_flag("LIVE_TOP_CREATIONS_ENABLED", False)
+        # The old live-top-creations loop directly auto-posted media once it hit
+        # the reaction threshold. TopicEditor now auto-shortlists those media
+        # posts as watching topics so the agent can inspect context/vision first.
+        self.live_top_creations_enabled = False
+        if _env_flag("LIVE_TOP_CREATIONS_ENABLED", False):
+            logger.warning(
+                "LIVE_TOP_CREATIONS_ENABLED is ignored; reaction-qualified media "
+                "is now handled by TopicEditor auto-shortlisting."
+            )
         self.live_pass_interval_minutes = _env_int("LIVE_PASS_INTERVAL_MINUTES", 60)
         dry_run_lookback_hours = _env_int("LIVE_UPDATE_DEV_LOOKBACK_HOURS", 6)
         self.live_update_editor = live_update_editor or self._build_live_update_editor(
             db_handler,
             dry_run_lookback_hours=dry_run_lookback_hours,
         )
-        self.live_top_creations = live_top_creations or LiveTopCreations(
-            db_handler,
-            bot=bot,
-            logger_instance=getattr(bot, "logger", logger),
-            dry_run_lookback_hours=dry_run_lookback_hours,
-            environment="dev" if self.dev_mode else "prod",
-        )
+        self.live_top_creations = live_top_creations
         if start_loops:
             self.run_live_pass.change_interval(minutes=self.live_pass_interval_minutes)
             if self.live_updates_enabled or self.live_top_creations_enabled:
@@ -84,7 +81,7 @@ class SummarizerCog(commands.Cog):
             else:
                 logger.warning(
                     "Live-update pass disabled; set LIVE_UPDATES_ENABLED=true "
-                    "and/or LIVE_TOP_CREATIONS_ENABLED=true to enable in production."
+                    "to enable in production."
                 )
 
     def cog_unload(self):
@@ -93,14 +90,7 @@ class SummarizerCog(commands.Cog):
 
     @tasks.loop(minutes=60)
     async def run_live_pass(self):
-        """Combined hourly pass: editor → top_creations → flush reasoning.
-
-        Both subsystems run on the same cadence so their debug telemetry lands
-        contiguously in the dev channel and the editor's reasoning embed can be
-        sent after top_creations posts. Production (real) posts still go to
-        their respective production channels; only the debug embeds are routed
-        to the dev channel.
-        """
+        """Hourly TopicEditor pass plus trace flushing."""
         if self.live_updates_enabled:
             logger.info("Scheduled live-update editor pass starting...")
             try:
@@ -108,15 +98,7 @@ class SummarizerCog(commands.Cog):
                 logger.info("Scheduled live-update editor pass finished: %s", result)
             except Exception as e:
                 logger.error(f"Error during scheduled live-update editor pass: {e}", exc_info=True)
-        if self.live_top_creations_enabled:
-            logger.info("Scheduled live top-creations pass starting...")
-            try:
-                result = await self.live_top_creations.run_once(trigger="scheduled")
-                logger.info("Scheduled live top-creations pass finished: %s", result)
-            except Exception as e:
-                logger.error(f"Error during scheduled live top-creations pass: {e}", exc_info=True)
-        # Flush the editor's deferred reasoning embed + trace file so they land
-        # after top_creations' debug embed in the dev channel.
+        # Flush the editor's deferred reasoning embed + trace file.
         try:
             flush_pending_reasoning = getattr(self.live_update_editor, "flush_pending_reasoning", None)
             if callable(flush_pending_reasoning):

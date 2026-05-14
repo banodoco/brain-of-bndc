@@ -1,0 +1,31 @@
+{
+  "receipt_id": "0a075464-0944-4bb6-b252-0c209fea07bc",
+  "plan_id": "fresh-thoughtful-standard-20260514-0058",
+  "phase": "finalize",
+  "iteration": 1,
+  "attempt": 1,
+  "timestamp_utc": "2026-05-13T23:08:54.487305+00:00",
+  "profile_name": "thoughtful",
+  "agent": "hermes",
+  "agent_mode": "persistent",
+  "model_configured": "hermes:fireworks:accounts/fireworks/models/deepseek-v4-pro",
+  "model_actual": "accounts/fireworks/models/deepseek-v4-pro",
+  "session_id": "f39e569c-a394-438e-b061-c09b477c3a5f",
+  "megaplan_version": "0.8.1",
+  "schema_version": 1,
+  "prompt_hash_raw": "b203f8ffdd3b7625a389993b5a22d0ae635ab9d2f9c5fd3228d4bc1834d8de89",
+  "prompt_hash_canonical": "aaf5f8f0156e63aee0235a3890b2673ecadc19f4276495c47963771c6d0ab5d3",
+  "canonicalization_version": 1,
+  "upstream_artifact_hashes": [],
+  "cost_usd": 1.80359874,
+  "duration_ms": 179717,
+  "prompt_tokens": 1017671,
+  "completion_tokens": 9440,
+  "verdict": null,
+  "metrics": {
+    "tasks_count": 13,
+    "sense_checks_count": 13,
+    "per_task_evidence_file_count": 0
+  },
+  "scope_drift_severity": null
+}
