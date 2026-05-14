@@ -321,8 +321,7 @@ class TestRenderTopicPublishUnits:
         assert text_unit["kind"] == "text"
         assert "## Live update: Test Topic" in text_unit["content"]
         assert "Hello world." in text_unit["content"]
-        # Inline citation with jump URL
-        assert "[[1]](https://discord.com/channels/123/456/111)" in text_unit["content"]
+        assert "Sources: [1] https://discord.com/channels/123/456/111" in text_unit["content"]
 
     def test_no_global_source_footer_for_structured_topics(self):
         topic = self._topic_with_blocks([
@@ -345,8 +344,7 @@ class TestRenderTopicPublishUnits:
         units = render_topic_publish_units(topic, source_metadata=source_metadata)
         # Concatenate all text unit contents to search for footer patterns
         all_text = " ".join(u["content"] for u in units if u["kind"] == "text")
-        assert "Source:" not in all_text
-        assert "Sources:" not in all_text
+        assert "Sources: 111, 222" not in all_text
 
     def test_section_sources_rendered_inline_next_to_correct_section(self):
         topic = self._topic_with_blocks([
@@ -374,17 +372,14 @@ class TestRenderTopicPublishUnits:
             "333": self._source_meta("333"),
         }
         units = render_topic_publish_units(topic, source_metadata=source_metadata)
-        # Intro unit should have [[1]](...111...)
         intro_content = units[0]["content"]
-        assert "[[1]](https://discord.com/channels/123/456/111)" in intro_content
+        assert "[1] https://discord.com/channels/123/456/111" in intro_content
         assert "222" not in intro_content  # Section A's source not in intro
-        # Section A should have [[1]](...222...)
         sec_a_content = units[1]["content"]
-        assert "[[1]](https://discord.com/channels/123/456/222)" in sec_a_content
+        assert "[1] https://discord.com/channels/123/456/222" in sec_a_content
         assert "111" not in sec_a_content  # Intro's source not in section A
-        # Section B should have [[1]](...333...)
         sec_b_content = units[2]["content"]
-        assert "[[1]](https://discord.com/channels/123/456/333)" in sec_b_content
+        assert "[1] https://discord.com/channels/123/456/333" in sec_b_content
 
     def test_citations_deduped_and_ordered_per_block(self):
         topic = self._topic_with_blocks([
@@ -402,15 +397,14 @@ class TestRenderTopicPublishUnits:
         units = render_topic_publish_units(topic, source_metadata=source_metadata)
         content = units[0]["content"]
         # 111 should appear before 222 and 333; no duplicate 111
-        pos_first = content.find("[[1]]")
-        pos_second = content.find("[[2]]")
-        pos_third = content.find("[[3]]")
+        pos_first = content.find("[1]")
+        pos_second = content.find("[2]")
+        pos_third = content.find("[3]")
         assert pos_first < pos_second < pos_third
         assert "111" in content
         assert "222" in content
         assert "333" in content
-        # No [[4]]
-        assert "[[4]]" not in content
+        assert "[4]" not in content
 
     def test_citation_without_metadata_still_renders_number(self):
         topic = self._topic_with_blocks([
@@ -422,7 +416,7 @@ class TestRenderTopicPublishUnits:
         ])
         units = render_topic_publish_units(topic, source_metadata={})
         content = units[0]["content"]
-        assert "[[1]]" in content
+        assert "[1] orphan" in content
         # Should NOT have a URL since no metadata
         assert "](https://" not in content or "orphan" not in content.replace("](/", "](")
 

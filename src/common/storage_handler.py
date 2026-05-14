@@ -1376,6 +1376,62 @@ class StorageHandler:
             logger.warning("Could not fetch topic-editor message context: %s", e, exc_info=True)
             return []
 
+    def get_topic_editor_source_messages(
+        self,
+        message_ids: List[str],
+        guild_id: Optional[int] = None,
+        environment: str = 'prod',
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """Fetch exact archived source messages for validation and publishing.
+
+        Topic publishing is currently synchronous, so this intentionally uses the
+        Supabase client directly rather than the async read-tool helpers. The
+        returned shape includes channel/guild metadata for source jump URLs and
+        attachments/embeds for block-scoped media resolution.
+        """
+        if not self.supabase_client or not message_ids:
+            return []
+
+        safe_limit = max(1, min(int(limit or 50), 100))
+        ids: List[str] = []
+        seen = set()
+        for item in message_ids:
+            if item is None:
+                continue
+            message_id = str(item)
+            if message_id and message_id not in seen:
+                seen.add(message_id)
+                ids.append(message_id)
+            if len(ids) >= safe_limit:
+                break
+        if not ids:
+            return []
+
+        try:
+            query = (
+                self.supabase_client.table('discord_messages')
+                .select(
+                    'message_id,guild_id,channel_id,thread_id,author_id,content,'
+                    'attachments,embeds,created_at,reference_id,reaction_count'
+                )
+                .in_('message_id', ids)
+                .eq('is_deleted', False)
+                .limit(safe_limit)
+            )
+            if guild_id is not None:
+                query = query.eq('guild_id', guild_id)
+            result = query.execute()
+            rows_by_id = {
+                str(row.get('message_id')): row
+                for row in (result.data or [])
+                if row.get('message_id') is not None
+            }
+            return [rows_by_id[mid] for mid in ids if mid in rows_by_id]
+        except Exception as e:
+            logger.warning("Could not fetch topic-editor source messages: %s", e, exc_info=True)
+            return []
+
     async def store_topic_transition(self, transition: Dict[str, Any], environment: str = 'prod') -> Optional[Dict[str, Any]]:
         return await self._insert_live_row('topic_transitions', self._clean_payload({
             'topic_id': transition.get('topic_id'),

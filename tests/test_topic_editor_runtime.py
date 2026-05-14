@@ -2633,7 +2633,7 @@ def test_publishing_enabled_sends_structured_blocks_in_order():
 
     assert channel.sent[0].startswith("## Live update: Structured Publish Test")
     assert "Alice released a new LoRA with benchmarks." in channel.sent[0]
-    assert "[[1]]" in channel.sent[0]
+    assert "Sources: [1] https://discord.com/channels/1/10/200" in channel.sent[0]
 
     assert channel.sent[1] == "https://cdn.example.com/image1.png"
 

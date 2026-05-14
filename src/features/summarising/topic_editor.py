@@ -3920,7 +3920,7 @@ def render_topic_publish_units(
         {"kind": "media", "url": "https://...", "ref": {...}}
 
     The order is deterministic: header, intro text with inline linked
-    citations, intro media, each section text with inline citations, that
+    citations, intro media, each section text with per-block citations, that
     section media.
 
     Citations are per-block, deduped, and ordered by first appearance.
@@ -3973,7 +3973,9 @@ def render_topic_publish_units(
         if block_text:
             lines.append(block_text)
 
-        # Inline citations
+        # Per-block citations. Discord does not render Markdown link syntax
+        # like ``[label](url)``, so include the actual jump URLs next to the
+        # relevant block instead of emitting fake inline links.
         if ordered_ids:
             citation_parts: List[str] = []
             for idx, sid in enumerate(ordered_ids, start=1):
@@ -3987,10 +3989,10 @@ def render_topic_publish_units(
                         f"{channel_id}/{sid}"
                     )
                 if url:
-                    citation_parts.append(f"[[{idx}]]({url})")
+                    citation_parts.append(f"[{idx}] {url}")
                 else:
-                    citation_parts.append(f"[[{idx}]]")
-            lines.append(" ".join(citation_parts))
+                    citation_parts.append(f"[{idx}] {sid}")
+            lines.append("Sources: " + " ".join(citation_parts))
 
         block_content = "\n".join(lines)
         if block["type"] == "intro":
