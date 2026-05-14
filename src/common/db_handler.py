@@ -2,6 +2,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any, Tuple
 import asyncio
+import inspect
 
 from .redaction import redact_wallet as _redact_wallet
 
@@ -52,6 +53,8 @@ class DatabaseHandler:
     
     def _run_async_in_thread(self, coro):
         """Helper to run async operations from sync context."""
+        if not inspect.isawaitable(coro):
+            return coro
         try:
             # Check if we're already in an async context
             try:
