@@ -28,6 +28,7 @@ from src.features.summarising.summariser_cog import SummarizerCog
 from src.features.summarising.summariser import ChannelSummarizer
 from src.features.logging.logger_cog import LoggerCog
 from src.features.sharing.sharing_cog import SharingCog
+from src.features.sharing.social_review_cog import SocialReviewCog
 from src.features.sharing.providers.x_provider import XProvider
 from src.features.sharing.providers.youtube_zapier_provider import YouTubeZapierProvider
 from src.features.sharing.social_publish_service import SocialPublishService
@@ -221,6 +222,10 @@ async def main_async(args):
             logger.error("Failed to retrieve Sharer instance from SharingCog!")
             return
         logger.info("SharingCog loaded.")
+
+        social_review_cog_instance = SocialReviewCog(bot, bot.db_handler)
+        await bot.add_cog(social_review_cog_instance)
+        logger.info("SocialReviewCog loaded.")
 
         # 4. Reactor Instance
         supabase_url = os.getenv('SUPABASE_URL')
