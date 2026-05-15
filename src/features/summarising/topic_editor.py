@@ -12,11 +12,14 @@ import json
 import logging
 import re
 import os
+import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from urllib.parse import unquote, urlparse
 
+import aiohttp
 import discord
 
 from src.features.summarising.live_update_prompts import DEFAULT_LIVE_UPDATE_MODEL
@@ -2920,38 +2923,70 @@ class TopicEditor:
 
             # Build send units from publish_units.
             # Send-unit model:
-            #   {'send_kind': 'text',   'content': str}
-            #   {'send_kind': 'url',    'content': str, 'ref': dict}
-            #   {'send_kind': 'file',   'file_path': str, 'filename': str,
-            #     'fallback_url': str, 'ref': dict, 'trace': str}
+            #   {'send_kind': 'text',     'content': str}
+            #   {'send_kind': 'file_url', 'source_url': str, 'filename': str,
+            #    'fallback_url': str, 'ref': dict}
+            #   {'send_kind': 'file',     'file_path': str, 'filename': str,
+            #    'fallback_url': str, 'ref': dict, 'trace': str}
             send_units: List[Dict[str, Any]] = []
             _build_send_units(publish_units, send_units, source_metadata)
-            total_units = len(send_units)
 
             # Send block-by-block via send units
             sent_ids: List[int] = []
             error: Optional[str] = None
+            had_failure = False
             publish_traces: List[Dict[str, str]] = []
             channel_id = self._resolve_live_channel_id(guild_id)
             try:
                 channel = await self._resolve_discord_channel(channel_id)
                 if channel is None:
                     raise RuntimeError(f"live_update_channel_not_found:{channel_id}")
-                for unit in send_units:
+                idx = 0
+                while idx < len(send_units):
+                    unit = send_units[idx]
+                    if unit.get("send_kind") == "file_url":
+                        batch = [unit]
+                        idx += 1
+                        while (
+                            idx < len(send_units)
+                            and send_units[idx].get("send_kind") == "file_url"
+                            and len(batch) < 10
+                        ):
+                            batch.append(send_units[idx])
+                            idx += 1
+                        batch_sent_ids, batch_error, batch_traces = await self._send_file_url_batch(
+                            channel,
+                            batch,
+                            topic_id,
+                        )
+                        sent_ids.extend(batch_sent_ids)
+                        publish_traces.extend(batch_traces)
+                        if batch_error:
+                            error = batch_error
+                            had_failure = True
+                        if not batch_sent_ids:
+                            had_failure = True
+                        continue
+
                     unit_sent_id, unit_error, unit_trace = await self._send_one_unit(
                         channel, unit, topic_id
                     )
+                    idx += 1
                     if unit_sent_id is not None:
                         sent_ids.append(unit_sent_id)
                     if unit_trace:
                         publish_traces.append(unit_trace)
                     if unit_error:
                         error = unit_error  # last error for top-level reporting
+                        had_failure = True
+                    if unit_sent_id is None:
+                        had_failure = True
             except Exception as exc:
                 error = str(exc)
+                had_failure = True
 
             status = (
-                "sent" if sent_ids and len(sent_ids) == total_units and not error
+                "sent" if sent_ids and not had_failure
                 else "partial" if sent_ids else "failed"
             )
             if publish_traces:
@@ -3130,6 +3165,144 @@ class TopicEditor:
                     except Exception:
                         pass
             return (None, error_str, trace)
+
+    async def _send_file_url_batch(
+        self,
+        channel: Any,
+        units: Sequence[Dict[str, Any]],
+        topic_id: str,
+    ) -> Tuple[List[int], Optional[str], List[Dict[str, str]]]:
+        """Download Discord-hosted media URLs and upload them as Discord files.
+
+        Consecutive media units belong to the same document block, so this
+        batches them into one Discord message when possible. If the batch upload
+        fails, each media item falls back to its original URL so publishing can
+        continue.
+        """
+        if not units:
+            return [], None, []
+
+        from src.common.external_media import sanitise_url_for_logs
+
+        sent_ids: List[int] = []
+        traces: List[Dict[str, str]] = []
+        temp_paths: List[str] = []
+        handles: List[Any] = []
+        error: Optional[str] = None
+
+        try:
+            for unit in units:
+                source_url = unit.get("source_url") or unit.get("fallback_url") or ""
+                safe_url = sanitise_url_for_logs(source_url)
+                try:
+                    file_path, filename = await self._download_publish_media_url(source_url, unit)
+                    temp_paths.append(file_path)
+                    handle = open(file_path, "rb")
+                    handles.append(handle)
+                    traces.append({
+                        "url": safe_url,
+                        "status": "downloaded",
+                        "action": "queued_file_upload",
+                        "filename": filename,
+                    })
+                except Exception as exc:
+                    error = str(exc)
+                    traces.append({
+                        "url": safe_url,
+                        "status": "download_failed",
+                        "action": "fallback_url",
+                        "detail": str(exc)[:200],
+                    })
+                    sent = await channel.send(source_url)
+                    mid = getattr(sent, "id", None)
+                    if mid is not None:
+                        sent_ids.append(int(mid))
+
+            if not handles:
+                return sent_ids, error, traces
+
+            files = [
+                discord.File(handle, filename=os.path.basename(getattr(handle, "name", "")) or None)
+                for handle in handles
+            ]
+            try:
+                sent = await channel.send(files=files)
+                mid = getattr(sent, "id", None)
+                if mid is not None:
+                    sent_ids.append(int(mid))
+                for trace in traces:
+                    if trace.get("action") == "queued_file_upload":
+                        trace["action"] = "files_sent"
+            except Exception as exc:
+                error = str(exc)
+                logger.warning(
+                    "TopicEditor: Discord file batch send failed for topic %s, falling back to URLs: %s",
+                    topic_id,
+                    exc,
+                )
+                for unit in units:
+                    source_url = unit.get("source_url") or unit.get("fallback_url") or ""
+                    sent = await channel.send(source_url)
+                    mid = getattr(sent, "id", None)
+                    if mid is not None:
+                        sent_ids.append(int(mid))
+                traces.append({
+                    "status": "file_batch_send_failed",
+                    "action": "fallback_url",
+                    "detail": str(exc)[:200],
+                })
+
+            return sent_ids, error, traces
+        finally:
+            for handle in handles:
+                try:
+                    handle.close()
+                except Exception:
+                    pass
+            for path in temp_paths:
+                try:
+                    os.unlink(path)
+                except FileNotFoundError:
+                    pass
+                except Exception as exc:
+                    logger.debug("TopicEditor: failed to delete temp media %s: %s", path, exc)
+
+    async def _download_publish_media_url(
+        self,
+        source_url: str,
+        unit: Dict[str, Any],
+    ) -> Tuple[str, str]:
+        if not source_url:
+            raise ValueError("empty media URL")
+
+        filename = _safe_publish_filename(
+            unit.get("filename")
+            or _filename_from_url(source_url)
+            or f"topic-media-{int(time.time() * 1000)}"
+        )
+        suffix = os.path.splitext(filename)[1] or ".bin"
+        fd, path = tempfile.mkstemp(prefix="topic-editor-media-", suffix=suffix)
+        os.close(fd)
+
+        timeout = aiohttp.ClientTimeout(total=60)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(source_url) as response:
+                    if response.status >= 400:
+                        raise RuntimeError(f"download HTTP {response.status}")
+                    with open(path, "wb") as out:
+                        async for chunk in response.content.iter_chunked(1024 * 256):
+                            if chunk:
+                                out.write(chunk)
+            final_path = os.path.join(os.path.dirname(path), filename)
+            os.replace(path, final_path)
+            return final_path, filename
+        except Exception:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+            raise
 
     async def _resolve_external_for_publish(
         self, source_url: str, ref: Dict[str, Any]
@@ -4072,12 +4245,14 @@ def _build_send_units(
     Populates ``send_units_out`` in-place with dicts following the send-unit model:
 
         {'send_kind': 'text',   'content': str}
-        {'send_kind': 'url',    'content': str, 'ref': dict}
+        {'send_kind': 'file_url', 'source_url': str, 'filename': str,
+         'fallback_url': str, 'ref': dict}
         {'send_kind': 'file',   'file_path': str, 'filename': str,
          'fallback_url': str, 'ref': dict, 'trace': str}
 
     Text units contain the block content (already header-wrapped). Media units
-    that are NOT external become ``url`` send units (the URL is sent as text).
+    that are NOT external become ``file_url`` send units; the publisher
+    downloads and reuploads consecutive file_url units together.
     External units become ``file`` send units; the actual resolution/download
     happens lazily in :meth:`TopicEditor._send_one_unit` so the caller can
     decide whether to invoke the resolver.
@@ -4089,11 +4264,21 @@ def _build_send_units(
         if kind == "text":
             send_units_out.append({"send_kind": "text", "content": unit["content"]})
         elif kind == "media":
-            # Discord-hosted attachment/embed: send the URL as plain text.
+            ref = unit.get("ref", {})
+            meta = source_metadata.get(str(ref.get("message_id")), {})
+            if not _is_reuploadable_discord_media_url(unit["url"]):
+                send_units_out.append({
+                    "send_kind": "url",
+                    "content": unit["url"],
+                    "ref": ref,
+                })
+                continue
             send_units_out.append({
-                "send_kind": "url",
-                "content": unit["url"],
-                "ref": unit.get("ref", {}),
+                "send_kind": "file_url",
+                "source_url": unit["url"],
+                "fallback_url": unit["url"],
+                "filename": _filename_for_media_ref(ref, meta, unit["url"]),
+                "ref": ref,
             })
         elif kind == "external":
             url = unit.get("url", "")
@@ -4138,6 +4323,49 @@ def _resolve_media_url_from_metadata(
         from src.common.external_media import extract_external_url_at_index
         return extract_external_url_at_index(meta, index)
     return None
+
+
+def _filename_for_media_ref(ref: Dict[str, Any], meta: Dict[str, Any], url: str) -> str:
+    kind = ref.get("kind", "attachment")
+    index = int(ref.get("index") or 0)
+    if kind == "attachment":
+        attachments = meta.get("attachments") or []
+        if isinstance(attachments, list) and 0 <= index < len(attachments):
+            att = attachments[index]
+            if isinstance(att, dict) and att.get("filename"):
+                return _safe_publish_filename(att.get("filename"))
+    return _safe_publish_filename(_filename_from_url(url) or f"media-{index}.bin")
+
+
+def _filename_from_url(url: str) -> str:
+    try:
+        path = urlparse(str(url)).path
+    except Exception:
+        return ""
+    name = unquote(os.path.basename(path or ""))
+    return name
+
+
+def _safe_publish_filename(value: Any) -> str:
+    name = str(value or "media.bin").strip().replace("\x00", "")
+    name = os.path.basename(name)
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._")
+    if not name:
+        name = "media.bin"
+    return name[:120]
+
+
+def _is_reuploadable_discord_media_url(url: str) -> bool:
+    try:
+        host = (urlparse(str(url)).hostname or "").lower()
+    except Exception:
+        return False
+    return host in {
+        "cdn.discordapp.com",
+        "media.discordapp.net",
+        "images-ext-1.discordapp.net",
+        "images-ext-2.discordapp.net",
+    }
 
 
 def _indent_trace_block(text: str) -> str:

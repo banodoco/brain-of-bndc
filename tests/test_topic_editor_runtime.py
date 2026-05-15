@@ -2681,6 +2681,99 @@ def test_publishing_enabled_sends_structured_blocks_in_order():
     assert db.topic_updates[0][1]["discord_message_ids"] == [9101, 9102, 9103, 9104]
 
 
+def test_discord_media_refs_are_bundled_and_temp_files_deleted(monkeypatch, tmp_path):
+    class SentMessage:
+        def __init__(self, message_id):
+            self.id = message_id
+
+    class Channel:
+        def __init__(self):
+            self.sent = []
+            self._counter = 9700
+
+        async def send(self, content=None, file=None, files=None):
+            self.sent.append({"content": content, "file": file, "files": files or []})
+            self._counter += 1
+            return SentMessage(self._counter)
+
+    channel = Channel()
+    bot = SimpleNamespace(get_channel=lambda cid: channel if cid == 2 else None)
+    db = FakeDB()
+    db.source_message_rows = [
+        {
+            "message_id": "300",
+            "guild_id": 1,
+            "channel_id": 10,
+            "author_id": 42,
+            "content": "Two samples.",
+            "created_at": "2026-05-13T10:00:00Z",
+            "author_context_snapshot": {"username": "alice"},
+            "attachments": [
+                {
+                    "url": "https://cdn.discordapp.com/attachments/1/2/a.mp4",
+                    "filename": "a.mp4",
+                },
+                {
+                    "url": "https://cdn.discordapp.com/attachments/1/2/b.mp4",
+                    "filename": "b.mp4",
+                },
+            ],
+            "embeds": [],
+        }
+    ]
+
+    created_paths = []
+
+    async def fake_download(_self, source_url, unit):
+        filename = unit.get("filename") or "media.bin"
+        path = tmp_path / filename
+        path.write_bytes(b"fake-media")
+        created_paths.append(path)
+        return str(path), filename
+
+    monkeypatch.setattr(TopicEditor, "_download_publish_media_url", fake_download)
+
+    editor = TopicEditor(
+        bot=bot,
+        db_handler=db,
+        llm_client=FakeClaude(SimpleNamespace(content=[], usage=None)),
+        guild_id=1,
+        live_channel_id=2,
+        environment="prod",
+    )
+    editor.publishing_enabled = True
+
+    topic = {
+        "topic_id": "topic-bundled-media",
+        "guild_id": 1,
+        "state": "posted",
+        "headline": "Bundled Media Test",
+        "summary": {
+            "blocks": [
+                {
+                    "type": "intro",
+                    "text": "Two related samples.",
+                    "source_message_ids": ["300"],
+                    "media_refs": [
+                        {"message_id": "300", "kind": "attachment", "index": 0},
+                        {"message_id": "300", "kind": "attachment", "index": 1},
+                    ],
+                }
+            ]
+        },
+        "source_message_ids": ["300"],
+    }
+
+    result = asyncio.run(editor._publish_topic(topic))
+
+    assert result["status"] == "sent"
+    assert len(channel.sent) == 2
+    assert channel.sent[0]["content"].startswith("## Live update: Bundled Media Test")
+    assert len(channel.sent[1]["files"]) == 2
+    assert {file.filename for file in channel.sent[1]["files"]} == {"a.mp4", "b.mp4"}
+    assert all(not path.exists() for path in created_paths)
+
+
 # ---- (g) publishing disabled returns deterministic would-publish sequence ----
 
 def test_publishing_suppressed_returns_would_publish_sequence():

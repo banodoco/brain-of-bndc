@@ -797,6 +797,21 @@ class TestBuildSendUnits:
         assert out[0]["send_kind"] == "url"
         assert out[0]["content"] == "https://cdn.example.com/img.png"
 
+    def test_discord_media_unit_becomes_file_url_send_unit(self):
+        units = [{
+            "kind": "media",
+            "url": "https://cdn.discordapp.com/attachments/1/2/img.png",
+            "ref": {"message_id": "111", "kind": "attachment", "index": 0},
+        }]
+        out: list = []
+        _build_send_units(units, out, {
+            "111": {"attachments": [{"filename": "demo image.png"}]},
+        })
+        assert len(out) == 1
+        assert out[0]["send_kind"] == "file_url"
+        assert out[0]["source_url"] == "https://cdn.discordapp.com/attachments/1/2/img.png"
+        assert out[0]["filename"] == "demo_image.png"
+
     def test_external_unit_becomes_file_send_unit(self):
         units = [{"kind": "external", "url": "https://x.com/user/status/123", "ref": {"message_id": "1", "kind": "external", "index": 0}}]
         out: list = []
