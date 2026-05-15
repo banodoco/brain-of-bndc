@@ -1,0 +1,116 @@
+{
+  "robustness": "standard",
+  "signals": {
+    "iteration": 1,
+    "idea": "# Sprint 2: Media Understanding and Durable Queue Mode\n\nProfile intent: `premium/standard/high @codex +feedback`.\n\nChain encoding note: this milestone should use first-class chain fields for `vendor: codex`, `depth: high`, and `with_feedback: true`.\n\n## Source Plan\n\nUse `docs/agent-loop-standardisation-and-live-update-social-plan.md`, especially:\n\n- `Sprint 2: Media Understanding and Durable Queue Mode`\n- `Queued Media Risk`\n- `Provider Identity Risk`\n- `Duplicate Protection Must Be Durable`\n- `Definition of Done`\n\n## Goal\n\nMake media-aware social decisions and enable queue mode only when media attachment is durable across restarts/deploys.\n\nThis is the highest-risk sprint. Queued media must not depend on temporary local files that disappear after a restart or deploy.\n\n## Required Scope\n\nImplement:\n\n- Extract/reuse image and video understanding handlers for the social loop.\n- Add social-loop read tools:\n  - `get_live_update_topic`\n  - `get_source_messages`\n  - `get_published_update_context`\n  - `inspect_message_media`\n  - `understand_image`\n  - `understand_video`\n  - `list_social_routes`\n- Add typed tool result envelopes with truncation metadata.\n- Run image/video understanding on selected or candidate media.\n- Require media understanding for media-heavy posts unless explicitly skipped with a recorded reason.\n- Extend `SocialSourceKind` with `live_update_social`.\n- Add provider/account metadata for bot-owned live-update social posts.\n- Add `enqueue_social_post`.\n- Add publication duplicate checks against both `live_update_social_runs` and `social_publications`.\n- Add queue-mode status and failure logging.\n\n## Durable Media Requirement\n\nQueue mode is not complete until queued image/video media can attach reliably after process restart or deploy.\n\nImplement one durable strategy:\n\n1. Upload resolved media to durable object storage and queue durable URLs; or\n2. Store media ref identities and resolve/download them at publication execution time.\n\nAlso implement:\n\n- Validate file size, content type, and provider compatibility before enqueueing.\n- Store fallback reason when media cannot be attached.\n- Ensure `SocialPublishService` or provider execution does not depend on temporary files for queued media.\n\n## Explicit Non-Goals\n\n- Do not enable immediate publish mode.\n- Do not implement thread publishing.\n- Do not silently degrade media-heavy posts into text-only posts.\n- Do not rely on `duplicate_policy` alone; enforce durable guards.\n\n## Acceptance Criteria\n\n- The social loop can inspect and understand media from source messages.\n- A media-heavy live update draft includes selected media refs plus understanding summaries.\n- Tool drift tests fail if a social-loop media tool is advertised without a handler/backend dependency.\n- In `LIVE_UPDATE_SOCIAL_MODE=queue`, an approved post creates a queued `social_publications` row.\n- Queued text posts work.\n- Queued media posts work after process restart or deploy.\n- Publication rows include topic ID, source message IDs, live-update Discord message IDs, selected media refs, and social run ID.\n- Duplicate reruns do not enqueue another post.",
+    "significant_flags": 0,
+    "unresolved_flags": [],
+    "resolved_flags": [],
+    "weighted_score": 0,
+    "weighted_history": [],
+    "plan_delta_from_previous": null,
+    "recurring_critiques": [],
+    "scope_creep_flags": [],
+    "loop_summary": "Iteration 1. Weighted score trajectory: 0. Plan deltas: n/a. Recurring critiques: 0. Resolved flags: 0. Open significant flags: 0.",
+    "debt_overlaps": [],
+    "escalated_debt_subsystems": []
+  },
+  "warnings": [],
+  "criteria_check": {
+    "count": 12,
+    "items": [
+      {
+        "criterion": "All existing tests in tests/test_live_update_social_agent.py, tests/test_live_update_social_helpers.py, tests/test_live_update_social_runs.py, tests/test_social_publish_service.py, and tests/test_social_publications.py pass without modification",
+        "priority": "must",
+        "requires": [
+          "run_tests"
+        ]
+      },
+      {
+        "criterion": "understand_image returns a ToolResult with a non-empty description when given a valid image URL (mocked Gemini response)",
+        "priority": "must",
+        "requires": [
+          "run_tests"
+        ]
+      },
+      {
+        "criterion": "understand_video returns ToolResult(ok=False, error=...) when video upload to Gemini fails \u2014 it does not crash",
+        "priority": "must",
+        "requires": [
+          "run_tests"
+        ]
+      },
+      {
+        "criterion": "All advertised social-loop tools (read tools + media tools + terminal tools) have a handler binding \u2014 tool drift test passes",
+        "priority": "must",
+        "requires": [
+          "run_tests"
+        ]
+      },
+      {
+        "criterion": "enqueue_social_post creates exactly one social_publications row with source_kind='live_update_social', status='queued', and durable media URLs in media_hints",
+        "priority": "must",
+        "requires": [
+          "run_tests"
+        ]
+      },
+      {
+        "criterion": "Duplicate enqueue_social_post calls for the same topic_id+platform+action do not create a second social_publications row",
+        "priority": "must",
+        "requires": [
+          "run_tests"
+        ]
+      },
+      {
+        "criterion": "Media-heavy drafts without media understanding and without skip_media_understanding flag cause enqueue_social_post to fail with an error (no silent text-only degradation)",
+        "priority": "must",
+        "requires": [
+          "run_tests"
+        ]
+      },
+      {
+        "criterion": "validate_media_for_enqueue rejects files over 50 MB and unsupported content types (text/plain, application/octet-stream without image/video subtype)",
+        "priority": "must",
+        "requires": [
+          "run_tests"
+        ]
+      },
+      {
+        "criterion": "SocialSourceKind includes 'live_update_social' and the literal type check passes",
+        "priority": "must",
+        "requires": [
+          "run_tests"
+        ]
+      },
+      {
+        "criterion": "ToolResult envelope includes truncated, truncated_at, and total_length fields that are populated when understanding output exceeds a reasonable limit",
+        "priority": "should",
+        "requires": [
+          "run_tests"
+        ]
+      },
+      {
+        "criterion": "Each new module is under 400 lines \u2014 media_understanding.py, and tool additions to tools.py keep the file under 500 lines",
+        "priority": "should",
+        "requires": [
+          "read_files"
+        ]
+      },
+      {
+        "criterion": "Queue-mode tools are only available when LIVE_UPDATE_SOCIAL_MODE=queue and SocialPublishService is injected; read tools are always available",
+        "priority": "should",
+        "requires": [
+          "run_tests"
+        ]
+      }
+    ]
+  },
+  "preflight_results": {
+    "project_dir_exists": true,
+    "project_dir_writable": true,
+    "success_criteria_present": true,
+    "claude_available": true,
+    "codex_available": true
+  },
+  "unresolved_flags": []
+}
