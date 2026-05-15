@@ -8,7 +8,7 @@ handoff.  It is instantiated by SharingCog and exposed on
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from .contracts import LiveUpdateHandoffPayload
 
@@ -31,10 +31,12 @@ class LiveUpdateSocialService:
         db_handler: "DatabaseHandler",
         bot: Optional["discord.Client"] = None,
         logger_instance: Optional[logging.Logger] = None,
+        social_publish_service: Any = None,
     ):
         self.db_handler = db_handler
         self._bot = bot
         self._log = logger_instance or logger
+        self.social_publish_service = social_publish_service
 
     async def handle_live_update_publish_results(
         self,
@@ -130,17 +132,27 @@ class LiveUpdateSocialService:
         self,
         payload: LiveUpdateHandoffPayload,
     ) -> Optional[str]:
-        """Invoke the LiveUpdateSocialAgent for a draft decision.
+        """Invoke the LiveUpdateSocialAgent for a draft/queue decision.
 
-        Returns the terminal_status (``"draft"``, ``"skip"``,
-        ``"needs_review"``) or ``None`` on failure.
+        Returns the terminal_status (``\"draft\"``, ``\"skip\"``,
+        ``\"needs_review\"``, ``\"queued\"``) or ``None`` on failure.
         """
         try:
             from .agent import LiveUpdateSocialAgent
 
+            # Resolve social_publish_service from the bot if available
+            social_publish_service = getattr(
+                self, "social_publish_service", None,
+            )
+            if social_publish_service is None and self._bot is not None:
+                social_publish_service = getattr(
+                    self._bot, "social_publish_service", None,
+                )
+
             agent = LiveUpdateSocialAgent(
                 db_handler=self.db_handler,
                 bot=self._bot,
+                social_publish_service=social_publish_service,
             )
             terminal = await agent.run(payload)
             return terminal

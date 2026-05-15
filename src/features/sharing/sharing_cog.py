@@ -47,6 +47,7 @@ class SharingCog(commands.Cog):
             db_handler=self.db_handler,
             bot=self.bot,
             logger_instance=logger,
+            social_publish_service=self.social_publish_service,
         )
         self.bot.live_update_social_service = self.live_update_social_service
         logger.info("SharingCog initialized.")

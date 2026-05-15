@@ -1,7 +1,8 @@
-"""Live Update Social models — Sprint 1 data types.
+"""Live Update Social models — Sprint 2 data types.
 
 Defines MediaRefIdentity (durable), ResolvedMedia (transient), ToolSpec,
-ToolBinding, and RunState for the draft-only social review loop.
+ToolBinding, RunState, and ToolResult for the social review loop including
+queue-mode and media understanding.
 """
 
 from __future__ import annotations
@@ -195,3 +196,48 @@ class RunState:
         entry: Dict[str, Any] = {"event": event, "ts": datetime.now(timezone.utc).isoformat()}
         entry.update(kwargs)
         self.trace_entries.append(entry)
+
+
+# ── Tool result envelope ─────────────────────────────────────────────
+
+@dataclass
+class ToolResult:
+    """Typed envelope for tool handler results with truncation metadata.
+
+    All social-loop tools (read tools, media understanding tools, and
+    queue tools) return this envelope so callers can inspect
+    ``ok``, surface errors, and honour truncation hints without
+    parsing loose dicts.
+
+    Attributes
+    ----------
+    ok : bool
+        Whether the tool executed successfully.
+    tool_name : str
+        Name of the tool that produced this result.
+    data : dict
+        Tool-specific result payload.
+    truncated : bool
+        True when ``data`` was truncated (e.g. long text or image descriptions).
+    truncation_note : Optional[str]
+        Human-readable note about what was truncated and why.
+    error : Optional[str]
+        Error message when ``ok`` is False.
+    """
+
+    ok: bool
+    tool_name: str
+    data: Dict[str, Any] = field(default_factory=dict)
+    truncated: bool = False
+    truncation_note: Optional[str] = None
+    error: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "ok": self.ok,
+            "tool_name": self.tool_name,
+            "data": self.data,
+            "truncated": self.truncated,
+            "truncation_note": self.truncation_note,
+            "error": self.error,
+        }

@@ -1,0 +1,59 @@
+{
+  "name": "sprint-2-media-understanding-20260515-1001",
+  "idea": "# Sprint 2: Media Understanding and Durable Queue Mode\n\nProfile intent: `premium/standard/high @codex +feedback`.\n\nChain encoding note: this milestone should use first-class chain fields for `vendor: codex`, `depth: high`, and `with_feedback: true`.\n\n## Source Plan\n\nUse `docs/agent-loop-standardisation-and-live-update-social-plan.md`, especially:\n\n- `Sprint 2: Media Understanding and Durable Queue Mode`\n- `Queued Media Risk`\n- `Provider Identity Risk`\n- `Duplicate Protection Must Be Durable`\n- `Definition of Done`\n\n## Goal\n\nMake media-aware social decisions and enable queue mode only when media attachment is durable across restarts/deploys.\n\nThis is the highest-risk sprint. Queued media must not depend on temporary local files that disappear after a restart or deploy.\n\n## Required Scope\n\nImplement:\n\n- Extract/reuse image and video understanding handlers for the social loop.\n- Add social-loop read tools:\n  - `get_live_update_topic`\n  - `get_source_messages`\n  - `get_published_update_context`\n  - `inspect_message_media`\n  - `understand_image`\n  - `understand_video`\n  - `list_social_routes`\n- Add typed tool result envelopes with truncation metadata.\n- Run image/video understanding on selected or candidate media.\n- Require media understanding for media-heavy posts unless explicitly skipped with a recorded reason.\n- Extend `SocialSourceKind` with `live_update_social`.\n- Add provider/account metadata for bot-owned live-update social posts.\n- Add `enqueue_social_post`.\n- Add publication duplicate checks against both `live_update_social_runs` and `social_publications`.\n- Add queue-mode status and failure logging.\n\n## Durable Media Requirement\n\nQueue mode is not complete until queued image/video media can attach reliably after process restart or deploy.\n\nImplement one durable strategy:\n\n1. Upload resolved media to durable object storage and queue durable URLs; or\n2. Store media ref identities and resolve/download them at publication execution time.\n\nAlso implement:\n\n- Validate file size, content type, and provider compatibility before enqueueing.\n- Store fallback reason when media cannot be attached.\n- Ensure `SocialPublishService` or provider execution does not depend on temporary files for queued media.\n\n## Explicit Non-Goals\n\n- Do not enable immediate publish mode.\n- Do not implement thread publishing.\n- Do not silently degrade media-heavy posts into text-only posts.\n- Do not rely on `duplicate_policy` alone; enforce durable guards.\n\n## Acceptance Criteria\n\n- The social loop can inspect and understand media from source messages.\n- A media-heavy live update draft includes selected media refs plus understanding summaries.\n- Tool drift tests fail if a social-loop media tool is advertised without a handler/backend dependency.\n- In `LIVE_UPDATE_SOCIAL_MODE=queue`, an approved post creates a queued `social_publications` row.\n- Queued text posts work.\n- Queued media posts work after process restart or deploy.\n- Publication rows include topic ID, source message IDs, live-update Discord message IDs, selected media refs, and social run ID.\n- Duplicate reruns do not enqueue another post.",
+  "current_state": "initialized",
+  "iteration": 0,
+  "created_at": "2026-05-15T10:01:57Z",
+  "config": {
+    "project_dir": "/workspace/brain-of-bndc",
+    "auto_approve": true,
+    "robustness": "standard",
+    "mode": "code",
+    "strict_notes": false,
+    "agent": "",
+    "profile": "premium",
+    "vendor": "codex",
+    "depth": "high",
+    "with_feedback": true,
+    "phase_model": [
+      "plan=codex:high",
+      "prep=codex:low",
+      "critique=codex:low",
+      "revise=codex:high",
+      "gate=codex:low",
+      "finalize=codex:low",
+      "execute=codex:low",
+      "loop_plan=codex:high",
+      "loop_execute=codex:low",
+      "review=codex:low",
+      "tiebreaker_researcher=codex:high",
+      "tiebreaker_challenger=codex:high",
+      "feedback=claude:low"
+    ]
+  },
+  "sessions": {},
+  "plan_versions": [],
+  "history": [
+    {
+      "step": "init",
+      "timestamp": "2026-05-15T10:01:57Z",
+      "duration_ms": 0,
+      "cost_usd": 0.0,
+      "result": "success",
+      "environment": {
+        "claude": true,
+        "codex": true
+      }
+    }
+  ],
+  "meta": {
+    "significant_counts": [],
+    "weighted_scores": [],
+    "plan_deltas": [],
+    "recurring_critiques": [],
+    "total_cost_usd": 0.0,
+    "overrides": [],
+    "notes": []
+  },
+  "last_gate": {}
+}

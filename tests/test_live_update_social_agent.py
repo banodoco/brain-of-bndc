@@ -37,6 +37,11 @@ from src.features.sharing.live_update_social.tools import (
     TOOL_DRAFT_SOCIAL_POST,
     TOOL_SKIP_SOCIAL_POST,
     TOOL_REQUEST_SOCIAL_REVIEW,
+    TOOL_GET_LIVE_UPDATE_TOPIC,
+    TOOL_GET_SOURCE_MESSAGES,
+    TOOL_GET_PUBLISHED_UPDATE_CONTEXT,
+    TOOL_INSPECT_MESSAGE_MEDIA,
+    TOOL_LIST_SOCIAL_ROUTES,
     build_tool_bindings,
     get_tool_by_name,
     _make_draft_handler,
@@ -103,24 +108,43 @@ def _make_run_state(
 class TestToolRegistryConformance:
     """Exactly 3 tools advertised, each with exactly 1 handler binding."""
 
-    def test_exactly_three_tools_advertised(self):
-        """ALL_TOOL_SPECS contains exactly draft_social_post, skip_social_post,
-        request_social_review."""
+    def test_exactly_eight_tools_advertised(self):
+        """ALL_TOOL_SPECS contains exactly 3 terminal + 5 read + 1 queue tool."""
         names = {ts.name for ts in ALL_TOOL_SPECS}
-        expected = {"draft_social_post", "skip_social_post", "request_social_review"}
+        expected = {
+            "draft_social_post",
+            "skip_social_post",
+            "request_social_review",
+            "get_live_update_topic",
+            "get_source_messages",
+            "get_published_update_context",
+            "inspect_message_media",
+            "list_social_routes",
+            "enqueue_social_post",
+        }
         assert names == expected, f"Expected {expected}, got {names}"
-        assert len(ALL_TOOL_SPECS) == 3
+        assert len(ALL_TOOL_SPECS) == 9
 
     def test_each_tool_has_exactly_one_binding(self):
-        """build_tool_bindings returns 3 bindings with distinct names."""
+        """build_tool_bindings returns 9 bindings with distinct names."""
         fake = FakeSupabase({"live_update_social_runs": []})
         db = build_db_handler(fake)
         bindings = build_tool_bindings(db)
 
-        assert len(bindings) == 3
+        assert len(bindings) == 9
 
         binding_names = {b.name for b in bindings}
-        expected = {"draft_social_post", "skip_social_post", "request_social_review"}
+        expected = {
+            "draft_social_post",
+            "skip_social_post",
+            "request_social_review",
+            "get_live_update_topic",
+            "get_source_messages",
+            "get_published_update_context",
+            "inspect_message_media",
+            "list_social_routes",
+            "enqueue_social_post",
+        }
         assert binding_names == expected
 
         # Each binding's handler is callable (async)
@@ -144,7 +168,17 @@ class TestToolRegistryConformance:
         db = build_db_handler(fake)
         bindings = build_tool_bindings(db)
 
-        for name in ("draft_social_post", "skip_social_post", "request_social_review"):
+        for name in (
+            "draft_social_post",
+            "skip_social_post",
+            "request_social_review",
+            "get_live_update_topic",
+            "get_source_messages",
+            "get_published_update_context",
+            "inspect_message_media",
+            "list_social_routes",
+            "enqueue_social_post",
+        ):
             binding = get_tool_by_name(bindings, name)
             assert binding is not None, f"No binding found for {name}"
             assert binding.name == name

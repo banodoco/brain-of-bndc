@@ -1,0 +1,34 @@
+{
+  "receipt_id": "65932128-d948-48ba-9796-d201b8d94817",
+  "plan_id": "sprint-2-media-understanding-20260515-1001",
+  "phase": "gate",
+  "iteration": 1,
+  "attempt": 1,
+  "timestamp_utc": "2026-05-15T10:47:00.304423+00:00",
+  "profile_name": "premium",
+  "agent": "hermes",
+  "agent_mode": "persistent",
+  "model_configured": "hermes:deepseek:deepseek-v4-pro",
+  "model_actual": "deepseek-v4-pro",
+  "session_id": "d8749205-4b25-4dd2-89d3-9a03af475249",
+  "megaplan_version": "0.8.1",
+  "schema_version": 1,
+  "prompt_hash_raw": "b87439e78cce702877b8bb67d68d1be573c7989012f144617e6f778e4a002e9c",
+  "prompt_hash_canonical": "0ee247ada98a3a7692c38c23ac50225f2f701a0bce0d3b7392a531660debd93e",
+  "canonicalization_version": 1,
+  "upstream_artifact_hashes": [
+    "sha256:49bdea20dc45a01e7dd372f478bec6fc3d7571cafa0c16ab4937552329b53079"
+  ],
+  "cost_usd": 0.00683385,
+  "duration_ms": 25295,
+  "prompt_tokens": 14158,
+  "completion_tokens": 776,
+  "verdict": null,
+  "metrics": {
+    "recommendation": "PROCEED",
+    "blocking_flags_resolved": 0,
+    "blocking_flags_remaining": 0,
+    "override_forced": false
+  },
+  "scope_drift_severity": null
+}
