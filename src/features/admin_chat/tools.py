@@ -1736,6 +1736,7 @@ async def execute_inspect_message(
     """Deep look at one message: content, reactions, context, replies, fresh media."""
     from scripts.discord_tools import context as dt_context, _set_active_guild_id
     from src.common.discord_utils import refresh_media_url
+    from src.features.sharing.live_update_social.helpers import inspect_discord_message as _shared_inspect
 
     message_id = params.get('message_id', '')
     context_size = params.get('context_size', 3)
@@ -1768,36 +1769,17 @@ async def execute_inspect_message(
 
         if bot and channel_id:
             try:
-                channel = bot.get_channel(channel_id)
-                if not channel:
-                    channel = await bot.fetch_channel(channel_id)
-
-                # Handle ForumChannel
-                if isinstance(channel, discord.ForumChannel):
-                    try:
-                        thread = await bot.fetch_channel(int(message_id))
-                        if isinstance(thread, discord.Thread):
-                            channel = thread
-                    except Exception:
-                        pass
-
-                if hasattr(channel, 'fetch_message'):
-                    live_msg = await channel.fetch_message(int(message_id))
-
-                    # Fresh reaction detail
-                    for r in live_msg.reactions:
-                        live_reactions.append({
-                            "emoji": str(r.emoji),
-                            "count": r.count
-                        })
-
-                    # Fresh attachment URLs
-                    for att in live_msg.attachments:
-                        media_urls.append({
-                            "filename": att.filename,
-                            "url": att.url,
-                            "content_type": att.content_type,
-                        })
+                # Use the shared helper for structured live data (attachments, embeds, reactions)
+                inspected = await _shared_inspect(bot, channel_id, int(message_id))
+                live_reactions = inspected.get("reactions", [])
+                # Combine attachments and embed-derived media for the media_urls list
+                media_urls.extend(inspected.get("attachments", []))
+                for emb in inspected.get("embeds_media", []):
+                    media_urls.append({
+                        "filename": f"embed_{emb.get('slot', 'unknown')}",
+                        "url": emb.get("url", ""),
+                        "content_type": None,
+                    })
             except Exception as e:
                 logger.debug(f"[AdminChat] Could not fetch live message {message_id}: {e}")
 

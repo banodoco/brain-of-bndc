@@ -1396,6 +1396,172 @@ class DatabaseHandler:
             logger.error(f"Error claiming due social publications: {e}", exc_info=True)
             return []
 
+    # ========== Live Update Social Runs ==========
+
+    def upsert_live_update_social_run(
+        self,
+        topic_id: str,
+        platform: str,
+        action: str = "post",
+        guild_id: Optional[int] = None,
+        channel_id: Optional[int] = None,
+        source_metadata: Optional[Dict[str, Any]] = None,
+        topic_summary_data: Optional[Dict[str, Any]] = None,
+        vendor: str = "codex",
+        depth: str = "high",
+        with_feedback: bool = True,
+        deepseek_provider: str = "direct",
+    ) -> Optional[Dict]:
+        """Create-or-return a live_update_social_runs row.
+
+        Durable unique key: (topic_id, platform, action).
+        On conflict → returns the existing row without modifying it.
+        """
+        if not self.supabase:
+            logger.error("Supabase client not initialized for upsert_live_update_social_run")
+            return None
+
+        try:
+            # First try to find existing run
+            existing = (
+                self.supabase.table("live_update_social_runs")
+                .select("*")
+                .eq("topic_id", topic_id)
+                .eq("platform", platform)
+                .eq("action", action)
+                .limit(1)
+                .execute()
+            )
+            if existing.data:
+                return existing.data[0]
+
+            # No existing run — insert new one
+            from uuid import uuid4
+
+            now = datetime.now(timezone.utc).isoformat()
+            payload = {
+                "run_id": str(uuid4()),
+                "topic_id": topic_id,
+                "platform": platform,
+                "action": action,
+                "mode": "draft",
+                "terminal_status": None,
+                "guild_id": guild_id,
+                "channel_id": channel_id,
+                "chain_vendor": vendor,
+                "chain_depth": depth,
+                "chain_with_feedback": with_feedback,
+                "chain_deepseek_provider": deepseek_provider,
+                "source_metadata": source_metadata or {},
+                "publish_units": topic_summary_data or {},
+                "draft_text": None,
+                "media_decisions": {},
+                "trace_entries": [],
+                "created_at": now,
+                "updated_at": now,
+            }
+            serialized = self._serialize_supabase_value(payload)
+            result = (
+                self.supabase.table("live_update_social_runs")
+                .insert(serialized)
+                .execute()
+            )
+            if result.data:
+                return result.data[0]
+            return None
+        except Exception as e:
+            # If the race condition hits (insert after select fails with conflict),
+            # try one more lookup
+            logger.debug(
+                "upsert_live_update_social_run insert failed (may be race): %s — retrying lookup",
+                e,
+            )
+            try:
+                existing = (
+                    self.supabase.table("live_update_social_runs")
+                    .select("*")
+                    .eq("topic_id", topic_id)
+                    .eq("platform", platform)
+                    .eq("action", action)
+                    .limit(1)
+                    .execute()
+                )
+                if existing.data:
+                    return existing.data[0]
+            except Exception:
+                pass
+            logger.error(
+                "Error upserting live_update_social_run for %s/%s/%s: %s",
+                topic_id,
+                platform,
+                action,
+                e,
+                exc_info=True,
+            )
+            return None
+
+    def get_live_update_social_run(self, run_id: str) -> Optional[Dict]:
+        """Return a live_update_social_runs row by run_id."""
+        if not self.supabase:
+            return None
+        try:
+            result = (
+                self.supabase.table("live_update_social_runs")
+                .select("*")
+                .eq("run_id", run_id)
+                .limit(1)
+                .execute()
+            )
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error(
+                "Error fetching live_update_social_run %s: %s",
+                run_id,
+                e,
+                exc_info=True,
+            )
+            return None
+
+    def update_live_update_social_run(
+        self,
+        run_id: str,
+        terminal_status: Optional[str] = None,
+        draft_text: Optional[str] = None,
+        media_decisions: Optional[Dict[str, Any]] = None,
+        trace_entries: Optional[List[Dict[str, Any]]] = None,
+    ) -> bool:
+        """Update terminal columns on a live_update_social_runs row."""
+        if not self.supabase:
+            return False
+        try:
+            payload: Dict[str, Any] = {
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            if terminal_status is not None:
+                payload["terminal_status"] = terminal_status
+            if draft_text is not None:
+                payload["draft_text"] = draft_text
+            if media_decisions is not None:
+                payload["media_decisions"] = media_decisions
+            if trace_entries is not None:
+                payload["trace_entries"] = trace_entries
+
+            (
+                self.supabase.table("live_update_social_runs")
+                .update(self._serialize_supabase_value(payload))
+                .eq("run_id", run_id)
+                .execute()
+            )
+            return True
+        except Exception as e:
+            logger.error(
+                "Error updating live_update_social_run %s: %s",
+                run_id,
+                e,
+                exc_info=True,
+            )
+            return False
+
     # ========== Payments ==========
 
     def _get_writable_guild_ids(self, guild_ids: Optional[List[int]] = None) -> Optional[List[int]]:

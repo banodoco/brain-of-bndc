@@ -1,0 +1,4 @@
+Timed out waiting for Claude transcript containing the submitted prompt in /root/.claude/projects/-workspace-brain-of-bndc
+
+Captured tmux pane:
+can't find pane: shannon-9c7e8fd1-b9da-4dd0-969c-20167ae00a9b

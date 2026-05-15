@@ -19,6 +19,7 @@ from .models import PublicationSourceContext, SocialPublishRequest
 from .social_publish_service import SocialPublishService
 from .subfeatures.social_poster import generate_media_title
 from src.common import discord_utils # Ensure this is imported
+from .live_update_social.helpers import download_media_url as _shared_download_media_url
 
 logger = logging.getLogger('DiscordBot')
 
@@ -82,46 +83,17 @@ class Sharer:
                 return None
 
     async def _download_media_from_url(self, url: str, message_id: str, item_index: int) -> Optional[Dict]:
-        """Downloads media from a direct URL to the temporary directory."""
-        try:
-            filename_from_url = Path(url.split('?')[0]).name # Basic filename extraction from URL
-            # Sanitize filename
-            safe_filename_from_url = "".join(c if c.isalnum() or c in ('.', '_', '-') else '_' for c in filename_from_url)
-            if not safe_filename_from_url: # if URL has no filename part (e.g. ends with /)
-                safe_filename_from_url = f"media_{item_index}" 
-            
-            save_path = self.temp_dir / f"tweet_media_{message_id}_{item_index}_{safe_filename_from_url}"
-            # Ensure the suffix is preserved or correctly added
-            original_suffix = Path(filename_from_url).suffix
-            if original_suffix:
-                save_path = save_path.with_suffix(original_suffix)
-            # else: # if no suffix in URL, might try to guess or leave as is based on Content-Type later
+        """Download media from a direct URL (delegates to shared helper).
 
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url) as resp:
-                    if resp.status == 200:
-                        with open(save_path, 'wb') as f:
-                            f.write(await resp.read())
-                        
-                        content_type = resp.headers.get('Content-Type')
-                        if not content_type:
-                            content_type, _ = mimetypes.guess_type(url)
-                        if not content_type: # Fallback if still not found
-                            content_type = 'application/octet-stream'
-
-                        self.logger.info(f"Successfully downloaded media from URL: {url} to {save_path}")
-                        return {
-                            'url': url,
-                            'filename': filename_from_url, # Filename derived from URL for metadata
-                            'content_type': content_type,
-                            'local_path': str(save_path)
-                        }
-                    else:
-                        self.logger.error(f"Failed to download media from URL {url}. Status: {resp.status}")
-                        return None
-        except Exception as e:
-            self.logger.error(f"Error downloading media from URL {url}: {e}", exc_info=True)
-            return None
+        Kept as a backward-compatible wrapper for existing callers
+        (tweet_sharer_bridge, admin-chat tools).  New callers should use
+        ``live_update_social.helpers.download_media_url`` directly.
+        """
+        return await _shared_download_media_url(
+            url,
+            dest_dir=str(self.temp_dir),
+            filename_prefix=f"tweet_{message_id}_{item_index}",
+        )
 
     def _resolve_source_kind(
         self,
@@ -268,7 +240,11 @@ class Sharer:
         if image_urls:
             self.logger.info(f"Sharer.send_tweet: Processing {len(image_urls)} image_urls for message_id {message_id}.")
             for i, url in enumerate(image_urls):
-                downloaded_item = await self._download_media_from_url(url, message_id, i)
+                downloaded_item = await _shared_download_media_url(
+                    url,
+                    dest_dir=str(self.temp_dir),
+                    filename_prefix=f"tweet_{message_id}_{i}",
+                )
                 if downloaded_item and downloaded_item.get('local_path'):
                     downloaded_media_for_tweet.append(downloaded_item)
                     temp_files_to_clean.append(downloaded_item['local_path'])
