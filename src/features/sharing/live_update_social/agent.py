@@ -18,20 +18,17 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from .contracts import LiveUpdateHandoffPayload
 from .models import (
     MediaRefIdentity,
-    ResolvedMedia,
     RunState,
-    ToolSpec,
     ToolBinding,
 )
 from .publish_units import reconstruct_publish_units
 from .tools import ALL_TOOL_SPECS, build_tool_bindings, get_tool_by_name
-from .helpers import inspect_discord_message, download_media_url
+from .helpers import inspect_discord_message
 
 if TYPE_CHECKING:
     import discord
@@ -45,16 +42,24 @@ _FORBIDDEN_OUTCOMES: frozenset = frozenset({"queue", "publish"})
 
 
 class LiveUpdateSocialAgent:
-    """Draft-only social review agent (Sprint 1)."""
+    """Draft, media-aware social review agent (Sprint 2).
+
+    Supports queue mode when social_publish_service is provided and
+    LIVE_UPDATE_SOCIAL_MODE=queue.
+    """
 
     def __init__(
         self,
         db_handler: "DatabaseHandler",
         bot: "discord.Client",
+        social_publish_service: Any = None,
     ):
         self.db_handler = db_handler
         self.bot = bot
-        self._bindings: List[ToolBinding] = build_tool_bindings(db_handler)
+        self.social_publish_service = social_publish_service
+        self._bindings: List[ToolBinding] = build_tool_bindings(
+            db_handler, bot, social_publish_service=social_publish_service,
+        )
 
     # ── public entry point ────────────────────────────────────────────
 
@@ -287,15 +292,16 @@ class LiveUpdateSocialAgent:
     ) -> str:
         """Build the system prompt for the LLM.
 
-        Includes chain settings, the three available tools, and
-        instructions to make exactly one tool call.
+        Includes chain settings, the available terminal tools, and
+        instructions to make exactly one tool call.  When queue mode is
+        enabled, ``enqueue_social_post`` is listed as an additional
+        terminal option; when disabled only the Sprint-1 draft/skip/review
+        tools are presented.
         """
-        return (
-            "You are a social media draft reviewer for the Banodoco Discord bot. "
-            "Your job is to review a live-update topic and decide whether it "
-            "should be drafted for social media, skipped, or flagged for human "
-            "review.\n\n"
-            "## Available tools (call exactly ONE)\n\n"
+        queue_mode = self._is_queue_mode()
+
+        tools_text = (
+            "## Available terminal tools (call exactly ONE)\n\n"
             "1. **draft_social_post** — Record a draft social post. Use when "
             "content and media are ready for review. Provide the draft_text "
             "and optionally selected_media identities.\n"
@@ -304,14 +310,46 @@ class LiveUpdateSocialAgent:
             "a reason.\n"
             "3. **request_social_review** — Request human review. Use when "
             "you cannot make a confident decision (missing media, unclear "
-            "content, route issues). Provide a reason.\n\n"
+            "content, route issues). Provide a reason.\n"
+        )
+        if queue_mode:
+            tools_text += (
+                "4. **enqueue_social_post** — Enqueue an approved social post "
+                "for durable publication. Use when the draft is approved and "
+                "media understanding has been completed. Provide draft_text "
+                "and optionally selected_media with understanding summaries.\n"
+            )
+
+        rules_text = (
             "## Rules\n"
-            "- Call exactly ONE tool.\n"
+            "- Call exactly ONE terminal tool.\n"
+            "- You may use read tools (get_live_update_topic, "
+            "get_source_messages, get_published_update_context, "
+            "inspect_message_media, list_social_routes) to gather context "
+            "BEFORE making your terminal decision, but ONLY the final "
+            "terminal tool call will be executed.\n"
             "- Do NOT provide text outside the tool call.\n"
-            "- If media is expected but unresolved, use request_social_review.\n"
+            "- If media is expected but unresolved, use "
+            "request_social_review.\n"
             "- If the content is newsworthy and media is available, use "
             "draft_social_post with a concise draft.\n"
-            "- If the content is not newsworthy, use skip_social_post.\n\n"
+            "- If the content is not newsworthy, use skip_social_post.\n"
+        )
+        if queue_mode:
+            rules_text += (
+                "- If the content is approved and queue mode is active, "
+                "use enqueue_social_post instead of draft_social_post.\n"
+            )
+
+        return (
+            "You are a social media draft reviewer for the Banodoco Discord bot. "
+            "Your job is to review a live-update topic and decide whether it "
+            "should be drafted for social media, skipped, or flagged for human "
+            "review.\n\n"
+            + tools_text
+            + "\n"
+            + rules_text
+            + "\n"
             f"Chain: vendor={payload.vendor}, depth={payload.depth}, "
             f"with_feedback={payload.with_feedback}, "
             f"deepseek_provider={payload.deepseek_provider}"
@@ -376,9 +414,23 @@ class LiveUpdateSocialAgent:
 
     # ── tool specs ───────────────────────────────────────────────────
 
+    @staticmethod
+    def _is_queue_mode() -> bool:
+        """Return True if queue mode is enabled via env var."""
+        import os
+        return os.getenv("LIVE_UPDATE_SOCIAL_MODE", "") == "queue"
+
     def _build_tool_specs(self) -> List[Dict[str, Any]]:
-        """Return Anthropic-format tool definitions for the 3 terminal tools."""
-        return [ts.to_openai_tool() for ts in ALL_TOOL_SPECS]
+        """Return tool definitions for the LLM.
+
+        Always includes terminal tools (draft, skip, review) and read tools.
+        Enqueue tool is only included when queue mode is active, preserving
+        Sprint-1 draft-only behaviour when queue mode is disabled.
+        """
+        specs: List[Any] = list(ALL_TOOL_SPECS)
+        if not self._is_queue_mode():
+            specs = [ts for ts in specs if ts.name != "enqueue_social_post"]
+        return [ts.to_openai_tool() for ts in specs]
         # Note: to_openai_tool() produces Anthropic-compatible format because
         # Anthropic also uses the "input_schema" key (same structure).
 

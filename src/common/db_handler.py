@@ -1562,6 +1562,52 @@ class DatabaseHandler:
             )
             return False
 
+    def check_live_update_social_duplicate_publication(
+        self,
+        topic_id: str,
+        platform: str,
+        action: str = "post",
+        guild_id: Optional[int] = None,
+    ) -> Optional[Dict]:
+        """Check whether a social_publications row already exists for a
+        live-update-social topic.
+
+        Returns the existing publication row if found, or None.
+
+        Duplicate key: (source_kind='live_update_social', topic_id in
+        request_payload->source_context->metadata, platform, action).
+        """
+        if not self.supabase:
+            return None
+        try:
+            # Query by source_kind + platform + action, then filter in Python
+            # because request_payload is a JSONB column.
+            query = (
+                self.supabase.table("social_publications")
+                .select("*")
+                .eq("source_kind", "live_update_social")
+                .eq("platform", platform)
+                .eq("action", action)
+            )
+            if guild_id is not None:
+                query = query.eq("guild_id", guild_id)
+            result = query.order("created_at", desc=True).limit(20).execute()
+            if not result.data:
+                return None
+            for row in result.data:
+                request_payload = row.get("request_payload") or {}
+                source_context = request_payload.get("source_context") or {}
+                metadata = source_context.get("metadata") or {}
+                if metadata.get("topic_id") == topic_id:
+                    return row
+            return None
+        except Exception as e:
+            logger.error(
+                "Error checking duplicate publication for topic %s: %s",
+                topic_id, e, exc_info=True,
+            )
+            return None
+
     # ========== Payments ==========
 
     def _get_writable_guild_ids(self, guild_ids: Optional[List[int]] = None) -> Optional[List[int]]:
