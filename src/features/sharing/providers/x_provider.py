@@ -58,12 +58,17 @@ class XProvider(SocialPublishProvider):
 
         tweet_id = tweet_result.get('id')
         tweet_url = tweet_result.get('url')
+        media_id = tweet_result.get('media_id')
+        media_ids: list = []
+        if media_id is not None:
+            media_ids = [media_id]
         return {
             'provider_ref': tweet_id,
             'provider_url': tweet_url,
             'tweet_id': tweet_id,
             'tweet_url': tweet_url,
             'delete_supported': True,
+            'media_ids': media_ids,
         }
 
     async def delete(self, publication: Dict[str, Any]) -> bool:

@@ -29,6 +29,8 @@ class FakeQuery:
         self.payload = None
         self.filters = []
         self.limit_value = None
+        self.range_start = None
+        self.range_end = None
         self.order_key = None
         self.order_desc = False
 
@@ -64,6 +66,11 @@ class FakeQuery:
         self.limit_value = value
         return self
 
+    def range(self, start, end):
+        self.range_start = start
+        self.range_end = end
+        return self
+
     def execute(self):
         table = self.supabase.tables.setdefault(self.table_name, [])
 
@@ -87,6 +94,8 @@ class FakeQuery:
                 key=lambda row: row.get(self.order_key) or "",
                 reverse=self.order_desc,
             )
+        if self.range_start is not None and self.range_end is not None:
+            filtered = filtered[self.range_start:self.range_end + 1]
         if self.limit_value is not None:
             filtered = filtered[:self.limit_value]
         return FakeResult([dict(row) for row in filtered])
@@ -109,11 +118,23 @@ def build_db_handler(fake_supabase: FakeSupabase) -> DatabaseHandler:
     db_handler = object.__new__(DatabaseHandler)
     db_handler.supabase = fake_supabase
     db_handler.storage_handler = type("Storage", (), {"supabase_client": fake_supabase})()
-    db_handler.server_config = type(
-        "ServerConfigStub",
-        (),
-        {"get_enabled_servers": lambda self, require_write=False: [{"guild_id": 1}]},
-    )()
+    class ServerConfigStub:
+        def get_enabled_servers(self, require_write=False):
+            return [{"guild_id": 1}]
+
+        def resolve_social_route(self, guild_id, channel_id, platform):
+            if platform != "twitter":
+                return None
+            return {
+                "guild_id": guild_id,
+                "channel_id": channel_id,
+                "platform": platform,
+                "target_type": "account",
+                "target_id": "test_bot",
+                "enabled": True,
+            }
+
+    db_handler.server_config = ServerConfigStub()
     db_handler._gate_check = lambda guild_id: guild_id is not None
     db_handler._serialize_supabase_value = lambda value: value
 
@@ -314,3 +335,148 @@ def test_publication_id_lookup_is_unambiguous_for_delete_flows():
 
     publication = db_handler.get_social_publication_by_id("pub-2", guild_id=1)
     assert publication["provider_ref"] == "tweet-2"
+
+
+# ── Sprint 3: DB query method tests ──────────────────────────────────
+
+
+def test_find_existing_social_posts_by_topic():
+    """find_existing_social_posts filters by topic_id in request_payload."""
+    fake_supabase = FakeSupabase({
+        "social_publications": [
+            {
+                "publication_id": "pub-a",
+                "guild_id": 1,
+                "platform": "twitter",
+                "source_kind": "live_update_social",
+                "request_payload": {
+                    "source_context": {
+                        "metadata": {"topic_id": "topic-1", "run_id": "run-1"},
+                    },
+                    "text": "First post about topic 1",
+                },
+                "status": "succeeded",
+                "created_at": "2026-01-01T00:00:00Z",
+            },
+            {
+                "publication_id": "pub-b",
+                "guild_id": 1,
+                "platform": "twitter",
+                "source_kind": "live_update_social",
+                "request_payload": {
+                    "source_context": {
+                        "metadata": {"topic_id": "topic-2", "run_id": "run-2"},
+                    },
+                    "text": "Post about topic 2",
+                },
+                "status": "succeeded",
+                "created_at": "2026-01-02T00:00:00Z",
+            },
+        ],
+    })
+    db_handler = build_db_handler(fake_supabase)
+
+    # Match topic-1
+    results = db_handler.find_existing_social_posts(
+        topic_id="topic-1",
+        platform="twitter",
+        guild_id=1,
+    )
+    assert len(results) == 1
+    assert results[0]["publication_id"] == "pub-a"
+
+    # No match for topic-3
+    results = db_handler.find_existing_social_posts(
+        topic_id="topic-3",
+        platform="twitter",
+        guild_id=1,
+    )
+    assert len(results) == 0
+
+    # With draft_text for similarity
+    results = db_handler.find_existing_social_posts(
+        topic_id="topic-1",
+        platform="twitter",
+        guild_id=1,
+        draft_text="First post about topic 1",
+    )
+    assert len(results) == 1
+    assert "_similarity" in results[0]
+    assert results[0]["_similarity"] == 1.0  # exact match
+
+
+def test_check_content_similarity():
+    """Character 5-gram containment similarity is case-insensitive and
+    whitespace-normalized."""
+    # Exact match
+    assert DatabaseHandler.check_content_similarity(
+        "Hello world this is a test",
+        "Hello world this is a test",
+    ) == 1.0
+
+    # Case insensitive
+    assert DatabaseHandler.check_content_similarity(
+        "HELLO WORLD THIS IS A TEST",
+        "hello world this is a test",
+    ) == 1.0
+
+    # Whitespace normalization
+    assert DatabaseHandler.check_content_similarity(
+        "Hello   world\nthis\tis  a   test",
+        "Hello world this is a test",
+    ) == 1.0
+
+    # Short text in longer text (containment)
+    score = DatabaseHandler.check_content_similarity(
+        "Hello world",
+        "Hello world this is a longer test message",
+    )
+    assert score == 1.0  # all 5-grams of short text in long text
+
+    # Completely different texts
+    score = DatabaseHandler.check_content_similarity(
+        "The quick brown fox",
+        "Completely unrelated text here",
+    )
+    assert score < 0.5
+
+    # Empty texts
+    assert DatabaseHandler.check_content_similarity("", "text") == 0.0
+    assert DatabaseHandler.check_content_similarity("text", "") == 0.0
+    assert DatabaseHandler.check_content_similarity("", "") == 0.0
+
+    # Very short texts (< 5 chars) use substring containment
+    assert DatabaseHandler.check_content_similarity("abc", "abcdef") == 1.0
+    assert DatabaseHandler.check_content_similarity("xyz", "abcdef") == 0.0
+
+
+def test_update_media_outcome():
+    """update_social_publication_media_outcome persists media_attached and
+    media_missing on a social_publications row."""
+    fake_supabase = FakeSupabase({
+        "social_publications": [
+            {
+                "publication_id": "pub-m",
+                "guild_id": 1,
+                "status": "succeeded",
+                "media_attached": None,
+                "media_missing": None,
+            },
+        ],
+    })
+    db_handler = build_db_handler(fake_supabase)
+
+    media_attached = [{"identity": {"source": "discord_attachment", "index": 0}}]
+    media_missing = [{"identity": {"source": "discord_embed", "slot": "image"}}]
+
+    assert db_handler.update_social_publication_media_outcome(
+        publication_id="pub-m",
+        media_attached=media_attached,
+        media_missing=media_missing,
+        guild_id=1,
+    )
+
+    # Verify the row was updated
+    pub = db_handler.get_social_publication_by_id("pub-m", guild_id=1)
+    assert pub["media_attached"] == media_attached
+    assert pub["media_missing"] == media_missing

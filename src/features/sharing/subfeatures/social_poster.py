@@ -423,6 +423,35 @@ async def post_tweet(
             # TODO: Handle multiple attachments if Twitter API allows/needed
             attachment = attachments[0]
             media_path = attachment.get('local_path')
+            durable_url = attachment.get('durable_url')
+            
+            # ── durable_url fallback: download to temp file when local_path absent ──
+            if (not media_path or not os.path.exists(media_path)) and durable_url:
+                logger.info(
+                    "post_tweet: local_path missing for %s, downloading from durable_url: %s",
+                    attachment.get('filename', 'unknown'), durable_url[:80],
+                )
+                try:
+                    import tempfile as _tempfile
+                    from src.features.sharing.live_update_social.helpers import download_media_url
+                    
+                    temp_dir = _tempfile.mkdtemp(prefix="tweet_media_")
+                    downloaded = await download_media_url(
+                        url=durable_url,
+                        dest_dir=temp_dir,
+                        filename_prefix="tweet",
+                    )
+                    if downloaded and downloaded.get("local_path") and os.path.exists(downloaded["local_path"]):
+                        media_path = downloaded["local_path"]
+                        attachment["local_path"] = media_path
+                        logger.info("post_tweet: downloaded durable_url → %s", media_path)
+                    else:
+                        logger.error("post_tweet: durable_url download failed for %s", durable_url[:80])
+                        return None
+                except Exception as _dl_err:
+                    logger.error("post_tweet: durable_url download error: %s", _dl_err, exc_info=True)
+                    return None
+            
             if not media_path or not os.path.exists(media_path):
                 logger.error(f"Cannot post tweet, media file path invalid or file missing: {media_path}")
                 return None
@@ -473,7 +502,7 @@ async def post_tweet(
         tweet_url = f"https://twitter.com/{screen_name}/status/{tweet_id}"
         
         logger.info(f"Tweet posted successfully: {tweet_url}")
-        return {'url': tweet_url, 'id': tweet_id}
+        return {'url': tweet_url, 'id': tweet_id, 'media_id': media_id}
 
     except tweepy.errors.TweepyException as e:
         logger.error(f"Twitter API error during posting: {e}", exc_info=True)

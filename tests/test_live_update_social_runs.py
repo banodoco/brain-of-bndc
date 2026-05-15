@@ -196,3 +196,90 @@ def test_update_nonexistent_run_returns_true_no_error():
     # Should not raise
     result = db.update_live_update_social_run("nonexistent", terminal_status="skip")
     assert result is True  # query succeeds even if no rows match
+
+
+# ── Sprint 3: run-level persistence tests ────────────────────────────
+
+
+def test_publication_outcome_persisted():
+    """publication_outcome is round-tripped through update and get."""
+    fake = FakeSupabase({"live_update_social_runs": []})
+    db = build_db_handler(fake)
+
+    run = _upsert(db, topic_id="t-outcome")
+    run_id = run["run_id"]
+
+    outcome = {
+        "publication_id": "pub-test",
+        "success": True,
+        "provider_ref": "tweet-123",
+        "provider_url": "https://x.com/user/status/123",
+        "media_ids": ["media-1"],
+        "media_attached": [{"identity": {"source": "discord_attachment", "index": 0}}],
+        "media_missing": [],
+        "error": None,
+        "failure_reason": None,
+    }
+    assert db.update_live_update_social_run(
+        run_id, publication_outcome=outcome,
+    )
+    fetched = db.get_live_update_social_run(run_id)
+    assert fetched["publication_outcome"] == outcome
+
+    # Update with failure outcome
+    failure_outcome = {
+        "success": False,
+        "error": "Provider rejected media",
+        "failure_reason": "provider_rejected_media",
+    }
+    assert db.update_live_update_social_run(
+        run_id, publication_outcome=failure_outcome,
+    )
+    fetched = db.get_live_update_social_run(run_id)
+    assert fetched["publication_outcome"] == failure_outcome
+
+
+def test_find_runs_by_status():
+    """get_recent_social_runs filters by terminal_status and mode."""
+    fake = FakeSupabase({"live_update_social_runs": []})
+    db = build_db_handler(fake)
+
+    # Create runs with different topic_ids (they all get mode="draft" by default)
+    r1 = _upsert(db, topic_id="t-draft")
+    db.update_live_update_social_run(r1["run_id"], terminal_status="draft")
+
+    r2 = _upsert(db, topic_id="t-pub")
+    db.update_live_update_social_run(r2["run_id"], terminal_status="published")
+    # Override mode on the fake row directly (upsert hardcodes mode="draft")
+    for row in fake.tables["live_update_social_runs"]:
+        if row["run_id"] == r2["run_id"]:
+            row["mode"] = "publish"
+            break
+
+    r3 = _upsert(db, topic_id="t-review")
+    db.update_live_update_social_run(r3["run_id"], terminal_status="needs_review")
+
+    # Filter by needs_review
+    review_runs = db.get_recent_social_runs(
+        guild_id=1, terminal_status="needs_review",
+    )
+    assert len(review_runs) == 1
+    assert review_runs[0]["run_id"] == r3["run_id"]
+
+    # Filter by published
+    pub_runs = db.get_recent_social_runs(
+        guild_id=1, terminal_status="published",
+    )
+    assert len(pub_runs) == 1
+    assert pub_runs[0]["run_id"] == r2["run_id"]
+
+    # Filter by mode
+    publish_mode_runs = db.get_recent_social_runs(
+        guild_id=1, mode="publish",
+    )
+    assert len(publish_mode_runs) == 1
+    assert publish_mode_runs[0]["run_id"] == r2["run_id"]
+
+    # All runs
+    all_runs = db.get_recent_social_runs(guild_id=1)
+    assert len(all_runs) == 3

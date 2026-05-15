@@ -1,4 +1,4 @@
-"""Live Update Social Review loop — Sprint 2 media understanding + durable queue."""
+"""Live Update Social Review loop — Sprint 3 publish mode, threads, review controls."""
 
 from .contracts import (
     LiveUpdatePublishResult,
@@ -12,6 +12,9 @@ from .models import (
     ToolBinding,
     RunState,
     ToolResult,
+    ThreadItem,
+    ThreadDraft,
+    PublishOutcome,
 )
 from .tools import (
     TOOL_DRAFT_SOCIAL_POST,
@@ -23,9 +26,17 @@ from .tools import (
     TOOL_INSPECT_MESSAGE_MEDIA,
     TOOL_LIST_SOCIAL_ROUTES,
     TOOL_ENQUEUE_SOCIAL_POST,
+    TOOL_PUBLISH_SOCIAL_POST,
+    TOOL_FIND_EXISTING_SOCIAL_POSTS,
+    TOOL_GET_SOCIAL_RUN_STATUS,
     ALL_TOOL_SPECS,
     build_tool_bindings,
     get_tool_by_name,
+    _run_media_understanding_and_upload,
+)
+from .failure_reasons import (
+    FailureReason,
+    classify_failure,
 )
 from .publish_units import reconstruct_publish_units
 from .helpers import (
@@ -52,6 +63,10 @@ from .media_understanding import (
     understand_video,
 )
 
+# Public alias for the shared media-understanding helper (task requirement:
+# "run_media_understanding_and_upload" without underscore prefix)
+run_media_understanding_and_upload = _run_media_understanding_and_upload
+
 __all__ = [
     # contracts
     "LiveUpdatePublishResult",
@@ -67,6 +82,10 @@ __all__ = [
     "ToolBinding",
     "RunState",
     "ToolResult",
+    # models (Sprint 3)
+    "ThreadItem",
+    "ThreadDraft",
+    "PublishOutcome",
     # tools
     "TOOL_DRAFT_SOCIAL_POST",
     "TOOL_SKIP_SOCIAL_POST",
@@ -77,9 +96,17 @@ __all__ = [
     "TOOL_INSPECT_MESSAGE_MEDIA",
     "TOOL_LIST_SOCIAL_ROUTES",
     "TOOL_ENQUEUE_SOCIAL_POST",
+    "TOOL_PUBLISH_SOCIAL_POST",
+    "TOOL_FIND_EXISTING_SOCIAL_POSTS",
+    "TOOL_GET_SOCIAL_RUN_STATUS",
     "ALL_TOOL_SPECS",
     "build_tool_bindings",
     "get_tool_by_name",
+    # tools (Sprint 3 shared helper)
+    "run_media_understanding_and_upload",
+    # failure reasons (Sprint 3)
+    "FailureReason",
+    "classify_failure",
     # publish_units
     "reconstruct_publish_units",
     # helpers

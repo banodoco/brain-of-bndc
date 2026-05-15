@@ -1110,6 +1110,46 @@ TOOLS = [
             "required": []
         }
     },
+    {
+        "name": "inspect_social_runs",
+        "description": "Inspect recent live-update social review runs. Filterable by guild_id, terminal_status (draft, queued, published, skip, needs_review), and mode (draft, publish). Returns a summary of recent runs with their status and outcomes. Use this to audit the social review pipeline.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "guild_id": {
+                    "type": "integer",
+                    "description": "Filter by guild ID. Uses the configured default guild when omitted."
+                },
+                "terminal_status": {
+                    "type": "string",
+                    "description": "Filter by terminal status: draft, queued, published, skip, needs_review."
+                },
+                "mode": {
+                    "type": "string",
+                    "description": "Filter by mode: draft or publish."
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum runs to return (default: 20, max: 50)."
+                }
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "inspect_social_publication",
+        "description": "Inspect social publications linked to a specific live_update_social run by run_id. Returns the publication records including their status, provider references, media attachment outcomes, and timestamps.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "run_id": {
+                    "type": "string",
+                    "description": "The run_id from a live_update_social_runs row."
+                }
+            },
+            "required": ["run_id"]
+        }
+    },
 ]
 
 # ========== Helper Functions ==========
@@ -2033,11 +2073,11 @@ async def execute_share_to_social(
             if not result.success:
                 return {"success": False, "error": result.error or "Sharing failed"}
 
-            provider_url = result.provider_url or result.tweet_url
-            provider_ref = result.provider_ref or result.tweet_id
-            tweet_url = result.tweet_url
-            tweet_id = result.tweet_id
-            publication_id = result.publication_id
+            tweet_url = getattr(result, "tweet_url", None)
+            tweet_id = getattr(result, "tweet_id", None)
+            provider_url = getattr(result, "provider_url", None) or tweet_url
+            provider_ref = getattr(result, "provider_ref", None) or tweet_id
+            publication_id = getattr(result, "publication_id", None)
 
             response_message = _social_posted_message(platform, action, provider_url)
 
@@ -2203,11 +2243,11 @@ async def execute_share_to_social(
         if not result.success:
             return {"success": False, "error": result.error or "Sharing failed"}
 
-        provider_url = result.provider_url or result.tweet_url
-        provider_ref = result.provider_ref or result.tweet_id
-        tweet_url = result.tweet_url
-        tweet_id = result.tweet_id
-        publication_id = result.publication_id
+        tweet_url = getattr(result, "tweet_url", None)
+        tweet_id = getattr(result, "tweet_id", None)
+        provider_url = getattr(result, "provider_url", None) or tweet_url
+        provider_ref = getattr(result, "provider_ref", None) or tweet_id
+        publication_id = getattr(result, "publication_id", None)
 
         if platform == 'twitter' and tweet_url:
             await sharer._announce_tweet_url(
@@ -4313,6 +4353,123 @@ async def execute_list_media_files(params: Dict[str, Any]) -> Dict[str, Any]:
     return {"success": True, "directory": base, "files": files}
 
 
+# ── Sprint 3: Live Update Social admin inspection tools ──────────────
+
+
+async def execute_inspect_social_runs(
+    db_handler,
+    params: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Inspect recent live_update_social_runs.
+
+    Access db_handler directly (passed through from bot instance).
+    """
+    try:
+        guild_id = _resolve_guild_id(params)
+        terminal_status = params.get("terminal_status")
+        mode = params.get("mode")
+        limit = min(int(params.get("limit", 20)), 50)
+
+        runs = db_handler.get_recent_social_runs(
+            guild_id=guild_id,
+            terminal_status=terminal_status,
+            mode=mode,
+            limit=limit,
+        )
+
+        # Summarise for readability
+        summary = []
+        for r in runs:
+            entry = {
+                "run_id": r.get("run_id"),
+                "topic_id": r.get("topic_id"),
+                "platform": r.get("platform"),
+                "action": r.get("action"),
+                "mode": r.get("mode"),
+                "terminal_status": r.get("terminal_status"),
+                "draft_text": (
+                    r.get("draft_text", "")[:200]
+                    if r.get("draft_text")
+                    else None
+                ),
+                "created_at": r.get("created_at"),
+                "updated_at": r.get("updated_at"),
+            }
+            # Include summary of publication outcome
+            outcome = r.get("publication_outcome")
+            if outcome:
+                if isinstance(outcome, dict):
+                    entry["publication_outcome_summary"] = {
+                        "success": outcome.get("success"),
+                        "provider_ref": outcome.get("provider_ref"),
+                        "error": outcome.get("error"),
+                        "failure_reason": outcome.get("failure_reason"),
+                    }
+                else:
+                    entry["publication_outcome_summary"] = str(outcome)[:200]
+            summary.append(entry)
+
+        return {
+            "success": True,
+            "count": len(summary),
+            "filters": {
+                "guild_id": guild_id,
+                "terminal_status": terminal_status,
+                "mode": mode,
+            },
+            "runs": summary,
+        }
+    except Exception as e:
+        logger.error(
+            "[AdminChat] inspect_social_runs failed: %s", e, exc_info=True,
+        )
+        return {"success": False, "error": str(e)}
+
+
+async def execute_inspect_social_publication(
+    db_handler,
+    params: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Inspect social publications linked to a live_update_social run."""
+    run_id = params.get("run_id", "")
+    if not run_id:
+        return {"success": False, "error": "run_id is required"}
+
+    try:
+        publications = db_handler.get_social_publications_by_run_id(
+            run_id=run_id,
+        )
+
+        summary = []
+        for p in publications:
+            summary.append({
+                "publication_id": p.get("publication_id"),
+                "status": p.get("status"),
+                "action": p.get("action"),
+                "platform": p.get("platform"),
+                "provider_ref": p.get("provider_ref"),
+                "provider_url": p.get("provider_url"),
+                "media_attached": p.get("media_attached"),
+                "media_missing": p.get("media_missing"),
+                "last_error": p.get("last_error"),
+                "created_at": p.get("created_at"),
+                "updated_at": p.get("updated_at"),
+            })
+
+        return {
+            "success": True,
+            "run_id": run_id,
+            "count": len(summary),
+            "publications": summary,
+        }
+    except Exception as e:
+        logger.error(
+            "[AdminChat] inspect_social_publication failed: %s",
+            e, exc_info=True,
+        )
+        return {"success": False, "error": str(e)}
+
+
 # ========== Tool Executor Dispatcher ==========
 
 async def execute_tool(
@@ -4464,5 +4621,9 @@ async def execute_tool(
         return await execute_run_media_command(trusted_tool_input)
     elif tool_name == "list_media_files":
         return await execute_list_media_files(trusted_tool_input)
+    elif tool_name == "inspect_social_runs":
+        return await execute_inspect_social_runs(db_handler, trusted_tool_input)
+    elif tool_name == "inspect_social_publication":
+        return await execute_inspect_social_publication(db_handler, trusted_tool_input)
     else:
         return {"success": False, "error": f"Unknown tool: {tool_name}"}
