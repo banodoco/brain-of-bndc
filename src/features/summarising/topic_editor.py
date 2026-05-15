@@ -635,13 +635,26 @@ class TopicEditor:
                     has_cost_estimate = True
                     cumulative_cost_usd = round(cumulative_cost_usd + float(turn_cost), 6)
 
+                cap_reason = None
                 if has_cost_estimate and cumulative_cost_usd > max_cost_usd:
+                    cap_reason = "cost_cap_exceeded"
+                elif cumulative_tokens > max_tokens:
+                    cap_reason = "token_cap_exceeded"
+                if cap_reason:
+                    # The response has already been paid for. If it contains the
+                    # required finalizer, accept only that close-out tool so we do
+                    # not lose the agent's audit reasoning at the budget edge.
+                    finalize_calls = [call for call in turn_tool_calls if call.get("name") == "finalize_run"]
+                    if finalize_calls:
+                        tool_calls.extend(finalize_calls)
+                        self._populate_idempotent_results(finalize_calls, dispatcher_context)
+                        for call in finalize_calls:
+                            outcomes.append(self._dispatch_tool_call(call, dispatcher_context))
+                        if dispatcher_context.get("finalize"):
+                            metadata["budget_cap_exceeded_after_finalize"] = cap_reason
+                            break
                     forced_close = True
-                    forced_close_reason = "cost_cap_exceeded"
-                    break
-                if cumulative_tokens > max_tokens:
-                    forced_close = True
-                    forced_close_reason = "token_cap_exceeded"
+                    forced_close_reason = cap_reason
                     break
 
                 if not turn_tool_calls:
@@ -2164,7 +2177,7 @@ class TopicEditor:
                 self.db.upsert_topic_alias({
                     "topic_id": topic_id,
                     "alias_key": item["canonical_key"],
-                    "alias_kind": "auto_shortlist",
+                    "alias_kind": "proposed",
                     "guild_id": guild_id,
                 }, environment=self.environment)
             self._store_transition({

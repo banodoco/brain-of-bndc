@@ -309,7 +309,7 @@ def cmd_trace(args):
     
     FEATURES = {
         'live-update': ['LiveUpdateEditor', 'live_update', 'live-update', 'live_update_editor_runs', 'live_update_feed_items'],
-        'summary': ['legacy summary', 'ChannelSummarizer', 'daily_summaries', 'generate_summary'],
+        'summary': ['topic editor', 'TopicEditor', 'topic_editor_runs', 'topics', 'live-update'],
         'archive': ['[Archive]', 'archive_discord', 'archiving'],
         'share': ['sharer', 'sharing', 'twitter', 'social_poster', 'tweet'],
         'react': ['reactor', 'reaction', 'watchlist'],

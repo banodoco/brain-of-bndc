@@ -5,11 +5,9 @@ import logging
 import os
 from discord.ext import tasks
 
-from .summariser import ChannelSummarizer
 from .live_update_editor import LiveUpdateEditor as LegacyLiveUpdateEditor
 from .topic_editor import TopicEditor
 from .live_top_creations import LiveTopCreations
-# Import SharerCog to check for its instance
 
 MAX_RETRIES = 3
 READY_TIMEOUT = 30
@@ -35,24 +33,34 @@ def _env_int(name: str, default: int) -> int:
     except (TypeError, ValueError):
         return default
 
-class SummarizerCog(commands.Cog):
-    """Runtime owner for the active live-update editor.
 
-    ChannelSummarizer remains attached for explicit legacy/backfill use only;
-    scheduled and owner-triggered overview behavior now runs the live editor.
-    """
+def _build_topic_editor_llm_client():
+    provider = os.getenv("TOPIC_EDITOR_LLM_CLIENT", "claude").strip().lower()
+    if provider in {"", "claude"}:
+        return None
+    if provider == "deepseek":
+        from src.common.llm.deepseek_client import DeepSeekClient
+
+        os.environ.setdefault("TOPIC_EDITOR_MODEL", "deepseek-v4-pro")
+        return DeepSeekClient()
+    logger.warning(
+        "Unknown TOPIC_EDITOR_LLM_CLIENT=%r; using the bot default Claude client",
+        provider,
+    )
+    return None
+
+class SummarizerCog(commands.Cog):
+    """Runtime owner for the active live-update editor."""
 
     def __init__(
         self,
         bot: commands.Bot,
-        channel_summarizer: ChannelSummarizer,
         *,
         live_update_editor: object | None = None,
         live_top_creations: LiveTopCreations | None = None,
         start_loops: bool = True,
     ):
         self.bot = bot
-        self.channel_summarizer = channel_summarizer
         db_handler = getattr(bot, "db_handler", None)
         if db_handler is None:
             raise RuntimeError("SummarizerCog requires bot.db_handler for live-update runtime")
@@ -123,11 +131,15 @@ class SummarizerCog(commands.Cog):
                 "Unknown LIVE_UPDATE_EDITOR_BACKEND=%r; defaulting to topic editor",
                 backend,
             )
-        return TopicEditor(
-            bot=self.bot,
-            db_handler=db_handler,
-            environment=environment,
-        )
+        topic_kwargs = {
+            "bot": self.bot,
+            "db_handler": db_handler,
+            "environment": environment,
+        }
+        topic_llm_client = _build_topic_editor_llm_client()
+        if topic_llm_client is not None:
+            topic_kwargs["llm_client"] = topic_llm_client
+        return TopicEditor(**topic_kwargs)
 
     @run_live_pass.before_loop
     async def before_run_live_pass(self):
@@ -145,13 +157,11 @@ class SummarizerCog(commands.Cog):
         if not hasattr(self, '_ran_summary_now_check'):
             self._ran_summary_now_check = True
             run_now_flag = getattr(self.bot, 'summary_now', False)
-            legacy_run_flag = getattr(self.bot, 'legacy_summary_now', False)
             archive_days = getattr(self.bot, 'archive_days', None)
             
             logger.info(
-                "SummarizerCog on_ready: summary_now=%s, legacy_summary_now=%s, archive_days=%s",
+                "SummarizerCog on_ready: summary_now=%s, archive_days=%s",
                 run_now_flag,
-                legacy_run_flag,
                 archive_days,
             )
             
@@ -168,17 +178,6 @@ class SummarizerCog(commands.Cog):
                     logger.info("Initial --summary-now live-update pass finished: %s", result)
                 except Exception as e:
                     logger.error(f"Error during initial --summary-now live-update pass: {e}", exc_info=True)
-                finally:
-                    self._release_startup_live_gate()
-            elif legacy_run_flag:
-                logger.info("Detected explicit legacy daily-summary startup flag.")
-                if archive_days:
-                    await self._run_startup_archive(archive_days)
-                try:
-                    await self.channel_summarizer.generate_summary()
-                    logger.info("Initial legacy daily-summary startup run finished.")
-                except Exception as e:
-                    logger.error(f"Error during initial legacy daily-summary startup run: {e}", exc_info=True)
                 finally:
                     self._release_startup_live_gate()
             else:
@@ -198,19 +197,6 @@ class SummarizerCog(commands.Cog):
         except Exception as e:
             logger.error(f"Error during manual live-update pass: {e}", exc_info=True)
             await ctx.send(f"An error occurred during live-update editor pass: {e}")
-
-    @commands.command(name="legacysummarynow")
-    @commands.is_owner()
-    async def legacy_summary_now_command(self, ctx):
-        """Explicit legacy daily-summary/backfill entrypoint."""
-        logger.info(f"Manual legacy summary triggered by {ctx.author.name}")
-        await ctx.send("Starting legacy daily-summary generation...")
-        try:
-            await self.channel_summarizer.generate_summary()
-            await ctx.send("Legacy daily-summary generation complete.")
-        except Exception as e:
-            logger.error(f"Error during manual legacy summary run: {e}", exc_info=True)
-            await ctx.send(f"An error occurred during legacy daily-summary generation: {e}")
 
     async def _run_startup_archive(self, archive_days: int) -> None:
         logger.info(f"Archive days specified ({archive_days}). Running archive process before live editor.")
@@ -257,38 +243,9 @@ class SummarizerCog(commands.Cog):
 
 async def setup(bot: commands.Bot):
     logger.info("Setting up SummarizerCog...")
-    # Fetch logger and dev_mode from the bot instance
-    cog_logger = getattr(bot, 'logger', logging.getLogger('SummarizerCog')) 
-    dev_mode = getattr(bot, 'dev_mode', False)
-
-    # --- Crucial Change: Get Sharer Instance --- 
-    sharing_cog = bot.get_cog("SharingCog")
-    if not sharing_cog or not hasattr(sharing_cog, 'sharer_instance'):
-        cog_logger.critical("Failed to get Sharer instance from SharingCog. SummarizerCog cannot be loaded.")
-        raise RuntimeError("Sharer instance not found for SummarizerCog setup")
-    
-    sharer_instance = sharing_cog.sharer_instance
-    cog_logger.info("Successfully retrieved Sharer instance.")
-    # ---------------------------------------------
-
-    # Initialize ChannelSummarizer, passing the retrieved sharer_instance
     try:
-        channel_summarizer_instance = ChannelSummarizer(
-            bot=bot, # Pass the bot instance here
-            logger=cog_logger, 
-            dev_mode=dev_mode, 
-            command_prefix=bot.command_prefix, # Get prefix from bot
-            sharer_instance=sharer_instance # Pass the Sharer instance here
-        )
-        cog_logger.info("ChannelSummarizer instance created successfully.")
+        await bot.add_cog(SummarizerCog(bot))
+        logger.info("SummarizerCog added to bot.")
     except Exception as e:
-        cog_logger.critical(f"Failed to initialize ChannelSummarizer for SummarizerCog: {e}", exc_info=True)
-        raise # Re-raise the exception to prevent cog loading
-
-    # Add the cog to the bot
-    try:
-        await bot.add_cog(SummarizerCog(bot, channel_summarizer_instance))
-        cog_logger.info("SummarizerCog added to bot.")
-    except Exception as e:
-        cog_logger.critical(f"Failed to add SummarizerCog to bot: {e}", exc_info=True)
+        logger.critical(f"Failed to add SummarizerCog to bot: {e}", exc_info=True)
         raise

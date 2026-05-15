@@ -141,54 +141,6 @@ class DatabaseHandler:
             )
         return None
 
-    def summary_exists_for_date(self, channel_id: int, date: Optional[datetime] = None) -> bool:
-        """Check if a summary already exists for a channel on a given date."""
-        if self.storage_handler:
-            return self._run_async_in_thread(
-                self.storage_handler.summary_exists_for_date(channel_id, date, self.dev_mode)
-            )
-        return False
-
-    def store_daily_summary(
-        self,
-        channel_id: int,
-        full_summary: Optional[str],
-        short_summary: Optional[str],
-        date: Optional[datetime] = None,
-        included_in_main_summary: bool = False,
-        dev_mode: bool = False,
-        guild_id: Optional[int] = None
-    ) -> bool:
-        """Store a daily summary to Supabase."""
-        if not self._gate_check(guild_id):
-            return False
-        if self.storage_handler:
-            logger.info(f"Storing summary to Supabase for channel {channel_id} (dev_mode={dev_mode})")
-            supabase_result = self._run_async_in_thread(
-                self.storage_handler.store_daily_summary_to_supabase(
-                    channel_id, full_summary, short_summary, date,
-                    included_in_main_summary, dev_mode, guild_id=guild_id
-                )
-            )
-            if not supabase_result:
-                logger.error(f"Failed to store summary to Supabase for channel {channel_id}")
-                return False
-            return True
-        else:
-            logger.warning("Storage handler not initialized, cannot store to Supabase")
-            return False
-
-    def mark_summaries_included_in_main(self, date: datetime, channel_message_ids: Dict[int, List[str]]) -> bool:
-        """Mark channel summaries as having items included in the main summary."""
-        if self.storage_handler:
-            logger.info(f"Marking {len(channel_message_ids)} channel summaries as included in main summary")
-            return self._run_async_in_thread(
-                self.storage_handler.mark_summaries_included_in_main(date, channel_message_ids, self.dev_mode)
-            )
-        else:
-            logger.warning("Storage handler not initialized, cannot mark summaries")
-            return False
-
     async def download_and_upload_media(self, source_url: str, storage_path: str) -> Optional[str]:
         """Download media from URL and upload to Supabase Storage."""
         if self.storage_handler:
@@ -212,16 +164,6 @@ class DatabaseHandler:
         else:
             logger.warning("Storage handler not initialized, cannot upload bytes")
             return None
-
-    def update_channel_summary_full_summary(self, channel_id: int, date: datetime, full_summary: str) -> bool:
-        """Update the full_summary for a channel's daily summary (used to add inclusion flags and media URLs)."""
-        if self.storage_handler:
-            return self._run_async_in_thread(
-                self.storage_handler.update_channel_summary_full_summary(channel_id, date, full_summary, self.dev_mode)
-            )
-        else:
-            logger.warning("Storage handler not initialized, cannot update full_summary")
-            return False
 
     def get_summary_thread_id(self, channel_id: int) -> Optional[int]:
         """Get the summary thread ID for a channel."""

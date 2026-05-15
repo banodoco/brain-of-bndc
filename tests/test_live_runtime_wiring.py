@@ -5,14 +5,6 @@ from types import SimpleNamespace
 from src.features.summarising.summariser_cog import SummarizerCog
 
 
-class FakeLegacySummarizer:
-    def __init__(self):
-        self.calls = []
-
-    async def generate_summary(self):
-        self.calls.append("generate_summary")
-
-
 class FakeLiveEditor:
     def __init__(self, events=None):
         self.triggers = []
@@ -69,16 +61,15 @@ class FakeLoop:
 
 
 class FakeBot:
-    def __init__(self, *, summary_now=False, legacy_summary_now=False, archive_days=None, events=None, dev_mode=False):
+    def __init__(self, *, summary_now=False, archive_days=None, events=None, dev_mode=False):
         self.db_handler = SimpleNamespace(server_config=FakeServerConfig())
         self.server_config = self.db_handler.server_config
         self.logger = logging.getLogger("test-live-runtime")
         self.dev_mode = dev_mode
         self.summary_now = summary_now
-        self.legacy_summary_now = legacy_summary_now
         self.archive_days = archive_days
         self.summary_completed = asyncio.Event()
-        if not summary_now and not legacy_summary_now:
+        if not summary_now:
             self.summary_completed.set()
         self.events = events if events is not None else []
         self.claude_client = SimpleNamespace()
@@ -96,10 +87,9 @@ class FakeCtx:
         self.messages.append(message)
 
 
-def make_cog(bot, legacy=None, live_editor=None, top_creations=None):
+def make_cog(bot, live_editor=None, top_creations=None):
     return SummarizerCog(
         bot,
-        legacy or FakeLegacySummarizer(),
         live_update_editor=live_editor or FakeLiveEditor(),
         live_top_creations=top_creations or FakeTopCreations(),
         start_loops=False,
@@ -108,6 +98,7 @@ def make_cog(bot, legacy=None, live_editor=None, top_creations=None):
 
 def test_default_runtime_backend_constructs_topic_editor(monkeypatch):
     monkeypatch.delenv("LIVE_UPDATE_EDITOR_BACKEND", raising=False)
+    monkeypatch.delenv("TOPIC_EDITOR_LLM_CLIENT", raising=False)
     constructed = {}
 
     class FakeTopicEditor:
@@ -126,7 +117,6 @@ def test_default_runtime_backend_constructs_topic_editor(monkeypatch):
 
     cog = SummarizerCog(
         bot,
-        FakeLegacySummarizer(),
         live_top_creations=FakeTopCreations(),
         start_loops=False,
     )
@@ -161,7 +151,6 @@ def test_legacy_backend_selector_constructs_legacy_live_update_editor(monkeypatc
 
     cog = SummarizerCog(
         bot,
-        FakeLegacySummarizer(),
         live_top_creations=FakeTopCreations(),
         start_loops=False,
     )
@@ -187,15 +176,13 @@ def test_constructor_injected_editor_overrides_backend_selector(monkeypatch):
 def test_summarynow_runs_live_editor_not_legacy_daily_summary():
     async def run():
         bot = FakeBot(summary_now=False)
-        legacy = FakeLegacySummarizer()
         live_editor = FakeLiveEditor()
-        cog = make_cog(bot, legacy=legacy, live_editor=live_editor)
+        cog = make_cog(bot, live_editor=live_editor)
         ctx = FakeCtx()
 
         await cog.summary_now_command.callback(cog, ctx)
 
         assert live_editor.triggers == ["owner_summarynow"]
-        assert legacy.calls == []
         assert ctx.messages == [
             "Starting live-update editor pass...",
             "Live-update editor pass complete: completed.",
@@ -250,49 +237,12 @@ def test_startup_without_summary_now_releases_live_gate_without_running_editor()
     asyncio.run(run())
 
 
-def test_legacy_summary_command_is_explicit_backfill_only():
-    async def run():
-        bot = FakeBot(summary_now=False)
-        legacy = FakeLegacySummarizer()
-        live_editor = FakeLiveEditor()
-        cog = make_cog(bot, legacy=legacy, live_editor=live_editor)
-        ctx = FakeCtx()
-
-        await cog.legacy_summary_now_command.callback(cog, ctx)
-
-        assert legacy.calls == ["generate_summary"]
-        assert live_editor.triggers == []
-        assert ctx.messages == [
-            "Starting legacy daily-summary generation...",
-            "Legacy daily-summary generation complete.",
-        ]
-
-    asyncio.run(run())
-
-
-def test_legacy_startup_flag_runs_legacy_backfill_not_live_editor():
-    async def run():
-        bot = FakeBot(summary_now=False, legacy_summary_now=True)
-        legacy = FakeLegacySummarizer()
-        live_editor = FakeLiveEditor()
-        cog = make_cog(bot, legacy=legacy, live_editor=live_editor)
-
-        await cog.on_ready()
-
-        assert legacy.calls == ["generate_summary"]
-        assert live_editor.triggers == []
-        assert bot.summary_completed.is_set()
-
-    asyncio.run(run())
-
-
 def test_production_live_loops_disabled_by_default(monkeypatch):
     monkeypatch.delenv("LIVE_UPDATES_ENABLED", raising=False)
     monkeypatch.delenv("LIVE_TOP_CREATIONS_ENABLED", raising=False)
     bot = FakeBot(summary_now=False, dev_mode=False)
     cog = SummarizerCog(
         bot,
-        FakeLegacySummarizer(),
         live_update_editor=FakeLiveEditor(),
         live_top_creations=FakeTopCreations(),
         start_loops=False,
@@ -300,7 +250,6 @@ def test_production_live_loops_disabled_by_default(monkeypatch):
     cog.run_live_pass = FakeLoop()
     cog.__init__(
         bot,
-        FakeLegacySummarizer(),
         live_update_editor=FakeLiveEditor(),
         live_top_creations=FakeTopCreations(),
         start_loops=True,
@@ -317,7 +266,6 @@ def test_dev_live_loops_run_hourly_without_env(monkeypatch):
     bot = FakeBot(summary_now=False, dev_mode=True)
     cog = SummarizerCog(
         bot,
-        FakeLegacySummarizer(),
         live_update_editor=FakeLiveEditor(),
         live_top_creations=FakeTopCreations(),
         start_loops=False,
@@ -325,7 +273,6 @@ def test_dev_live_loops_run_hourly_without_env(monkeypatch):
     cog.run_live_pass = FakeLoop()
     cog.__init__(
         bot,
-        FakeLegacySummarizer(),
         live_update_editor=FakeLiveEditor(),
         live_top_creations=FakeTopCreations(),
         start_loops=True,

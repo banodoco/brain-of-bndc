@@ -239,6 +239,7 @@ def test_topic_editor_run_once_uses_native_tools_and_topic_run_lifecycle(monkeyp
     monkeypatch.setenv("TOPIC_EDITOR_INPUT_COST_PER_MTOKENS", "3")
     monkeypatch.setenv("TOPIC_EDITOR_OUTPUT_COST_PER_MTOKENS", "15")
     monkeypatch.setenv("LIVE_UPDATE_TRACE_CHANNEL_ID", "999")
+    monkeypatch.delenv("TOPIC_EDITOR_PUBLISHING_ENABLED", raising=False)
 
     class TraceChannel:
         def __init__(self):
@@ -842,6 +843,39 @@ def test_topic_editor_cost_cap_triggers_force_close(monkeypatch):
     assert db.transitions[-1][0]["payload"]["cumulative_cost_usd"] == 10.0
 
 
+def test_topic_editor_accepts_finalize_on_token_cap_turn(monkeypatch):
+    monkeypatch.setenv("TOPIC_EDITOR_MAX_TOKENS", "10")
+
+    reasoning = (
+        "The agent reviewed the available source window and decided there was nothing more to publish. "
+        "This finalizer must be preserved even when the final response crosses the token cap."
+    )
+    response = SimpleNamespace(
+        content=[
+            SimpleNamespace(
+                type="tool_use",
+                id="tool-finalize",
+                name="finalize_run",
+                input={"overall_reasoning": reasoning, "topics_considered": []},
+            )
+        ],
+        usage=SimpleNamespace(input_tokens=20, output_tokens=5),
+    )
+    db = FakeDB()
+    editor = TopicEditor(db_handler=db, llm_client=FakeClaude(response), guild_id=1, live_channel_id=2, environment="prod")
+
+    result = asyncio.run(editor.run_once("manual"))
+
+    assert result["status"] == "completed"
+    assert db.completed[0][1]["status"] == "completed"
+    metadata = db.completed[0][1]["metadata"]
+    assert metadata["forced_close"] is False
+    assert metadata["budget_cap_exceeded_after_finalize"] == "token_cap_exceeded"
+    assert metadata["reasoning"] == reasoning
+    assert db.transitions[-1][0]["action"] == "observation"
+    assert db.transitions[-1][0]["payload"]["original_action"] == "finalize_run"
+
+
 def test_topic_editor_cold_start_seeds_interval_lookback_and_processes_window(monkeypatch):
     """Cold-start seeds checkpoint to (lookback_minutes ago) so the first run
     immediately processes the last interval's worth of messages, not zero."""
@@ -1070,7 +1104,7 @@ def test_topic_editor_auto_shortlists_reaction_qualified_media(monkeypatch):
         {"message_id": "200", "kind": "attachment", "index": 0}
     ]
     assert db.sources[0][0]["message_id"] == "200"
-    assert db.aliases[0][0]["alias_kind"] == "auto_shortlist"
+    assert db.aliases[0][0]["alias_kind"] == "proposed"
     assert db.transitions[0][0]["action"] == "watch"
     assert db.transitions[0][0]["payload"]["tool_name"] == "auto_media_shortlist"
 

@@ -13,7 +13,7 @@ class RateLimiter:
         self.base_delay = 1.0    # Base delay in seconds
         self.max_delay = 64.0    # Maximum delay in seconds
         self.jitter = 0.1        # Random jitter factor
-        self.logger = logging.getLogger('ChannelSummarizer')  # Initialize logger
+        self.logger = logging.getLogger('DiscordBot')
 
     async def execute(self, key, coroutine_or_factory):
         """

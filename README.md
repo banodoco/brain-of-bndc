@@ -4,7 +4,7 @@ This is the Brain of BNDC, a friendly robot dedicated to helping our around the 
 
 ## Features
 
-- 📚 **Summarization:** Generates daily or on-demand summaries of activity, grouped by topic (`summarising`).
+- 📚 **Live Updates:** Runs hourly topic-editor passes that publish structured community updates (`summarising`).
 - ✍️ **Content Synthesis:** Creates long-form articles and reports by synthesizing related discussions (combines `summarising`/`answering`).
 - 💾 **Archiving & Logging:** Maintains a searchable archive of all messages, files, and media (`logging`).
 - ✨ **Curation:** Automatically identifies high-quality posts and important discussions (`curating`).

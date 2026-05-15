@@ -25,7 +25,6 @@ from src.common.llm.claude_client import ClaudeClient
 from src.common.health_server import HealthServer
 from src.features.curating.curator_cog import CuratorCog
 from src.features.summarising.summariser_cog import SummarizerCog
-from src.features.summarising.summariser import ChannelSummarizer
 from src.features.logging.logger_cog import LoggerCog
 from src.features.sharing.sharing_cog import SharingCog
 from src.features.sharing.providers.x_provider import XProvider
@@ -157,9 +156,7 @@ async def main_async(args):
         
         # Store the command-line flags on the bot instance so cogs can access them
         bot.summary_now = args.summary_now
-        bot.legacy_summary_now = args.legacy_summary_now
         bot.summary_with_archive = args.summary_with_archive
-        bot.combine_only = args.combine_only
         bot.archive_days = args.archive_days
         bot.run_archive_script = run_archive_script  # Make the function available to cogs
 
@@ -167,7 +164,7 @@ async def main_async(args):
         # one live-editor pass, so hourly archive fetch waits until that pass is
         # complete. The name is kept for compatibility with existing cogs/tests.
         bot.summary_completed = asyncio.Event()
-        if not args.summary_now and not args.legacy_summary_now:
+        if not args.summary_now:
             bot.summary_completed.set()
 
         # ---- Initialize Core Components ----
@@ -272,14 +269,7 @@ async def main_async(args):
 
         # ---- Add Cogs ----
 
-        channel_summarizer_instance = ChannelSummarizer(
-            bot=bot,
-            logger=logger,
-            dev_mode=args.dev,
-            command_prefix=bot.command_prefix,
-            sharer_instance=sharer_instance
-        )
-        await bot.add_cog(SummarizerCog(bot, channel_summarizer_instance))
+        await bot.add_cog(SummarizerCog(bot))
         logger.info("SummarizerCog loaded.")
 
         await bot.add_cog(CuratorCog(bot, logger, args.dev))
@@ -389,8 +379,6 @@ async def main_async(args):
 def main():
     parser = argparse.ArgumentParser(description='Unified Discord Bot')
     parser.add_argument('--summary-now', action='store_true', help='Run one live-update editor pass immediately on startup')
-    parser.add_argument('--legacy-summary-now', action='store_true',
-                      help='Explicit legacy daily-summary/backfill startup run')
     parser.add_argument(
         '--dev',
         action='store_true',
@@ -399,31 +387,7 @@ def main():
     )
     parser.add_argument('--archive-days', type=int, help='Number of days to archive (can be used standalone or with --summary-now)')
     parser.add_argument('--summary-with-archive', action='store_true', help='Archive past 24 hours FIRST, then run one live-update editor pass')
-    parser.add_argument('--combine-only', action='store_true',
-                      help='Legacy daily-summary backfill: load existing channel summaries from DB and re-run only combine+post')
-    parser.add_argument('--clear-today-summaries', action='store_true',
-                      help='Legacy daily-summary backfill: delete today\'s summaries from Supabase before running')
     args = parser.parse_args()
-    
-    # Handle --clear-today-summaries flag
-    if args.clear_today_summaries:
-        print("🗑️  Clearing today's summaries from Supabase...")
-        try:
-            from supabase import create_client
-            from dotenv import load_dotenv
-            load_dotenv()
-            url = os.getenv('SUPABASE_URL')
-            key = os.getenv('SUPABASE_SERVICE_KEY')
-            if url and key:
-                supabase = create_client(url, key)
-                today = datetime.now().strftime('%Y-%m-%d')
-                result = supabase.table('daily_summaries').delete().eq('date', today).execute()
-                deleted = len(result.data) if result.data else 0
-                print(f"✅ Deleted {deleted} summary records for {today}")
-            else:
-                print("⚠️  SUPABASE_URL or SUPABASE_SERVICE_KEY not set, skipping clear")
-        except Exception as e:
-            print(f"⚠️  Error clearing summaries: {e}")
     
     # Check for date-based environment variable triggers. These env names are
     # legacy deployment controls; they now trigger the live-update editor.
@@ -465,9 +429,6 @@ def main():
     if args.summary_with_archive:
         args.summary_now = True
         args.archive_days = 1
-
-    if args.combine_only:
-        args.legacy_summary_now = True
 
     # No validation needed - --archive-days can be used standalone or with --summary-now
 
