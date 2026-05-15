@@ -11,6 +11,7 @@ from .providers.x_provider import XProvider
 from .providers.youtube_zapier_provider import YouTubeZapierProvider
 from .sharer import Sharer
 from .social_publish_service import SocialPublishService
+from .live_update_social import LiveUpdateSocialService
 
 logger = logging.getLogger('DiscordBot')
 
@@ -41,6 +42,13 @@ class SharingCog(commands.Cog):
             db_handler=self.db_handler,
             logger_instance=logger,
         )
+
+        self.live_update_social_service = LiveUpdateSocialService(
+            db_handler=self.db_handler,
+            bot=self.bot,
+            logger_instance=logger,
+        )
+        self.bot.live_update_social_service = self.live_update_social_service
         logger.info("SharingCog initialized.")
 
     def _build_social_publish_service(self) -> SocialPublishService:

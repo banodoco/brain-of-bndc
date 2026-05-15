@@ -48,6 +48,50 @@ class SocialPublishService:
             or os.getenv('DISCORD_BOT_TOKEN')
         )
 
+    # ── Sprint-1-only read-only preview facade ─────────────────────────
+    # This method MUST NOT call create_social_publication, publish_now,
+    # enqueue, or any other mutating path.  It MUST NOT insert rows into
+    # the social_publications table.  Existing callers (admin-chat, sharer,
+    # sharing_cog) remain on their current publish paths unchanged.
+    async def preview_publish_readiness(self, request: SocialPublishRequest) -> dict:
+        """Return readiness information without mutating state or publishing.
+
+        Sprint-1-only: provides route normalisation and provider availability
+        for the live-update social loop so it can surface needs_review when
+        routes or providers are absent.
+        """
+        result: dict = {
+            "ready": False,
+            "platform": request.platform,
+            "action": request.action,
+            "route_normalized": False,
+            "provider_available": False,
+            "errors": [],
+        }
+
+        # ── normalise route ────────────────────────────────────────────
+        normalized_request, route_error = self._prepare_request_for_delivery(request)
+        if route_error:
+            result["errors"].append(route_error)
+        else:
+            result["route_normalized"] = True
+
+        # ── check provider ─────────────────────────────────────────────
+        provider = self._get_provider(request.platform)
+        if not provider:
+            result["errors"].append(
+                f"Unsupported platform: {request.platform}"
+            )
+        else:
+            result["provider_available"] = True
+
+        result["ready"] = (
+            result["route_normalized"]
+            and result["provider_available"]
+            and len(result["errors"]) == 0
+        )
+        return result
+
     async def publish_now(self, request: SocialPublishRequest) -> SocialPublishResult:
         if not self._publication_signing_secret:
             return SocialPublishResult(

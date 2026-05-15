@@ -1,0 +1,74 @@
+base_branch: main
+merge_policy: review
+
+milestones:
+  - label: sprint-1-draft-social-review
+    idea: /workspace/brain-of-bndc/.megaplan/briefs/live-update-social-chain/sprint-1-draft-social-review.md
+    branch: megaplan/live-update-social-sprint-1
+    profile: thoughtful
+    robustness: standard
+    vendor: codex
+    depth: high
+    with_feedback: true
+    deepseek_provider: direct
+    notes: >
+      Intended rubric choice: thoughtful//high @codex +feedback.
+      DeepSeek-backed mechanical phases should use the direct DeepSeek API.
+
+  - label: sprint-2-media-understanding-durable-queue
+    idea: /workspace/brain-of-bndc/.megaplan/briefs/live-update-social-chain/sprint-2-media-understanding-durable-queue.md
+    branch: megaplan/live-update-social-sprint-2
+    profile: premium
+    robustness: standard
+    vendor: codex
+    depth: high
+    with_feedback: true
+    notes: >
+      Intended rubric choice: premium/standard/high @codex +feedback.
+      This is the durable queued-media sprint and should not pass unless queued
+      media attachment survives process restart/deploy. This sprint intentionally
+      uses Codex for all phases per the premium recommendation, so it has no
+      DeepSeek-backed phases to reroute.
+
+  - label: sprint-3-publish-review-threads
+    idea: /workspace/brain-of-bndc/.megaplan/briefs/live-update-social-chain/sprint-3-publish-review-threads.md
+    branch: megaplan/live-update-social-sprint-3
+    profile: thoughtful
+    robustness: standard
+    vendor: codex
+    depth: high
+    with_feedback: true
+    deepseek_provider: direct
+    notes: >
+      Intended rubric choice: thoughtful//high @codex +feedback.
+      Only run after Sprint 2 has proven durable queued media attachment.
+      DeepSeek-backed mechanical phases should use the direct DeepSeek API.
+
+  - label: sprint-4-hardening-runtime-standardisation
+    idea: /workspace/brain-of-bndc/.megaplan/briefs/live-update-social-chain/sprint-4-hardening-runtime-standardisation.md
+    branch: megaplan/live-update-social-sprint-4
+    profile: thoughtful
+    robustness: standard
+    vendor: codex
+    depth: medium
+    with_feedback: true
+    deepseek_provider: direct
+    notes: >
+      Intended rubric choice: thoughtful//medium @codex +feedback.
+      Broader runtime standardisation is selective and should only land where it
+      removes drift without creating a global service locator. DeepSeek-backed
+      mechanical phases should use the direct DeepSeek API.
+
+on_failure:
+  abort: stop_chain
+on_escalate:
+  abort: stop_chain
+
+driver:
+  stall_threshold: 5
+  max_iterations: 120
+  phase_timeout: 3600
+  status_timeout: 60
+  on_escalate: abort
+  robustness: standard
+  auto_approve: true
