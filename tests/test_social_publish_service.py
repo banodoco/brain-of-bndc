@@ -26,14 +26,19 @@ def social_signing_secret(monkeypatch):
 
 
 class FakeProvider:
-    def __init__(self):
+    def __init__(self, media_ids=None):
         self.delete_calls = []
         self.publish_calls = []
+        self._media_ids = media_ids  # None -> omit, list -> include in result
 
     async def publish(self, request):
         self.publish_calls.append(request)
+        base = {}
+        if self._media_ids is not None:
+            base["media_ids"] = list(self._media_ids)
         if request.action == "retweet":
             return {
+                **base,
                 "provider_ref": request.target_post_ref,
                 "provider_url": "https://x.com/example/status/{0}".format(request.target_post_ref),
                 "tweet_id": request.target_post_ref,
@@ -41,6 +46,7 @@ class FakeProvider:
                 "delete_supported": False,
             }
         return {
+            **base,
             "provider_ref": "tweet-123",
             "provider_url": "https://x.com/example/status/tweet-123",
             "tweet_id": "tweet-123",
@@ -57,6 +63,9 @@ class FakeProvider:
 
 
 class FailingProvider(FakeProvider):
+    def __init__(self, media_ids=None):
+        super().__init__(media_ids=media_ids)
+
     async def publish(self, request):
         self.publish_calls.append(request)
         raise RuntimeError("provider boom")
@@ -154,6 +163,50 @@ class FakeDB:
     def mark_shared_post_deleted(self, discord_message_id, platform, guild_id=None):
         self.deleted_shared_posts.append((discord_message_id, platform, guild_id))
         return True
+
+    def find_existing_social_posts(self, topic_id, platform, guild_id=None,
+                                   draft_text=None, limit=20):
+        """Find existing social publications related to a live-update topic."""
+        matches = []
+        rows = sorted(self.rows.values(),
+                      key=lambda r: r.get("created_at", ""), reverse=True)
+        for row in rows[:limit]:
+            request_payload = row.get("request_payload") or {}
+            source_context = request_payload.get("source_context") or {}
+            metadata = source_context.get("metadata") or {}
+            row_platform = row.get("platform", "")
+            if metadata.get("topic_id") == topic_id and row_platform == platform:
+                if guild_id is not None and row.get("guild_id") != guild_id:
+                    continue
+                row_dict = dict(row)
+                if draft_text:
+                    existing_text = row_dict.get("text") or (
+                        request_payload.get("text") or "")
+                    # Simple 5-gram containment
+                    row_dict["_similarity"] = self._check_content_similarity(
+                        draft_text, existing_text)
+                matches.append(row_dict)
+        return matches
+
+    @staticmethod
+    def _check_content_similarity(text_a, text_b):
+        """Character 5-gram containment (simplified for tests)."""
+        if not text_a or not text_b:
+            return 0.0
+
+        def _normalise(t):
+            return " ".join(t.lower().split())
+
+        na = _normalise(text_a)
+        nb = _normalise(text_b)
+        if len(na) < 5 or len(nb) < 5:
+            return 1.0 if na in nb or nb in na else 0.0
+        b_grams = {nb[i:i + 5] for i in range(len(nb) - 4)}
+        a_grams = [na[i:i + 5] for i in range(len(na) - 4)]
+        if not a_grams:
+            return 0.0
+        matches = sum(1 for g in a_grams if g in b_grams)
+        return matches / len(a_grams)
 
 
 def build_request(action="post", scheduled_at=None, target_post_ref=None):
@@ -1533,3 +1586,220 @@ async def test_solana_provider_confirm_tx_returns_rpc_unreachable_on_lookup_outa
     status = await provider.confirm_tx("sig-rpc")
 
     assert status == "rpc_unreachable"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Sprint 3 — Provider chain & media outcome tracking (T12)
+# ═══════════════════════════════════════════════════════════════════
+
+
+async def test_publish_now_records_media_ids():
+    """publish_now writes media_ids from the provider result into SocialPublishResult."""
+    db_handler = FakeDB()
+    provider = FakeProvider(media_ids=["media-aaa", "media-bbb"])
+    service = SocialPublishService(
+        db_handler,
+        providers={"twitter": provider},
+        logger_instance=None,
+    )
+
+    result = await service.publish_now(build_request())
+
+    assert result.success is True
+    assert result.media_ids == ["media-aaa", "media-bbb"]
+    assert len(provider.publish_calls) == 1
+
+
+async def test_publish_now_media_ids_none_for_text_only():
+    """When text_only is True, the provider returns no media_ids and
+    SocialPublishResult.media_ids is an empty list."""
+    db_handler = FakeDB()
+    # Provider that does NOT set media_ids (the default FakeProvider omits the key)
+    provider = FakeProvider()
+    service = SocialPublishService(
+        db_handler,
+        providers={"twitter": provider},
+        logger_instance=None,
+    )
+
+    req = build_request()
+    req.text_only = True
+    result = await service.publish_now(req)
+
+    assert result.success is True
+    # Default FakeProvider omits media_ids → provider_result.get('media_ids') returns None
+    # → media_ids=provider_result.get('media_ids') or [] yields []
+    assert result.media_ids == []
+
+
+async def test_publish_now_media_ids_none_for_youtube(monkeypatch):
+    """YouTube provider does not return media_ids keys, so media_ids is empty."""
+    FakeZapierSession.payloads = []
+    monkeypatch.setenv("ZAPIER_YOUTUBE_URL", "https://hooks.zapier.test/youtube")
+    monkeypatch.setattr(
+        "src.features.sharing.providers.youtube_zapier_provider.aiohttp.ClientSession",
+        FakeZapierSession,
+    )
+
+    db_handler = FakeDB()
+    service = SocialPublishService(
+        db_handler,
+        providers={"youtube": YouTubeZapierProvider()},
+        logger_instance=None,
+    )
+
+    result = await service.publish_now(build_youtube_request())
+
+    assert result.success is True
+    assert result.provider_ref == "yt-123"
+    # YouTube provider doesn't return media_ids → empty
+    assert result.media_ids == []
+
+
+async def test_reply_thread_sequential_publish():
+    """Publishing a root post followed by a reply chains through target_post_ref."""
+    db_handler = FakeDB()
+
+    # Use a tracking provider that records returned provider_refs
+    class TrackingProvider(FakeProvider):
+        def __init__(self):
+            super().__init__()
+            self._counter = 0
+
+        async def publish(self, request):
+            result = await super().publish(request)
+            self._counter += 1
+            result["provider_ref"] = f"tweet-{self._counter}"
+            result["tweet_id"] = f"tweet-{self._counter}"
+            result["provider_url"] = f"https://x.com/example/status/tweet-{self._counter}"
+            return result
+
+    provider = TrackingProvider()
+    service = SocialPublishService(
+        db_handler,
+        providers={"twitter": provider},
+        logger_instance=None,
+    )
+
+    # 1) publish root post
+    root = await service.publish_now(build_request(action="post"))
+    assert root.success is True
+    root_ref = root.provider_ref
+    assert root_ref == "tweet-1"
+
+    # 2) publish reply chained to root
+    reply = await service.publish_now(
+        build_request(action="reply", target_post_ref=root_ref)
+    )
+    assert reply.success is True
+    assert reply.provider_ref == "tweet-2"
+    assert provider.publish_calls[1].target_post_ref == root_ref
+
+    # 3) another reply chained to the first reply
+    reply2 = await service.publish_now(
+        build_request(action="reply", target_post_ref=reply.provider_ref)
+    )
+    assert reply2.success is True
+    assert reply2.provider_ref == "tweet-3"
+    assert provider.publish_calls[2].target_post_ref == reply.provider_ref
+
+
+async def test_reply_not_supported_on_youtube():
+    """publish_now rejects reply action on non-X/Twitter platforms."""
+    db_handler = FakeDB()
+    service = SocialPublishService(
+        db_handler,
+        providers={"twitter": FakeProvider()},
+        logger_instance=None,
+    )
+
+    result = await service.publish_now(
+        SocialPublishRequest(
+            message_id=99,
+            channel_id=2,
+            guild_id=3,
+            user_id=4,
+            platform="youtube",
+            action="reply",
+            target_post_ref="some-video-id",
+            text="Replying to a YouTube video",
+            source_kind="admin_chat",
+            source_context=PublicationSourceContext(
+                source_kind="admin_chat",
+                metadata={"user_details": {"username": "poster"}},
+            ),
+        )
+    )
+
+    assert result.success is False
+    assert "Reply/quote not supported on this platform" in result.error
+    assert result.publication_id is None
+
+
+async def test_find_existing_posts():
+    """find_existing_posts returns matches filtered by topic_id and platform,
+    with optional content-similarity annotations."""
+    db_handler = FakeDB()
+    service = SocialPublishService(
+        db_handler,
+        providers={"twitter": FakeProvider()},
+        logger_instance=None,
+    )
+
+    # Seed some publications
+    for i in range(3):
+        req = build_request()
+        req.source_context = PublicationSourceContext(
+            source_kind="live_update_social",
+            metadata={
+                "topic_id": f"topic-{i}",
+                "user_details": {"username": "poster"},
+            },
+        )
+        req.text = f"Content for topic {i}"
+        await service.publish_now(req)
+
+    # Also publish a non-live_update_social one (should not match find_existing_posts
+    # since the real DB filters on source_kind, but FakeDB does not — we only care
+    # about topic_id filtering)
+    req_extra = build_request()
+    req_extra.source_context = PublicationSourceContext(
+        source_kind="admin_chat",
+        metadata={"topic_id": "topic-0"},
+    )
+    req_extra.text = "Admin chat content"
+    await service.publish_now(req_extra)
+
+    # Search for topic-0
+    matches = await service.find_existing_posts(
+        topic_id="topic-0",
+        platform="twitter",
+    )
+    # Both the live_update_social row and admin_chat row have topic_id=topic-0
+    assert len(matches) >= 1
+    # At least one match has topic-0 in its metadata
+    topic_texts = [
+        m.get("request_payload", {}).get("text", "")
+        for m in matches
+    ]
+    assert any("topic 0" in t for t in topic_texts)
+
+    # With draft_text, similarity score should be present
+    matches_with_sim = await service.find_existing_posts(
+        topic_id="topic-0",
+        platform="twitter",
+        draft_text="Content for topic 0",
+    )
+    assert len(matches_with_sim) >= 1
+    for m in matches_with_sim:
+        assert "_similarity" in m
+        assert isinstance(m["_similarity"], float)
+        if "Content for topic 0" in (m.get("text") or ""):
+            assert m["_similarity"] == 1.0  # exact match
+
+    # Non-existent topic returns empty
+    matches_none = await service.find_existing_posts(
+        topic_id="no-such-topic",
+        platform="twitter",
+    )
+    assert matches_none == []

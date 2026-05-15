@@ -66,3 +66,4 @@ class SocialPublishResult:
     delete_supported: bool = False
     already_shared: bool = False
     error: Optional[str] = None
+    media_ids: List[str] = field(default_factory=list)

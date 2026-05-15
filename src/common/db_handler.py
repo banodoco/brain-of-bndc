@@ -1522,6 +1522,17 @@ class DatabaseHandler:
             )
             return None
 
+    # Sprint 3 schema migrations (run these ALTER TABLE statements against Supabase):
+    #
+    #   ALTER TABLE live_update_social_runs
+    #     ADD COLUMN IF NOT EXISTS publication_outcome JSONB DEFAULT NULL;
+    #
+    #   ALTER TABLE social_publications
+    #     ADD COLUMN IF NOT EXISTS media_attached JSONB DEFAULT NULL;
+    #
+    #   ALTER TABLE social_publications
+    #     ADD COLUMN IF NOT EXISTS media_missing JSONB DEFAULT NULL;
+
     def update_live_update_social_run(
         self,
         run_id: str,
@@ -1529,8 +1540,13 @@ class DatabaseHandler:
         draft_text: Optional[str] = None,
         media_decisions: Optional[Dict[str, Any]] = None,
         trace_entries: Optional[List[Dict[str, Any]]] = None,
+        publication_outcome: Optional[Dict[str, Any]] = None,
     ) -> bool:
-        """Update terminal columns on a live_update_social_runs row."""
+        """Update terminal columns on a live_update_social_runs row.
+
+        ``publication_outcome`` is a JSONB dict (see
+        :class:`~.live_update_social.models.PublishOutcome.to_dict`).
+        """
         if not self.supabase:
             return False
         try:
@@ -1545,6 +1561,8 @@ class DatabaseHandler:
                 payload["media_decisions"] = media_decisions
             if trace_entries is not None:
                 payload["trace_entries"] = trace_entries
+            if publication_outcome is not None:
+                payload["publication_outcome"] = publication_outcome
 
             (
                 self.supabase.table("live_update_social_runs")
@@ -1607,6 +1625,238 @@ class DatabaseHandler:
                 topic_id, e, exc_info=True,
             )
             return None
+
+    # ========== Sprint 3: Publish Mode Query Methods ==========
+
+    def find_existing_social_posts(
+        self,
+        topic_id: str,
+        platform: str,
+        guild_id: Optional[int] = None,
+        draft_text: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[Dict]:
+        """Find existing social publications related to a live-update topic.
+
+        Returns a list of matching ``social_publications`` rows.  When
+        ``draft_text`` is supplied each candidate is annotated with a
+        ``_similarity`` score computed by :meth:`check_content_similarity`
+        so callers can detect near-duplicate content beyond exact match.
+
+        Unifies the query pattern used by
+        :meth:`check_live_update_social_duplicate_publication` and adds
+        optional content-similarity scoring.
+        """
+        if not self.supabase:
+            return []
+        try:
+            query = (
+                self.supabase.table("social_publications")
+                .select("*")
+                .eq("source_kind", "live_update_social")
+                .eq("platform", platform)
+            )
+            if guild_id is not None:
+                query = query.eq("guild_id", guild_id)
+            result = query.order("created_at", desc=True).limit(limit).execute()
+            if not result.data:
+                return []
+
+            matches: List[Dict] = []
+            for row in result.data:
+                request_payload = row.get("request_payload") or {}
+                source_context = request_payload.get("source_context") or {}
+                metadata = source_context.get("metadata") or {}
+                if metadata.get("topic_id") == topic_id:
+                    row_dict = dict(row)
+                    if draft_text:
+                        existing_text = row_dict.get("text") or (
+                            request_payload.get("text") or ""
+                        )
+                        row_dict["_similarity"] = self.check_content_similarity(
+                            draft_text, existing_text
+                        )
+                    matches.append(row_dict)
+            return matches
+        except Exception as e:
+            logger.error(
+                "Error finding existing social posts for topic %s: %s",
+                topic_id, e, exc_info=True,
+            )
+            return []
+
+    def get_recent_social_runs(
+        self,
+        guild_id: Optional[int] = None,
+        terminal_status: Optional[str] = None,
+        mode: Optional[str] = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> List[Dict]:
+        """Return recent ``live_update_social_runs`` rows ordered by
+        ``created_at`` descending.
+
+        Args:
+            guild_id: Optional guild filter.
+            terminal_status: If set, only return runs with this status
+                (``draft``, ``queued``, ``published``, ``skip``,
+                ``needs_review``).
+            mode: Optional mode filter (``draft``, ``publish``).
+            limit: Maximum rows to return.
+            offset: Pagination offset.
+        """
+        if not self.supabase:
+            return []
+        try:
+            query = (
+                self.supabase.table("live_update_social_runs")
+                .select("*")
+            )
+            if guild_id is not None:
+                query = query.eq("guild_id", guild_id)
+            if terminal_status is not None:
+                query = query.eq("terminal_status", terminal_status)
+            if mode is not None:
+                query = query.eq("mode", mode)
+            result = (
+                query
+                .order("created_at", desc=True)
+                .range(offset, offset + limit - 1)
+                .execute()
+            )
+            return result.data or []
+        except Exception as e:
+            logger.error(
+                "Error fetching recent social runs: %s", e, exc_info=True,
+            )
+            return []
+
+    def get_social_publications_by_run_id(
+        self,
+        run_id: str,
+        limit: int = 50,
+    ) -> List[Dict]:
+        """Return ``social_publications`` rows whose
+        ``request_payload->source_context->metadata->run_id`` matches the
+        given *run_id*.
+
+        The run_id is embedded in the publication's JSONB
+        ``request_payload`` by :func:`_make_enqueue_handler`.
+        """
+        if not self.supabase:
+            return []
+        try:
+            # Query all live_update_social publications and filter in Python
+            # because run_id is nested in JSONB request_payload.
+            result = (
+                self.supabase.table("social_publications")
+                .select("*")
+                .eq("source_kind", "live_update_social")
+                .order("created_at", desc=True)
+                .limit(limit)
+                .execute()
+            )
+            if not result.data:
+                return []
+
+            matches: List[Dict] = []
+            for row in result.data:
+                request_payload = row.get("request_payload") or {}
+                source_context = request_payload.get("source_context") or {}
+                metadata = source_context.get("metadata") or {}
+                if metadata.get("run_id") == run_id:
+                    matches.append(dict(row))
+            return matches
+        except Exception as e:
+            logger.error(
+                "Error fetching social publications for run %s: %s",
+                run_id, e, exc_info=True,
+            )
+            return []
+
+    def update_social_publication_media_outcome(
+        self,
+        publication_id: str,
+        media_attached: Optional[List[Dict[str, Any]]] = None,
+        media_missing: Optional[List[Dict[str, Any]]] = None,
+        guild_id: Optional[int] = None,
+    ) -> bool:
+        """Persist media outcome on a ``social_publications`` row.
+
+        Args:
+            publication_id: The publication record to update.
+            media_attached: List of dicts describing media that was
+                successfully attached (each with keys like ``media_ref``,
+                ``provider_media_id``).
+            media_missing: List of dicts describing media that was
+                requested but not present in the provider result.
+            guild_id: Optional guild for write gating.
+        """
+        effective_guild_id = guild_id or self._resolve_social_publication_guild_id(publication_id)
+        if not self._gate_check(effective_guild_id):
+            return False
+        if not self.supabase:
+            return False
+
+        try:
+            payload: Dict[str, Any] = {
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            if media_attached is not None:
+                payload["media_attached"] = self._serialize_supabase_value(media_attached)
+            if media_missing is not None:
+                payload["media_missing"] = self._serialize_supabase_value(media_missing)
+
+            (
+                self.supabase.table("social_publications")
+                .update(payload)
+                .eq("publication_id", publication_id)
+                .eq("guild_id", effective_guild_id)
+                .execute()
+            )
+            return True
+        except Exception as e:
+            logger.error(
+                "Error updating media outcome for publication %s: %s",
+                publication_id, e, exc_info=True,
+            )
+            return False
+
+    @staticmethod
+    def check_content_similarity(text_a: str, text_b: str) -> float:
+        """Character 5-gram containment similarity.
+
+        Normalises both texts (lowercase, collapse whitespace), extracts
+        all length-5 character substrings from *text_a*, and returns the
+        fraction found in *text_b*.  A result of 1.0 means every 5-gram
+        of *text_a* appears in *text_b*; 0.0 means none do.
+
+        This is a containment measure (not Jaccard), so short *text_a*
+        inside long *text_b* can still score 1.0, which is desirable for
+        detecting reposts of the same content embedded in longer threads.
+        """
+        if not text_a or not text_b:
+            return 0.0
+
+        def _normalise(t: str) -> str:
+            return " ".join(t.lower().split())
+
+        na = _normalise(text_a)
+        nb = _normalise(text_b)
+
+        if len(na) < 5 or len(nb) < 5:
+            # Fall back to simple substring containment for very short texts
+            return 1.0 if na in nb or nb in na else 0.0
+
+        # Build set of 5-grams for text_b (the reference corpus)
+        b_grams = {nb[i : i + 5] for i in range(len(nb) - 4)}
+
+        a_grams = [na[i : i + 5] for i in range(len(na) - 4)]
+        if not a_grams:
+            return 0.0
+
+        matches = sum(1 for g in a_grams if g in b_grams)
+        return matches / len(a_grams)
 
     # ========== Payments ==========
 

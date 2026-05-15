@@ -141,6 +141,109 @@ class ToolBinding:
         return self.tool_spec.name
 
 
+# ── Thread and publish outcome types (Sprint 3) ───────────────────────
+
+
+@dataclass
+class ThreadItem:
+    """A single item in a social media thread.
+
+    Attributes:
+        index: 0-based position in the thread (0 = root post).
+        draft_text: The text for this thread item.
+        media_refs: Optional list of media identity dicts to attach to this item.
+        target_post_ref: For reply items (index > 0), the provider_ref of the parent.
+    """
+
+    index: int
+    draft_text: str
+    media_refs: List[Dict[str, Any]] = field(default_factory=list)
+    target_post_ref: Optional[str] = None
+
+
+@dataclass
+class ThreadDraft:
+    """A draft thread composed of one or more :class:`ThreadItem` entries.
+
+    The root item (index 0) is the top-level post; subsequent items are replies.
+    """
+
+    items: List[ThreadItem] = field(default_factory=list)
+
+    @property
+    def root(self) -> Optional[ThreadItem]:
+        for item in self.items:
+            if item.index == 0:
+                return item
+        return None
+
+    @property
+    def reply_items(self) -> List[ThreadItem]:
+        return [item for item in self.items if item.index > 0]
+
+
+@dataclass
+class PublishOutcome:
+    """Outcome of a single publish operation, persisted on the run.
+
+    Attributes:
+        publication_id: The social_publications row id (or None on failure).
+        success: Whether the publish succeeded.
+        provider_ref: Provider-side post/tweet ID.
+        provider_url: Provider-side post/tweet URL.
+        media_ids: List of media IDs attached on the provider side.
+        media_attached: List of media refs that were successfully attached.
+        media_missing: List of media refs that were requested but missing.
+        error: Error message on failure.
+        failure_reason: Classified failure reason (see FailureReason enum).
+        per_item_outcomes: For thread publishing, list of per-item outcome dicts.
+    """
+
+    publication_id: Optional[str] = None
+    success: bool = False
+    provider_ref: Optional[str] = None
+    provider_url: Optional[str] = None
+    media_ids: List[str] = field(default_factory=list)
+    media_attached: List[Dict[str, Any]] = field(default_factory=list)
+    media_missing: List[Dict[str, Any]] = field(default_factory=list)
+    error: Optional[str] = None
+    failure_reason: Optional[str] = None
+    per_item_outcomes: List[Dict[str, Any]] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "publication_id": self.publication_id,
+            "success": self.success,
+            "provider_ref": self.provider_ref,
+            "provider_url": self.provider_url,
+            "media_ids": self.media_ids,
+            "media_attached": self.media_attached,
+            "media_missing": self.media_missing,
+            "error": self.error,
+            "failure_reason": self.failure_reason,
+        }
+        if self.per_item_outcomes:
+            result["per_item_outcomes"] = self.per_item_outcomes
+        return result
+
+    @classmethod
+    def from_dict(cls, d: Optional[dict]) -> Optional["PublishOutcome"]:
+        if not d:
+            return None
+        return cls(
+            publication_id=d.get("publication_id"),
+            success=bool(d.get("success", False)),
+            provider_ref=d.get("provider_ref"),
+            provider_url=d.get("provider_url"),
+            media_ids=d.get("media_ids") or [],
+            media_attached=d.get("media_attached") or [],
+            media_missing=d.get("media_missing") or [],
+            error=d.get("error"),
+            failure_reason=d.get("failure_reason"),
+            per_item_outcomes=d.get("per_item_outcomes") or [],
+        )
+
+
 # ── Run state ─────────────────────────────────────────────────────────
 
 @dataclass
@@ -163,12 +266,19 @@ class RunState:
     publish_units: Dict[str, Any] = field(default_factory=dict)
     draft_text: Optional[str] = None
     media_decisions: Dict[str, Any] = field(default_factory=dict)
+    publication_outcome: Optional[PublishOutcome] = None
     trace_entries: List[Dict[str, Any]] = field(default_factory=list)
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
     @classmethod
     def from_row(cls, row: dict) -> "RunState":
+        outcome_raw = row.get("publication_outcome")
+        if isinstance(outcome_raw, dict):
+            publication_outcome = PublishOutcome.from_dict(outcome_raw)
+        else:
+            publication_outcome = None
+
         return cls(
             run_id=str(row.get("run_id", "")),
             topic_id=str(row.get("topic_id", "")),
@@ -186,6 +296,7 @@ class RunState:
             publish_units=row.get("publish_units") or {},
             draft_text=row.get("draft_text"),
             media_decisions=row.get("media_decisions") or {},
+            publication_outcome=publication_outcome,
             trace_entries=row.get("trace_entries") or [],
             created_at=row.get("created_at"),
             updated_at=row.get("updated_at"),

@@ -53,6 +53,26 @@ class SocialPublishService:
     # enqueue, or any other mutating path.  It MUST NOT insert rows into
     # the social_publications table.  Existing callers (admin-chat, sharer,
     # sharing_cog) remain on their current publish paths unchanged.
+    async def find_existing_posts(
+        self,
+        topic_id: str,
+        platform: str,
+        guild_id: Optional[int] = None,
+        draft_text: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[Dict]:
+        """Find existing social publications related to a live-update topic.
+
+        Delegates to :meth:`DatabaseHandler.find_existing_social_posts`.
+        """
+        return self.db_handler.find_existing_social_posts(
+            topic_id=topic_id,
+            platform=platform,
+            guild_id=guild_id,
+            draft_text=draft_text,
+            limit=limit,
+        )
+
     async def preview_publish_readiness(self, request: SocialPublishRequest) -> dict:
         """Return readiness information without mutating state or publishing.
 
@@ -99,6 +119,16 @@ class SocialPublishService:
                 success=False,
                 error="Social publication signing secret is not configured",
             )
+
+        # ── platform gating: reply/quote only on X/Twitter ──────────
+        if request.action in ('reply', 'quote'):
+            platform_norm = (request.platform or '').lower()
+            if platform_norm not in ('twitter', 'x'):
+                return SocialPublishResult(
+                    publication_id=None,
+                    success=False,
+                    error=f"Reply/quote not supported on this platform: {request.platform}",
+                )
 
         provider = self._get_provider(request.platform)
         if not provider:
@@ -158,6 +188,7 @@ class SocialPublishService:
                 provider_ref=provider_result.get('provider_ref'),
                 provider_url=provider_result.get('provider_url'),
                 delete_supported=bool(provider_result.get('delete_supported')),
+                media_ids=provider_result.get('media_ids') or [],
             )
         except Exception as e:
             self.logger.error(f"[SocialPublishService] publish_now failed for {publication_id}: {e}", exc_info=True)

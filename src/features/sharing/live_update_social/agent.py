@@ -36,16 +36,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("DiscordBot")
 
-# ── Sprint-1 guard: actions that MUST NOT be implemented ──────────────
-_FORBIDDEN_ACTIONS: frozenset = frozenset({"reply", "retweet", "quote"})
-_FORBIDDEN_OUTCOMES: frozenset = frozenset({"queue", "publish"})
+# Mode-dependent forbidden actions are now instance-level (set in __init__).
+# See LiveUpdateSocialAgent.__init__ for the per-mode configuration.
 
 
 class LiveUpdateSocialAgent:
-    """Draft, media-aware social review agent (Sprint 2).
+    """Social review agent supporting draft, queue, and publish modes (Sprint 3).
 
     Supports queue mode when social_publish_service is provided and
-    LIVE_UPDATE_SOCIAL_MODE=queue.
+    LIVE_UPDATE_SOCIAL_MODE=queue. Supports publish mode when
+    LIVE_UPDATE_SOCIAL_MODE=publish and social_publish_service is provided.
     """
 
     def __init__(
@@ -57,6 +57,15 @@ class LiveUpdateSocialAgent:
         self.db_handler = db_handler
         self.bot = bot
         self.social_publish_service = social_publish_service
+
+        # ── instance-level forbidden actions (per-mode) ────────────────
+        if self._is_publish_mode():
+            # Publish mode: allow reply/quote for thread chaining, forbid retweet
+            self._forbidden_actions: frozenset = frozenset({"retweet"})
+        else:
+            # Queue/draft mode: forbid all non-post actions
+            self._forbidden_actions: frozenset = frozenset({"reply", "retweet", "quote"})
+
         self._bindings: List[ToolBinding] = build_tool_bindings(
             db_handler, bot, social_publish_service=social_publish_service,
         )
@@ -70,7 +79,7 @@ class LiveUpdateSocialAgent:
         ``None`` if the run could not be completed.
         """
         # ── structural rejection of non-sprint actions ────────────────
-        if payload.action in _FORBIDDEN_ACTIONS:
+        if payload.action in self._forbidden_actions:
             logger.warning(
                 "LiveUpdateSocialAgent: rejected forbidden action %r",
                 payload.action,
@@ -109,6 +118,7 @@ class LiveUpdateSocialAgent:
             run_state.publish_units = reconstruct_publish_units(
                 topic_summary_data=payload.topic_summary_data,
                 source_metadata=payload.source_metadata,
+                mode="publish" if self._is_publish_mode() else "draft",
             )
             run_state.add_trace("publish_units_reconstructed")
 
@@ -296,56 +306,113 @@ class LiveUpdateSocialAgent:
         instructions to make exactly one tool call.  When queue mode is
         enabled, ``enqueue_social_post`` is listed as an additional
         terminal option; when disabled only the Sprint-1 draft/skip/review
-        tools are presented.
+        tools are presented.  When publish mode is enabled, the prompt
+        includes thread-building guidance and publish instructions.
         """
         queue_mode = self._is_queue_mode()
+        publish_mode = self._is_publish_mode()
 
-        tools_text = (
-            "## Available terminal tools (call exactly ONE)\n\n"
-            "1. **draft_social_post** — Record a draft social post. Use when "
-            "content and media are ready for review. Provide the draft_text "
-            "and optionally selected_media identities.\n"
-            "2. **skip_social_post** — Skip social posting. Use when content "
-            "should not be posted (not newsworthy, duplicate, etc.). Provide "
-            "a reason.\n"
-            "3. **request_social_review** — Request human review. Use when "
-            "you cannot make a confident decision (missing media, unclear "
-            "content, route issues). Provide a reason.\n"
-        )
-        if queue_mode:
-            tools_text += (
-                "4. **enqueue_social_post** — Enqueue an approved social post "
-                "for durable publication. Use when the draft is approved and "
-                "media understanding has been completed. Provide draft_text "
-                "and optionally selected_media with understanding summaries.\n"
+        if publish_mode:
+            tools_text = (
+                "## Available terminal tool (call exactly ONE)\n\n"
+                "1. **publish_social_post** — Publish a social media post "
+                "IMMEDIATELY. Use this when content and media are ready. "
+                "Provide draft_text and optionally selected_media identities. "
+                "For multi-section updates, provide thread_items "
+                "(list of {{index, draft_text, media_refs}} where index 0 is "
+                "the root post and subsequent items are reply chain items).\n\n"
+                "## Thread-building guidance\n"
+                "- If the topic has multiple sub-topics (shown below as thread "
+                "items with indices), you may publish as a thread: set "
+                "thread_items with one entry per sub-topic, each with its own "
+                "draft_text. The root post (index 0) should introduce the "
+                "overall topic; sub-topic units follow as reply chain items.\n"
+                "- For a single-post publish, only provide draft_text and "
+                "optionally selected_media (do NOT provide thread_items).\n"
+                "- If you cannot make a confident decision (missing media, "
+                "unclear content, route issues), return "
+                "'request_social_review' as the tool name with a reason.\n"
+                "- If the content should not be posted (not newsworthy, "
+                "duplicate), return 'skip_social_post' as the tool name "
+                "with a reason.\n"
+                "- Use read tools (find_existing_social_posts, "
+                "get_social_run_status, get_live_update_topic, "
+                "get_source_messages, get_published_update_context, "
+                "inspect_message_media, list_social_routes) to gather "
+                "context BEFORE making your terminal decision.\n"
             )
-
-        rules_text = (
-            "## Rules\n"
-            "- Call exactly ONE terminal tool.\n"
-            "- You may use read tools (get_live_update_topic, "
-            "get_source_messages, get_published_update_context, "
-            "inspect_message_media, list_social_routes) to gather context "
-            "BEFORE making your terminal decision, but ONLY the final "
-            "terminal tool call will be executed.\n"
-            "- Do NOT provide text outside the tool call.\n"
-            "- If media is expected but unresolved, use "
-            "request_social_review.\n"
-            "- If the content is newsworthy and media is available, use "
-            "draft_social_post with a concise draft.\n"
-            "- If the content is not newsworthy, use skip_social_post.\n"
-        )
-        if queue_mode:
-            rules_text += (
-                "- If the content is approved and queue mode is active, "
-                "use enqueue_social_post instead of draft_social_post.\n"
+        else:
+            tools_text = (
+                "## Available terminal tools (call exactly ONE)\n\n"
+                "1. **draft_social_post** — Record a draft social post. Use when "
+                "content and media are ready for review. Provide the draft_text "
+                "and optionally selected_media identities.\n"
+                "2. **skip_social_post** — Skip social posting. Use when content "
+                "should not be posted (not newsworthy, duplicate, etc.). Provide "
+                "a reason.\n"
+                "3. **request_social_review** — Request human review. Use when "
+                "you cannot make a confident decision (missing media, unclear "
+                "content, route issues). Provide a reason.\n"
             )
+            if queue_mode:
+                tools_text += (
+                    "4. **enqueue_social_post** — Enqueue an approved social post "
+                    "for durable publication. Use when the draft is approved and "
+                    "media understanding has been completed. Provide draft_text "
+                    "and optionally selected_media with understanding summaries.\n"
+                )
 
-        return (
+        if publish_mode:
+            rules_text = (
+                "## Rules\n"
+                "- Call exactly ONE terminal tool.\n"
+                "- You may use read tools to gather context BEFORE making "
+                "your terminal decision.\n"
+                "- Do NOT provide text outside the tool call.\n"
+                "- If media is expected but unresolved, return "
+                "'request_social_review' with a reason.\n"
+                "- If the content is newsworthy and media is available, use "
+                "publish_social_post with a concise draft.\n"
+                "- If the content is not newsworthy, return 'skip_social_post' "
+                "with a reason.\n"
+                "- For threads: each thread item gets its own draft_text. "
+                "Media refs are assigned per-item via media_refs.\n"
+            )
+        else:
+            rules_text = (
+                "## Rules\n"
+                "- Call exactly ONE terminal tool.\n"
+                "- You may use read tools (get_live_update_topic, "
+                "get_source_messages, get_published_update_context, "
+                "inspect_message_media, list_social_routes) to gather context "
+                "BEFORE making your terminal decision, but ONLY the final "
+                "terminal tool call will be executed.\n"
+                "- Do NOT provide text outside the tool call.\n"
+                "- If media is expected but unresolved, use "
+                "request_social_review.\n"
+                "- If the content is newsworthy and media is available, use "
+                "draft_social_post with a concise draft.\n"
+                "- If the content is not newsworthy, use skip_social_post.\n"
+            )
+            if queue_mode:
+                rules_text += (
+                    "- If the content is approved and queue mode is active, "
+                    "use enqueue_social_post instead of draft_social_post.\n"
+                )
+
+        role = (
+            "You are a social media publisher for the Banodoco Discord bot. "
+            "Your job is to review a live-update topic and publish it to "
+            "social media immediately.\n\n"
+            if publish_mode else
             "You are a social media draft reviewer for the Banodoco Discord bot. "
             "Your job is to review a live-update topic and decide whether it "
             "should be drafted for social media, skipped, or flagged for human "
             "review.\n\n"
+        )
+
+        return (
+            role
             + tools_text
             + "\n"
             + rules_text
@@ -360,8 +427,13 @@ class LiveUpdateSocialAgent:
         payload: LiveUpdateHandoffPayload,
         run_state: RunState,
     ) -> str:
-        """Build the user message containing topic data and media info."""
+        """Build the user message containing topic data and media info.
+
+        In publish mode with multi-unit publish_units, suppresses raw
+        subTopics and instead presents units as thread items with indices.
+        """
         parts: List[str] = []
+        publish_mode = self._is_publish_mode()
 
         # Topic summary
         topic = payload.topic_summary_data or {}
@@ -370,15 +442,33 @@ class LiveUpdateSocialAgent:
         parts.append(f"Topic ID: {payload.topic_id}")
         parts.append(f"Platform: {payload.platform}")
 
-        # Sub-topics
-        sub_topics = topic.get("subTopics", [])
-        if sub_topics:
-            parts.append(f"Sub-topics: {len(sub_topics)}")
-            for st in sub_topics[:10]:
-                if isinstance(st, dict):
-                    parts.append(f"  - {st.get('title', st.get('name', str(st)))}")
-                else:
-                    parts.append(f"  - {st}")
+        # ── publish-mode: present units as thread items ────────────────
+        units = run_state.publish_units or {}
+        unit_list = units.get("units", [])
+
+        if publish_mode and len(unit_list) > 1:
+            # Multi-unit publish mode: suppress raw subTopics, present as
+            # thread items with indices so the LLM can build a thread.
+            parts.append(f"\n## Thread Items ({len(unit_list)} units)")
+            for i, unit in enumerate(unit_list):
+                parts.append(f"\n### Item {i}" + (" (root)" if i == 0 else " (reply)"))
+                parts.append(f"  title: {unit.get('title', '')}")
+                if unit.get("sub_topics"):
+                    parts.append(f"  sub_topics: {json.dumps(unit['sub_topics'], default=str)}")
+                if unit.get("media_message_id"):
+                    parts.append(f"  media_message_id: {unit['media_message_id']}")
+                if unit.get("_is_subtopic"):
+                    parts.append(f"  _is_subtopic: true")
+        else:
+            # Sub-topics (legacy presentation for draft/queue/single-unit modes)
+            sub_topics = topic.get("subTopics", [])
+            if sub_topics:
+                parts.append(f"Sub-topics: {len(sub_topics)}")
+                for st in sub_topics[:10]:
+                    if isinstance(st, dict):
+                        parts.append(f"  - {st.get('title', st.get('name', str(st)))}")
+                    else:
+                        parts.append(f"  - {st}")
 
         # Source metadata
         src = payload.source_metadata or {}
@@ -405,8 +495,7 @@ class LiveUpdateSocialAgent:
             for i, m in enumerate(unresolved[:5]):
                 parts.append(f"  {i + 1}. {json.dumps(m, default=str)}")
 
-        # Publish units
-        units = run_state.publish_units or {}
+        # Publish units (always include for debugging)
         parts.append("\n## Publish Units")
         parts.append(json.dumps(units, default=str, indent=2))
 
@@ -420,16 +509,44 @@ class LiveUpdateSocialAgent:
         import os
         return os.getenv("LIVE_UPDATE_SOCIAL_MODE", "") == "queue"
 
+    @staticmethod
+    def _is_publish_mode() -> bool:
+        """Return True if publish mode is enabled via env var."""
+        import os
+        return os.getenv("LIVE_UPDATE_SOCIAL_MODE", "") == "publish"
+
     def _build_tool_specs(self) -> List[Dict[str, Any]]:
         """Return tool definitions for the LLM.
 
-        Always includes terminal tools (draft, skip, review) and read tools.
-        Enqueue tool is only included when queue mode is active, preserving
-        Sprint-1 draft-only behaviour when queue mode is disabled.
+        Publish mode: includes publish_social_post, excludes enqueue_social_post
+        and draft/queue terminal tools. Always includes read tools.
+        Queue mode: includes enqueue_social_post, excludes publish_social_post.
+        Draft mode (default): only Sprint-1 terminal tools + read tools.
+
+        Always includes read tools (get_live_update_topic, get_source_messages,
+        get_published_update_context, inspect_message_media, list_social_routes,
+        find_existing_social_posts, get_social_run_status).
         """
         specs: List[Any] = list(ALL_TOOL_SPECS)
-        if not self._is_queue_mode():
-            specs = [ts for ts in specs if ts.name != "enqueue_social_post"]
+
+        publish_mode = self._is_publish_mode()
+        queue_mode = self._is_queue_mode()
+
+        if publish_mode:
+            # Exclude draft/queue terminal tools; keep publish_social_post
+            specs = [ts for ts in specs if ts.name not in (
+                "draft_social_post", "skip_social_post", "request_social_review",
+                "enqueue_social_post",
+            )]
+        elif queue_mode:
+            # Exclude publish tool; keep enqueue_social_post
+            specs = [ts for ts in specs if ts.name != "publish_social_post"]
+        else:
+            # Draft mode: exclude both enqueue and publish
+            specs = [ts for ts in specs if ts.name not in (
+                "enqueue_social_post", "publish_social_post",
+            )]
+
         return [ts.to_openai_tool() for ts in specs]
         # Note: to_openai_tool() produces Anthropic-compatible format because
         # Anthropic also uses the "input_schema" key (same structure).
@@ -544,6 +661,12 @@ class LiveUpdateSocialAgent:
                     params["reason"] = "Content not suitable for social posting"
                 elif ts.name == "request_social_review":
                     params["reason"] = "LLM indicated review needed"
+                elif ts.name == "publish_social_post":
+                    params["draft_text"] = llm_response.strip()
+                elif ts.name == "find_existing_social_posts":
+                    params["draft_text"] = llm_response.strip()
+                elif ts.name == "get_social_run_status":
+                    pass  # no params needed
                 return ts.name, params
 
         return None, {}

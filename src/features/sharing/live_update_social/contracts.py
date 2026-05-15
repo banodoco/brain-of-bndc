@@ -79,6 +79,7 @@ class LiveUpdateHandoffPayload:
 
     # Sprint-1 guard: explicitly reject non-post actions before run creation.
     ALLOWED_ACTIONS: frozenset = field(default=frozenset({"post"}), init=False, repr=False)
+    ALLOWED_ACTIONS_PUBLISH: frozenset = frozenset({"post", "reply", "quote"})
     ALLOWED_STATUSES: frozenset = field(
         default=frozenset({"sent", "partial"}), init=False, repr=False
     )
@@ -86,3 +87,9 @@ class LiveUpdateHandoffPayload:
     def is_eligible(self) -> bool:
         """Return True when this payload should create a social review run."""
         return self.action in self.ALLOWED_ACTIONS and self.status in self.ALLOWED_STATUSES
+
+    @staticmethod
+    def is_eligible_for_publish_mode() -> bool:
+        """Return True when the runtime is in publish mode."""
+        import os
+        return os.getenv("LIVE_UPDATE_SOCIAL_MODE", "") == "publish"

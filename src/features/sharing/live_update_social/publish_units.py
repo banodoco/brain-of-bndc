@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 def reconstruct_publish_units(
     topic_summary_data: Dict[str, Any],
     source_metadata: Optional[Dict[str, Any]] = None,
+    mode: str = "draft",
 ) -> Dict[str, Any]:
     """Build a publish_units dict from topic summary JSON.
 
@@ -23,6 +24,13 @@ def reconstruct_publish_units(
         channel_id       — Discord channel ID
         mainMediaMessageId — optional, message with primary media
         subTopics        — list of sub-topic dicts
+
+    Args:
+        topic_summary_data: The topic summary JSON from the handoff.
+        source_metadata: Caller-supplied metadata snapshot.
+        mode: ``\"draft\"`` (queue mode) or ``\"publish\"``.
+            In publish mode with subTopics present, produces multi-unit
+            output with a root unit plus one unit per sub-topic.
 
     Returns a dict suitable for storing as publish_units JSONB::
 
@@ -54,7 +62,27 @@ def reconstruct_publish_units(
         if key in topic_summary_data and key not in unit:
             unit[key] = topic_summary_data[key]
 
+    units: List[Dict[str, Any]] = [unit]
+
+    # In publish mode with subTopics present, produce multi-unit output
+    # so the LLM can decide between a single post or a thread.
+    if mode == "publish":
+        sub_topics = topic_summary_data.get("subTopics", []) or []
+        if sub_topics:
+            for st in sub_topics:
+                if not isinstance(st, dict):
+                    continue
+                sub_unit: Dict[str, Any] = {
+                    "title": st.get("title", st.get("name", "")),
+                    "message_id": topic_summary_data.get("message_id"),
+                    "channel_id": topic_summary_data.get("channel_id"),
+                    "media_message_id": st.get("mediaMessageId"),
+                    "sub_topics": [],
+                    "_is_subtopic": True,
+                }
+                units.append(sub_unit)
+
     return {
-        "units": [unit],
+        "units": units,
         "source_metadata": source_metadata,
     }
