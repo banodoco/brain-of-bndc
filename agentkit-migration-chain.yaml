@@ -1,0 +1,47 @@
+base_branch: main
+merge_policy: review
+
+milestones:
+  - label: sprint-a-adminchat-migration
+    idea: .megaplan/briefs/agentkit-migration/sprint-a-adminchat-migration.md
+    branch: megaplan/agentkit-migration-adminchat
+    profile: all-claude
+    robustness: standard
+    vendor: claude
+    depth: medium
+    with_feedback: false
+    deepseek_provider: direct
+    notes: >
+      Migrate AdminChatAgent to agentkit.loop.run_step. Smallest blast-radius
+      migration in the workspace — in-memory state, single user at a time.
+      Requires agentkit v0.1.0. Shadow mode for 24h, then flag-flip, then
+      delete legacy loop. Do NOT migrate TopicEditor here.
+
+  - label: sprint-b-topiceditor-and-yaml
+    idea: .megaplan/briefs/agentkit-migration/sprint-b-topiceditor-and-yaml.md
+    branch: megaplan/agentkit-migration-topiceditor
+    profile: all-claude
+    robustness: standard
+    vendor: claude
+    depth: medium
+    with_feedback: false
+    deepseek_provider: direct
+    notes: >
+      Migrate TopicEditor to agentkit + rewire live-update-social-megaplan-chain.yaml
+      through Workflow.from_yaml(...). Requires agentkit v0.3.0 AND
+      sprint-a stable in prod for ≥7 days. 7-day replay parity ≥95% before
+      cutover. Megaplan's outer driver (auto.drive) is unchanged here.
+
+on_failure:
+  abort: stop_chain
+on_escalate:
+  abort: stop_chain
+
+driver:
+  stall_threshold: 5
+  max_iterations: 120
+  phase_timeout: 3600
+  status_timeout: 60
+  on_escalate: abort
+  robustness: standard
+  auto_approve: true
