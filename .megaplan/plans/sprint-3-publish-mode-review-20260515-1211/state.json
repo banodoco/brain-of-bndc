@@ -1,0 +1,60 @@
+{
+  "name": "sprint-3-publish-mode-review-20260515-1211",
+  "idea": "# Sprint 3: Publish Mode, Review Controls, Threads, and Richer Social Strategy\n\nProfile intent: `thoughtful//high @codex +feedback`.\n\nChain encoding note: this milestone should use first-class chain fields for `vendor: codex`, `depth: high`, `with_feedback: true`, and `deepseek_provider: direct`.\n\n## Source Plan\n\nUse `docs/agent-loop-standardisation-and-live-update-social-plan.md`, especially:\n\n- `Sprint 3: Publish Mode, Review Controls, Threads, and Richer Social Strategy`\n- `Thread Publishing Should Wait`\n- `Social Publishing Contract`\n- `Definition of Done`\n\n## Goal\n\nMove from queue-only safety to controlled publishing, then add richer social strategy once single-post media is reliable.\n\nOnly start this sprint after Sprint 2 has proven durable queued media attachment.\n\n## Required Scope\n\nImplement:\n\n- `publish_social_post`, gated by `LIVE_UPDATE_SOCIAL_MODE=publish`.\n- Human-review surface for `needs_review` and draft decisions.\n- Admin/status tools to inspect recent social runs and publication outcomes.\n- Failure classification:\n  - media resolution failed;\n  - provider rejected media;\n  - route missing;\n  - duplicate prevented;\n  - model skipped;\n  - human review required.\n- Social route/account validation before publish.\n- Safe retry behavior for failed social runs.\n- Thread draft decisions.\n- Immediate thread publishing by reply-chaining through `SocialPublishService`.\n- Quote/reply decisions for cases with an existing relevant social post.\n- `find_existing_social_posts`.\n- Content-level duplicate similarity checks.\n- A decision on whether queued threads need a native grouped/thread publication model.\n\n## Media Requirements\n\nImplement:\n\n- Confirm attached media appears on the provider result, not just in the queued request.\n- Record final media attachment outcome per publication.\n- Add explicit text-only fallback only when media was genuinely unavailable or intentionally skipped.\n- Support attaching media to the right post in a thread.\n- Ensure replies default to text-only only when that is the intended strategy, not because media was lost.\n- Add trace output showing which thread item owns which media refs.\n\n## Explicit Non-Goals\n\n- Do not add queued thread support unless the design is settled and safe.\n- Do not let quote/reply actions reattach duplicate media accidentally.\n- Do not use a separate Twitter/X transport outside `SocialPublishService`.\n\n## Acceptance Criteria\n\n- Publish mode can post a single live-update social post with media attached.\n- Operators can inspect exactly what was posted, which media attached, and why.\n- Failed media attachment is visible and does not silently degrade into an unexplained text-only post.\n- A multi-section live update can become either one post or a short thread.\n- Thread media associations are explicit and test-covered.\n- Quote/reply actions do not accidentally reattach duplicate media.",
+  "current_state": "initialized",
+  "iteration": 0,
+  "created_at": "2026-05-15T12:11:37Z",
+  "config": {
+    "project_dir": "/workspace/brain-of-bndc",
+    "auto_approve": true,
+    "robustness": "standard",
+    "mode": "code",
+    "strict_notes": false,
+    "agent": "",
+    "profile": "thoughtful",
+    "vendor": "codex",
+    "depth": "high",
+    "deepseek_provider": "direct",
+    "with_feedback": true,
+    "phase_model": [
+      "plan=codex:high",
+      "prep=hermes:deepseek:deepseek-v4-pro",
+      "critique=codex:low",
+      "revise=codex:high",
+      "gate=hermes:deepseek:deepseek-v4-pro",
+      "finalize=hermes:deepseek:deepseek-v4-pro",
+      "execute=hermes:deepseek:deepseek-v4-pro",
+      "loop_plan=codex:high",
+      "loop_execute=hermes:deepseek:deepseek-v4-pro",
+      "review=codex:low",
+      "tiebreaker_researcher=codex:high",
+      "tiebreaker_challenger=codex:high",
+      "feedback=claude:low"
+    ]
+  },
+  "sessions": {},
+  "plan_versions": [],
+  "history": [
+    {
+      "step": "init",
+      "timestamp": "2026-05-15T12:11:37Z",
+      "duration_ms": 0,
+      "cost_usd": 0.0,
+      "result": "success",
+      "environment": {
+        "claude": true,
+        "codex": true
+      }
+    }
+  ],
+  "meta": {
+    "significant_counts": [],
+    "weighted_scores": [],
+    "plan_deltas": [],
+    "recurring_critiques": [],
+    "total_cost_usd": 0.0,
+    "overrides": [],
+    "notes": []
+  },
+  "last_gate": {}
+}
