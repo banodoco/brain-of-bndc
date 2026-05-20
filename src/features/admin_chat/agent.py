@@ -499,6 +499,15 @@ class AdminChatAgent:
                 )
                 final_replies = []
 
+            if len(final_replies) > 1 and not any(
+                action.get("tool") not in ("reply", "end_turn") for action in actions
+            ):
+                logger.info(
+                    "[AdminChat] Collapsing %d pure-chat replies into one message",
+                    len(final_replies),
+                )
+                final_replies = ["\n\n".join(reply for reply in final_replies if reply)]
+
             # Return list of messages (or None if ended without reply)
             return final_replies if final_replies else None
             
