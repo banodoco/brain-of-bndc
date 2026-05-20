@@ -802,8 +802,8 @@ class TopicEditor:
             forced_close = False
             forced_close_reason: Optional[str] = None
             turn_count = 0
-            max_cost_usd = self._env_float("TOPIC_EDITOR_MAX_COST_USD", 5.0)
-            max_tokens = self._env_int("TOPIC_EDITOR_MAX_TOKENS", 500000)
+            max_cost_usd = self._env_float("TOPIC_EDITOR_MAX_COST_USD", 0.0)
+            max_tokens = self._env_int("TOPIC_EDITOR_MAX_TOKENS", 0)
             for turn_count in range(1, max_turns + 1):
                 logger.info(
                     "TopicEditor invoking LLM: run_id=%s turn=%s messages=%s",
@@ -833,9 +833,9 @@ class TopicEditor:
                     cumulative_cost_usd = round(cumulative_cost_usd + float(turn_cost), 6)
 
                 cap_reason = None
-                if has_cost_estimate and cumulative_cost_usd > max_cost_usd:
+                if max_cost_usd > 0 and has_cost_estimate and cumulative_cost_usd > max_cost_usd:
                     cap_reason = "cost_cap_exceeded"
-                elif cumulative_tokens > max_tokens:
+                elif max_tokens > 0 and cumulative_tokens > max_tokens:
                     cap_reason = "token_cap_exceeded"
                 if cap_reason:
                     # The response has already been paid for. If it contains the
