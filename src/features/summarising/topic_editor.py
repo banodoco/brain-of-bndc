@@ -5639,6 +5639,28 @@ def render_topic(topic: Dict[str, Any]) -> List[str]:
     return [_trim_discord_message("\n".join(lines))]
 
 
+def _normalize_bare_citation_markers(text: str, valid_indexes: Set[int]) -> str:
+    """Convert bare sentence-end citation digits into bracket markers."""
+    if not text or not valid_indexes:
+        return text
+
+    def replace(match: re.Match) -> str:
+        raw = match.group(1)
+        suffix = match.group(2) or ""
+        markers: List[int] = []
+        if len(raw) > 1 and all(ch != "0" and int(ch) in valid_indexes for ch in raw):
+            markers = [int(ch) for ch in raw]
+        else:
+            value = int(raw)
+            if value in valid_indexes:
+                markers = [value]
+        if not markers:
+            return match.group(0)
+        return " ".join(f"[{marker}]" for marker in markers) + suffix
+
+    return re.sub(r"(?<![\[\]\(\)\w.])(\d{1,2})([.,;:!?])?(?=\s|$)", replace, text)
+
+
 def render_topic_publish_units(
     topic: Dict[str, Any],
     source_metadata: Optional[Dict[str, Dict[str, Any]]] = None,
@@ -5720,6 +5742,13 @@ def render_topic_publish_units(
                     f"{channel_id}/{sid}"
                 )
             idx_to_sid[idx] = sid
+
+        if block_text:
+            block_text = _normalize_bare_citation_markers(block_text, set(idx_to_sid))
+            lines = [
+                block_text if ln == block.get("text", "").strip() else ln
+                for ln in lines
+            ]
 
         # Attempt inline [N] → [N](jump_url) substitution in block body.
         if block_text and idx_to_url:
