@@ -82,6 +82,45 @@ def test_health_check_alerts_when_latest_live_editor_run_failed():
     assert alerts == ["Latest topic-editor run failed: publish failed"]
 
 
+def test_health_check_does_not_alert_no_source_data_for_running_startup_run():
+    cog = make_health_cog(FakeSupabase({
+        "topic_editor_runs": [
+            {
+                "run_id": "run-1",
+                "status": "running",
+                "started_at": "2999-01-01T00:00:00+00:00",
+                "source_message_count": 0,
+                "failed_publish_count": 0,
+            }
+        ],
+        "topic_editor_drafts": [],
+        "topics": [],
+        "topic_transitions": [],
+    }))
+
+    alerts = cog._check_live_update_editor()
+
+    assert alerts == []
+
+
+def test_health_check_alerts_no_source_data_for_completed_run():
+    cog = make_health_cog(FakeSupabase({
+        "topic_editor_runs": [
+            {
+                "run_id": "run-1",
+                "status": "completed",
+                "started_at": "2999-01-01T00:00:00+00:00",
+                "source_message_count": 0,
+                "failed_publish_count": 0,
+            }
+        ],
+    }))
+
+    alerts = cog._check_live_update_editor()
+
+    assert alerts == ["Latest topic-editor run had no source data"]
+
+
 def test_health_check_alerts_when_topic_publication_partial():
     cog = make_health_cog(FakeSupabase({
         "topic_editor_runs": [
