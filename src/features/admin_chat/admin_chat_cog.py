@@ -25,6 +25,18 @@ _ADMIN_FALLBACK_REPLY_LINES = frozenset({
     "Sorry, something went wrong on my side. Try again in a moment.",
 })
 
+
+def _preview_text(content: str, limit: int) -> str:
+    text = " ".join(str(content or "").split())
+    if len(text) <= limit:
+        return text
+
+    clipped = text[:limit].rstrip()
+    if " " in clipped:
+        clipped = clipped.rsplit(" ", 1)[0].rstrip()
+    return f"{clipped}..."
+
+
 _CLASSIFIER_TOOL = {
     "name": "classify_payment_reply",
     "description": "Classify whether a recipient confirms seeing the test SOL payment.",
@@ -1320,7 +1332,7 @@ class AdminChatCog(commands.Cog):
                         channel_context["replied_to"] = {
                             "message_id": str(ref.id),
                             "author": ref.author.display_name,
-                            "content": (ref.content or '')[:500],
+                            "content": _preview_text(ref.content or '', 500),
                         }
                         channel_context["replied_to_anchor_note"] = "USER IS REPLYING TO THIS MESSAGE — treat it as the primary referent."
 
@@ -1332,7 +1344,7 @@ class AdminChatCog(commands.Cog):
                         content_preview = self._strip_fallback_reply_lines(msg.content or '')
                         if not content_preview:
                             continue
-                        recent.append(f"[{msg.id}] {msg.author.display_name}: {content_preview[:150]}")
+                        recent.append(f"[{msg.id}] {msg.author.display_name}: {_preview_text(content_preview, 150)}")
                     recent.reverse()
                     channel_context["recent_messages"] = recent
                 except Exception:
@@ -1355,7 +1367,7 @@ class AdminChatCog(commands.Cog):
                         channel_context["replied_to"] = {
                             "message_id": str(ref.id),
                             "author": ref.author.display_name,
-                            "content": (ref.content or '')[:500],
+                            "content": _preview_text(ref.content or '', 500),
                         }
                         channel_context["replied_to_anchor_note"] = "USER IS REPLYING TO THIS MESSAGE — treat it as the primary referent."
 
@@ -1367,7 +1379,7 @@ class AdminChatCog(commands.Cog):
                         content_preview = self._strip_fallback_reply_lines(msg.content or '')
                         if not content_preview:
                             continue
-                        recent.append(f"[{msg.id}] {msg.author.display_name}: {content_preview[:150]}")
+                        recent.append(f"[{msg.id}] {msg.author.display_name}: {_preview_text(content_preview, 150)}")
                     recent.reverse()
                     channel_context["recent_messages"] = recent
                 except Exception:

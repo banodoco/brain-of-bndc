@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
 from src.common.base_bot import _claim_startup_notification, _current_commit_sha
-from src.features.admin_chat.admin_chat_cog import AdminChatCog
+from src.features.admin_chat.admin_chat_cog import AdminChatCog, _preview_text
 
 
 def test_strip_fallback_reply_lines_keeps_real_answer():
@@ -15,6 +15,17 @@ def test_strip_fallback_reply_lines_keeps_real_answer():
         "You restarted me twice in four minutes.",
         "Pom. You're back. Looks stable now.",
     ])
+
+
+def test_preview_text_does_not_cut_mid_word():
+    preview = _preview_text(
+        "Plus you've been restarting me, debugging the multi-message bug, and poking at me in DMs for an hour and a half.",
+        76,
+    )
+
+    assert preview.endswith("...")
+    assert "pokin..." not in preview
+    assert preview.endswith("and...")
 
 
 def test_current_commit_sha_prefers_available_env(monkeypatch):
