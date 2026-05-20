@@ -1280,6 +1280,48 @@ class TestRenderTopicPublishUnits:
         # At least one substitution succeeded → no Sources: footer
         assert "Sources:" not in content
 
+    def test_bare_sentence_end_citation_numbers_are_bracketed_and_linked(self):
+        topic = self._topic_with_blocks([
+            {
+                "type": "intro",
+                "text": (
+                    "Quoted dialogue can hallucinate subtitles at the bottom of the frame 1. "
+                    "He has hit it personally and suspects it may extend to LTX generally 23."
+                ),
+                "source_message_ids": ["111", "222", "333"],
+            }
+        ])
+        source_metadata = {
+            "111": self._source_meta("111"),
+            "222": self._source_meta("222"),
+            "333": self._source_meta("333"),
+        }
+
+        units = render_topic_publish_units(topic, source_metadata=source_metadata)
+        content = units[0]["content"]
+
+        assert "frame [1](https://discord.com/channels/123/456/111)." in content
+        assert "generally [2](https://discord.com/channels/123/456/222) [3](https://discord.com/channels/123/456/333)." in content
+        assert "frame 1." not in content
+        assert "generally 23." not in content
+        assert "Sources:" not in content
+
+    def test_bare_citation_normalizer_does_not_touch_model_versions_or_mid_sentence_numbers(self):
+        topic = self._topic_with_blocks([
+            {
+                "type": "intro",
+                "text": "LTX2.3 still supports 12 frame tests, but this claim uses source 1.",
+                "source_message_ids": ["111"],
+            }
+        ])
+        source_metadata = {"111": self._source_meta("111")}
+
+        units = render_topic_publish_units(topic, source_metadata=source_metadata)
+        content = units[0]["content"]
+
+        assert "LTX2.3 still supports 12 frame tests" in content
+        assert "source [1](https://discord.com/channels/123/456/111)." in content
+
 
 class TestResolveMediaUrlFromMetadata:
     """Tests for _resolve_media_url_from_metadata."""
