@@ -1320,6 +1320,96 @@ class StorageHandler:
             'reason': observation.get('reason'),
         }))
 
+    @staticmethod
+    def _topic_editor_draft_payload(draft: Dict[str, Any], environment: str, *, partial: bool = False) -> Dict[str, Any]:
+        allowed = {
+            'draft_id',
+            'run_id',
+            'topic_id',
+            'guild_id',
+            'status',
+            'draft_json',
+            'validation_result',
+            'preview_units',
+            'publish_result',
+            'publish_diagnostics',
+            'revision_number',
+            'revision_hash',
+            'revision_attempts',
+            'latest_valid_preview_hash',
+            'submitted_at',
+        }
+        payload = {
+            key: draft.get(key)
+            for key in allowed
+            if key in draft
+        }
+        if not partial:
+            payload.setdefault('draft_id', draft.get('draft_id'))
+            payload.setdefault('guild_id', draft.get('guild_id'))
+            payload.setdefault('status', draft.get('status') or 'drafting')
+            payload.setdefault('revision_number', draft.get('revision_number') or 1)
+            payload.setdefault('revision_attempts', draft.get('revision_attempts') or 0)
+        payload['environment'] = environment
+        payload['updated_at'] = datetime.utcnow().isoformat()
+        return payload
+
+    async def create_topic_editor_draft(self, draft: Dict[str, Any], environment: str = 'prod') -> Optional[Dict[str, Any]]:
+        payload = self._topic_editor_draft_payload(draft, environment)
+        return await self._insert_live_row('topic_editor_drafts', payload)
+
+    async def update_topic_editor_draft(
+        self,
+        draft_id: str,
+        updates: Dict[str, Any],
+        environment: str = 'prod',
+    ) -> Optional[Dict[str, Any]]:
+        if not self.supabase_client:
+            logger.error("Supabase client not initialized")
+            return None
+        payload = self._topic_editor_draft_payload(updates or {}, environment, partial=True)
+        if not payload:
+            return None
+        try:
+            result = await asyncio.to_thread(
+                self.supabase_client.table('topic_editor_drafts').update(payload).eq('draft_id', draft_id).execute
+            )
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error(f"Error updating topic_editor_drafts.draft_id={draft_id}: {e}", exc_info=True)
+            return None
+
+    async def get_recent_topic_editor_drafts(
+        self,
+        guild_id: Optional[int] = None,
+        environment: str = 'prod',
+        limit: int = 20,
+        status: Optional[str] = None,
+        run_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        if not self.supabase_client:
+            return []
+        try:
+            safe_limit = max(1, min(int(limit or 20), 100))
+            query = (
+                self.supabase_client.table('topic_editor_drafts')
+                .select('*')
+                .eq('environment', environment)
+                .order('updated_at', desc=True)
+                .limit(safe_limit)
+            )
+            if guild_id is not None:
+                query = query.eq('guild_id', guild_id)
+            if status:
+                query = query.eq('status', status)
+            if run_id:
+                query = query.eq('run_id', run_id)
+            result = await asyncio.to_thread(query.execute)
+            return result.data or []
+        except Exception as e:
+            logger.error(f"Error fetching topic_editor_drafts: {e}", exc_info=True)
+            return []
+
     async def get_topic_editor_checkpoint(self, checkpoint_key: str, environment: str = 'prod') -> Optional[Dict[str, Any]]:
         if not self.supabase_client:
             return None
@@ -1448,6 +1538,52 @@ class StorageHandler:
             return messages
         except Exception as e:
             logger.error(f"Error fetching archived messages after checkpoint: {e}", exc_info=True)
+            return []
+
+    async def get_archived_messages_for_window(
+        self,
+        guild_id: Optional[int],
+        start: str,
+        end: str,
+        limit: int = 1000,
+        channel_ids: Optional[List[int]] = None,
+        exclude_author_ids: Optional[List[int]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Fetch persisted archived messages within inclusive created_at bounds."""
+        if not self.supabase_client:
+            logger.error("Supabase client not initialized")
+            return []
+        try:
+            safe_limit = max(1, min(int(limit or 1000), 5000))
+            query = (
+                self.supabase_client.table('discord_messages')
+                .select('*')
+                .eq('is_deleted', False)
+                .gte('created_at', start)
+                .lte('created_at', end)
+                .order('created_at')
+                .order('message_id')
+                .limit(safe_limit)
+            )
+            if guild_id is not None:
+                query = query.eq('guild_id', guild_id)
+            if channel_ids:
+                query = query.in_('channel_id', channel_ids)
+            if exclude_author_ids:
+                cleaned_exclusions = [int(author_id) for author_id in exclude_author_ids if author_id is not None]
+                if cleaned_exclusions:
+                    query = query.not_.in_('author_id', cleaned_exclusions)
+            result = await asyncio.to_thread(query.execute)
+            messages = result.data or []
+            if messages:
+                messages = await self._attach_channel_context_and_filter_nsfw(messages)
+            author_ids = sorted({msg.get('author_id') for msg in messages if msg.get('author_id') is not None})
+            author_snapshots = await self.get_author_context_snapshots(author_ids, guild_id=guild_id)
+            for msg in messages:
+                msg['author_context_snapshot'] = author_snapshots.get(msg.get('author_id'), {})
+            return messages
+        except Exception as e:
+            logger.error(f"Error fetching archived messages for window: {e}", exc_info=True)
             return []
 
     async def get_latest_archived_message_checkpoint(self, guild_id: Optional[int] = None) -> Optional[Dict[str, Any]]:

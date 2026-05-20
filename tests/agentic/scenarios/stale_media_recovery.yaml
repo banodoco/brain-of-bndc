@@ -1,0 +1,15 @@
+name: stale_media_recovery
+tier: core
+description: Tests whether the editor can keep text coherent when media needs fallback handling.
+brief: briefs/stale_media_recovery.md
+target_orchestrator: topic_editor_replay
+priming:
+  window:
+    guild_id: 1076117621407223829
+    start: "2026-05-19T17:00:00Z"
+    end: "2026-05-19T18:10:00Z"
+  fixtures:
+    window: stale_media_recovery
+assessment:
+  universal_checks: true
+  expected_final_action: submit_or_watch_with_media_reason

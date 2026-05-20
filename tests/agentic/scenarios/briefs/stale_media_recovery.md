@@ -1,0 +1,1 @@
+You are reviewing a window where media may be stale or difficult to fetch. Ground the text in available source messages, attach media only when it resolves to the evidence shelf, and prefer watching over publishing if the media is essential but unresolved.

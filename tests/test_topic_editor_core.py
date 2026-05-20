@@ -3,6 +3,11 @@ from datetime import date
 import pytest
 
 from src.features.summarising.topic_editor import (
+    TopicEditorDraft,
+    TopicEditorDraftCard,
+    TopicEditorDraftLimits,
+    TopicEditorEvidenceItem,
+    TopicEditorEvidenceMedia,
     TopicIdentity,
     _build_send_units,
     _resolve_media_url_from_metadata,
@@ -10,20 +15,401 @@ from src.features.summarising.topic_editor import (
     block_source_ids,
     build_override_transitions,
     build_rejected_transition,
+    canonical_topic_editor_draft_json,
     canonicalize_proposed_key,
     canonicalize_topic_key,
     chunk_text_for_discord,
     collect_document_source_ids,
     detect_topic_collisions,
+    media_id_to_media_ref,
+    media_ref_to_media_id,
     normalize_document_blocks,
     normalize_media_ref,
     normalize_topic_document,
+    preview_topic_editor_draft,
+    render_draft_publish_units,
     render_topic_publish_units,
+    resolve_topic_editor_evidence_shelf,
+    revision_hash_for_topic_editor_draft,
     resolve_topic_alias,
+    serialize_topic_editor_draft,
     shape_transition_payload,
+    topic_editor_draft_limits_from_config,
+    topic_editor_draft_to_structured_topic,
     trigram_similarity,
     unresolved_collisions,
+    validate_topic_editor_draft,
 )
+
+
+# ------------------------------------------------------------------
+# Draft primitive tests
+# ------------------------------------------------------------------
+
+
+class TestTopicEditorDraftPrimitives:
+    def _draft(self):
+        return TopicEditorDraft(
+            draft_id="draft-123",
+            topic_key="t2-relight-lora-shader-ball-matcap-may19",
+            template="technical_finding",
+            headline="T2 Trains Relight LoRA That Follows Shader-Ball References",
+            dek="A new test shows the relight LoRA responding to reference-ball lighting.",
+            cards=(
+                TopicEditorDraftCard(
+                    angle="What changed",
+                    body="T2 posted a new relight LoRA version that follows shader-ball references [1].",
+                    source_message_ids=("1506344740558475356",),
+                    media_ids=("1506344740558475356:attachment:0",),
+                ),
+                TopicEditorDraftCard(
+                    angle="Why it matters",
+                    body="The comparison gives the community a clearer test target for controllable relighting [1].",
+                    source_message_ids=("1506344740558475357",),
+                    media_ids=(),
+                ),
+            ),
+            editor_note="Concrete model progress with visual evidence.",
+        )
+
+    def test_limits_have_recommended_defaults_and_config_overrides(self):
+        assert TopicEditorDraftLimits().card_body_max_chars == 650
+        limits = topic_editor_draft_limits_from_config({
+            "card_body_max_chars": "700",
+            "max_cards": "3",
+            "max_revision_attempts": "2",
+        })
+        assert limits.card_body_max_chars == 700
+        assert limits.max_cards == 3
+        assert limits.max_revision_attempts == 2
+        assert limits.headline_target_chars == 110
+
+    def test_canonical_serialization_excludes_runtime_fields(self):
+        payload = canonical_topic_editor_draft_json({
+            **canonical_topic_editor_draft_json(self._draft()),
+            "status": "valid",
+            "validation_result": {"status": "valid"},
+            "preview_units": [{"type": "text", "content": "runtime"}],
+            "updated_at": "2026-05-19T12:00:00Z",
+            "publish_diagnostics": {"renderer_safety_chunking_used": True},
+        })
+
+        assert "validation_result" not in payload
+        assert "preview_units" not in payload
+        assert "updated_at" not in payload
+        assert "publish_diagnostics" not in payload
+        assert payload["cards"][0]["body"].endswith("[1].")
+        assert serialize_topic_editor_draft(payload) == serialize_topic_editor_draft(self._draft())
+
+    def test_revision_hash_ignores_runtime_fields_but_tracks_content(self):
+        base = canonical_topic_editor_draft_json(self._draft())
+        with_runtime = {
+            **base,
+            "status": "needs_revision",
+            "revision_number": 3,
+            "validation_result": {"errors": [{"path": "cards[0].body"}]},
+            "preview_units": [{"type": "text", "content": "not part of hash"}],
+            "submitted_at": "2026-05-19T12:00:00Z",
+        }
+        changed_content = {
+            **base,
+            "cards": [{**base["cards"][0], "body": "Changed body [1]."}] + base["cards"][1:],
+        }
+
+        assert revision_hash_for_topic_editor_draft(base) == revision_hash_for_topic_editor_draft(with_runtime)
+        assert revision_hash_for_topic_editor_draft(base) != revision_hash_for_topic_editor_draft(changed_content)
+
+    def test_draft_to_structured_topic_preserves_order_sources_media_and_citations(self):
+        evidence = [
+            TopicEditorEvidenceItem(
+                message_id="1506344740558475356",
+                media=(
+                    TopicEditorEvidenceMedia(
+                        media_id="1506344740558475356:attachment:0",
+                        kind="video",
+                        description="Side-by-side relighting comparison.",
+                        media_ref={"message_id": "1506344740558475356", "kind": "attachment", "index": 0},
+                    ),
+                ),
+            ),
+        ]
+
+        topic = topic_editor_draft_to_structured_topic(self._draft(), evidence_shelf=evidence, guild_id=123)
+
+        assert topic["proposed_key"] == "t2-relight-lora-shader-ball-matcap-may19"
+        assert topic["guild_id"] == 123
+        assert topic["source_message_ids"] == ["1506344740558475356", "1506344740558475357"]
+        blocks = topic["summary"]["blocks"]
+        assert [block["type"] for block in blocks] == ["intro", "section"]
+        assert blocks[0]["text"].endswith("[1].")
+        assert blocks[0]["source_message_ids"] == ["1506344740558475356"]
+        assert blocks[0]["media_refs"] == [
+            {"message_id": "1506344740558475356", "kind": "attachment", "index": 0}
+        ]
+        assert blocks[0]["draft_media_ids"] == ["1506344740558475356:attachment:0"]
+        assert blocks[1]["title"] == "Why it matters"
+
+    def test_render_draft_publish_units_uses_structured_topic_renderer(self):
+        source_metadata = {
+            "1506344740558475356": {
+                "guild_id": 123,
+                "channel_id": 456,
+                "attachments": [{"url": "https://cdn.discordapp.com/demo.mp4"}],
+                "embeds": [],
+            },
+            "1506344740558475357": {
+                "guild_id": 123,
+                "channel_id": 456,
+                "attachments": [],
+                "embeds": [],
+            },
+        }
+
+        units = render_draft_publish_units(self._draft(), source_metadata)
+
+        assert [unit["kind"] for unit in units] == ["text", "text", "media", "text"]
+        assert units[0]["content"].startswith("## T2 Trains Relight LoRA")
+        assert "A new test shows" in units[0]["content"]
+        assert units[1]["content"].startswith("T2 posted")
+        assert "[1](https://discord.com/channels/123/456/1506344740558475356)" in units[1]["content"]
+        assert units[2]["ref"] == {
+            "message_id": "1506344740558475356",
+            "kind": "attachment",
+            "index": 0,
+        }
+        assert units[2]["url"] == "https://cdn.discordapp.com/demo.mp4"
+
+    def test_preview_topic_editor_draft_exposes_ordered_units_with_media_descriptions_and_hash(self):
+        evidence = [
+            TopicEditorEvidenceItem(
+                message_id="1506344740558475356",
+                media=(
+                    TopicEditorEvidenceMedia(
+                        media_id="1506344740558475356:attachment:0",
+                        kind="attachment",
+                        source_url="https://cdn.discordapp.com/demo.mp4",
+                        description="Side-by-side relighting comparison.",
+                        media_ref={"message_id": "1506344740558475356", "kind": "attachment", "index": 0},
+                    ),
+                ),
+            ),
+        ]
+        source_metadata = {
+            "1506344740558475356": {
+                "guild_id": 123,
+                "channel_id": 456,
+                "attachments": [{"url": "https://cdn.discordapp.com/demo.mp4"}],
+                "embeds": [],
+            },
+            "1506344740558475357": {
+                "guild_id": 123,
+                "channel_id": 456,
+                "attachments": [],
+                "embeds": [],
+            },
+        }
+
+        preview = preview_topic_editor_draft(
+            self._draft(),
+            source_metadata,
+            evidence_shelf=evidence,
+            limits=TopicEditorDraftLimits(discord_content_limit=2000),
+        )
+
+        assert [unit["type"] for unit in preview] == ["text", "text", "media", "text"]
+        assert preview[0]["revision_hash"] == revision_hash_for_topic_editor_draft(self._draft())
+        assert preview[0]["safety_chunking_would_be_needed"] is False
+        assert preview[2]["media_id"] == "1506344740558475356:attachment:0"
+        assert preview[2]["description"] == "Side-by-side relighting comparison."
+        assert preview[2]["source_message_id"] == "1506344740558475356"
+        assert preview[2]["source_url"] == "https://cdn.discordapp.com/demo.mp4"
+
+    def test_preview_flags_unchunked_renderer_units_that_exceed_discord_limit(self):
+        long_draft = TopicEditorDraft(
+            draft_id="draft-long",
+            topic_key="long-topic",
+            template="technical_finding",
+            headline="Long Topic",
+            dek="Short dek.",
+            cards=(
+                TopicEditorDraftCard(
+                    angle="What changed",
+                    body="x" * 80 + " [1].",
+                    source_message_ids=("111",),
+                    media_ids=(),
+                ),
+            ),
+            editor_note="Long card body for validation signal.",
+        )
+        source_metadata = {"111": {"guild_id": 123, "channel_id": 456, "attachments": [], "embeds": []}}
+
+        preview = preview_topic_editor_draft(
+            long_draft,
+            source_metadata,
+            limits=TopicEditorDraftLimits(discord_content_limit=50),
+        )
+
+        assert preview[0]["safety_chunking_would_be_needed"] is True
+        assert preview[1]["safety_chunking_would_be_needed"] is True
+
+    def test_validate_draft_mode_does_not_require_prior_preview(self):
+        source_metadata = {
+            "1506344740558475356": {
+                "guild_id": 123,
+                "channel_id": 456,
+                "attachments": [{"url": "https://cdn.discordapp.com/demo.mp4"}],
+                "embeds": [],
+            },
+            "1506344740558475357": {
+                "guild_id": 123,
+                "channel_id": 456,
+                "attachments": [],
+                "embeds": [],
+            },
+        }
+        evidence = [
+            TopicEditorEvidenceItem(message_id="1506344740558475356"),
+            TopicEditorEvidenceItem(message_id="1506344740558475357"),
+        ]
+
+        result = validate_topic_editor_draft(
+            self._draft(),
+            evidence,
+            source_metadata,
+            TopicEditorDraftLimits(),
+            mode="draft",
+        )
+
+        assert result.status == "valid"
+        assert result.errors == ()
+
+    def test_validate_submit_requires_current_preview_hash(self):
+        source_metadata = {
+            "1506344740558475356": {
+                "guild_id": 123,
+                "channel_id": 456,
+                "attachments": [{"url": "https://cdn.discordapp.com/demo.mp4"}],
+                "embeds": [],
+            },
+            "1506344740558475357": {
+                "guild_id": 123,
+                "channel_id": 456,
+                "attachments": [],
+                "embeds": [],
+            },
+        }
+        evidence = [
+            TopicEditorEvidenceItem(message_id="1506344740558475356"),
+            TopicEditorEvidenceItem(message_id="1506344740558475357"),
+        ]
+
+        result = validate_topic_editor_draft(
+            self._draft(),
+            evidence,
+            source_metadata,
+            TopicEditorDraftLimits(),
+            mode="submit",
+            latest_valid_preview_hash="stale",
+        )
+
+        assert result.status == "blocked_for_submit"
+        assert any(issue.path == "latest_valid_preview_hash" for issue in result.errors)
+
+    def test_validate_submit_blocks_missing_inline_citations_by_default(self):
+        draft = TopicEditorDraft(
+            draft_id="draft-no-cites",
+            topic_key="no-cites",
+            template="technical_finding",
+            headline="No Cites",
+            dek="A concrete finding needs inline citations.",
+            cards=(
+                TopicEditorDraftCard(
+                    angle="What changed",
+                    body="This card has a source but no inline marker.",
+                    source_message_ids=("111",),
+                    media_ids=(),
+                ),
+            ),
+            editor_note="Needs inline citation.",
+        )
+        source_metadata = {"111": {"guild_id": 123, "channel_id": 456, "attachments": [], "embeds": []}}
+
+        result = validate_topic_editor_draft(
+            draft,
+            [TopicEditorEvidenceItem(message_id="111")],
+            source_metadata,
+            TopicEditorDraftLimits(),
+            mode="submit",
+            latest_valid_preview_hash=revision_hash_for_topic_editor_draft(draft),
+        )
+
+        assert result.status == "blocked_for_submit"
+        assert any("no inline citation marker" in issue.message for issue in result.errors)
+
+    def test_validate_draft_warns_missing_inline_citations_without_blocking(self):
+        draft = TopicEditorDraft(
+            draft_id="draft-no-cites",
+            topic_key="no-cites",
+            template="technical_finding",
+            headline="No Cites",
+            dek="A concrete finding needs inline citations.",
+            cards=(
+                TopicEditorDraftCard(
+                    angle="What changed",
+                    body="This card has a source but no inline marker.",
+                    source_message_ids=("111",),
+                    media_ids=(),
+                ),
+            ),
+            editor_note="Needs inline citation.",
+        )
+        source_metadata = {"111": {"guild_id": 123, "channel_id": 456, "attachments": [], "embeds": []}}
+
+        result = validate_topic_editor_draft(
+            draft,
+            [TopicEditorEvidenceItem(message_id="111")],
+            source_metadata,
+            TopicEditorDraftLimits(),
+            mode="draft",
+        )
+
+        assert result.status == "valid"
+        assert any("no inline citation marker" in issue.message for issue in result.warnings)
+
+    def test_validate_blocks_bad_citation_media_and_render_lengths(self):
+        draft = TopicEditorDraft(
+            draft_id="draft-bad",
+            topic_key="bad",
+            template="technical_finding",
+            headline="Bad",
+            dek="A concrete finding needs inline citations.",
+            cards=(
+                TopicEditorDraftCard(
+                    angle="What changed",
+                    body="x" * 80 + " [2].",
+                    source_message_ids=("111",),
+                    media_ids=("111:attachment:3", "111:attachment:3"),
+                ),
+            ),
+            editor_note="Bad draft.",
+        )
+        source_metadata = {"111": {"guild_id": 123, "channel_id": 456, "attachments": [], "embeds": []}}
+
+        result = validate_topic_editor_draft(
+            draft,
+            [TopicEditorEvidenceItem(message_id="111")],
+            source_metadata,
+            TopicEditorDraftLimits(card_body_max_chars=40, discord_content_limit=50),
+            mode="preview",
+        )
+
+        assert result.status == "needs_revision"
+        messages = [issue.message for issue in result.errors]
+        assert any("max is 40" in message for message in messages)
+        assert any("does not map to a card source" in message for message in messages)
+        assert any("Same media repeats" in message for message in messages)
+        assert any("Media id cannot be resolved" in message for message in messages)
+        assert any("Rendered text unit" in message for message in messages)
 
 
 # ------------------------------------------------------------------
@@ -90,6 +476,115 @@ class TestNormalizeMediaRef:
             normalize_media_ref({"message_id": "123", "kind": "video", "index": 0})
         with pytest.raises(ValueError, match="kind must be 'attachment', 'embed', or 'external'"):
             normalize_media_ref({"message_id": "456", "kind": "link", "index": 1})
+
+
+class TestMediaIdHelpers:
+    def test_media_id_derived_from_normalized_ref(self):
+        assert media_ref_to_media_id({"message_id": "123", "attachment_index": "2"}) == "123:attachment:2"
+
+    def test_media_id_round_trip_preserves_canonical_ref(self):
+        ref = {"message_id": "123:456", "kind": "external", "index": 1}
+        media_id = media_ref_to_media_id(ref)
+        assert media_id == "123:456:external:1"
+        assert media_id_to_media_ref(media_id) == {
+            "message_id": "123:456",
+            "kind": "external",
+            "index": 1,
+        }
+
+    def test_invalid_media_id_rejected(self):
+        with pytest.raises(ValueError, match="media_id must have shape"):
+            media_id_to_media_ref("not-enough-parts")
+
+
+class TestResolveTopicEditorEvidenceShelf:
+    def test_shelf_media_ids_use_canonical_media_ref_path(self):
+        shelf = resolve_topic_editor_evidence_shelf([
+            {
+                "message_id": "111",
+                "guild_id": 123,
+                "channel_id": 456,
+                "author_name": "T2",
+                "content": "almost have this working https://x.com/user/status/1",
+                "reaction_count": 7,
+                "attachments": [{"url": "https://cdn.discordapp.com/a.mp4", "content_type": "video/mp4", "filename": "demo.mp4"}],
+                "embeds": [{"url": "https://example.com/embed"}],
+                "media_understandings": [
+                    {
+                        "attachment_index": 0,
+                        "summary": "Side-by-side relighting comparison.",
+                        "aesthetic_quality": 8,
+                        "technical_signal": "Best proof for the relight claim.",
+                    }
+                ],
+            }
+        ])
+
+        assert len(shelf) == 1
+        item = shelf[0]
+        assert item.message_id == "111"
+        assert item.jump_url == "https://discord.com/channels/123/456/111"
+        assert [media.media_id for media in item.media] == [
+            "111:attachment:0",
+            "111:embed:0",
+            "111:external:0",
+        ]
+        assert item.media[0].description == "Side-by-side relighting comparison."
+        assert item.media[0].aesthetic_quality == 8
+        assert item.media[0].strong_media is True
+        assert item.media[0].media_ref == {"message_id": "111", "kind": "attachment", "index": 0}
+
+    def test_compact_context_rows_rehydrate_before_shelf_construction(self):
+        class FakeDb:
+            def __init__(self):
+                self.calls = []
+
+            def get_topic_editor_source_messages(self, message_ids, guild_id=None, environment="prod", limit=50):
+                self.calls.append({
+                    "message_ids": list(message_ids),
+                    "guild_id": guild_id,
+                    "environment": environment,
+                    "limit": limit,
+                })
+                return [
+                    {
+                        "message_id": "222",
+                        "guild_id": 123,
+                        "channel_id": 789,
+                        "author_name": "Archive Author",
+                        "content": "Full archived content",
+                        "reaction_count": 2,
+                        "attachments": [{"url": "https://cdn.discordapp.com/full.png", "filename": "full.png"}],
+                        "embeds": [],
+                    }
+                ]
+
+        db = FakeDb()
+        shelf = resolve_topic_editor_evidence_shelf(
+            [
+                {
+                    "message_id": "222",
+                    "author_name": "Compact Author",
+                    "content": "Full arch",
+                    "media_refs_available": [{"kind": "attachment", "index": 0}],
+                }
+            ],
+            db=db,
+            guild_id=123,
+            environment="dev",
+        )
+
+        assert db.calls == [{
+            "message_ids": ["222"],
+            "guild_id": 123,
+            "environment": "dev",
+            "limit": 1,
+        }]
+        assert len(shelf) == 1
+        assert shelf[0].content == "Full archived content"
+        assert shelf[0].author == "Archive Author"
+        assert shelf[0].media[0].media_id == "222:attachment:0"
+        assert shelf[0].media[0].source_url == "https://cdn.discordapp.com/full.png"
 
 
 class TestNormalizeDocumentBlocks:
@@ -675,6 +1170,115 @@ class TestRenderTopicPublishUnits:
         assert "<https://discord.com/channels/123/456/111>" in content
         # Ensure the non-wrapped variant is not present
         assert "Sources: [1] https://discord.com/channels/123/456/111" not in content
+
+    # ── T-new-1: inline markers rendered as masked links, no Sources footer ──
+    def test_inline_markers_rendered_as_masked_links_no_sources_footer(self):
+        """Block body with [1] and [2] markers → masked links, no trailing Sources: line."""
+        topic = self._topic_with_blocks([
+            {
+                "type": "intro",
+                "text": "Claim about pandas [1], and another about bears [2].",
+                "source_message_ids": ["111", "222"],
+            }
+        ])
+        source_metadata = {
+            "111": self._source_meta("111"),
+            "222": self._source_meta("222"),
+        }
+        units = render_topic_publish_units(topic, source_metadata=source_metadata)
+        content = units[0]["content"]
+        assert "[1](https://discord.com/channels/123/456/111)" in content
+        assert "[2](https://discord.com/channels/123/456/222)" in content
+        assert "Sources:" not in content
+
+    # ── T-new-2: out-of-range marker left literal, Sources fallback fires ──
+    def test_out_of_range_marker_left_literal_with_sources_fallback(self):
+        """[3] with only 2 sources → literal [3], no link, Sources: fallback."""
+        topic = self._topic_with_blocks([
+            {
+                "type": "intro",
+                "text": "Only source [3] is out of range.",
+                "source_message_ids": ["111", "222"],
+            }
+        ])
+        source_metadata = {
+            "111": self._source_meta("111"),
+            "222": self._source_meta("222"),
+        }
+        units = render_topic_publish_units(topic, source_metadata=source_metadata)
+        content = units[0]["content"]
+        # [3] stays literal — no substitution into a masked link
+        assert "[3]" in content
+        assert "[3](" not in content
+        # Zero substitutions → Sources: fallback fires
+        assert "Sources:" in content
+        assert "[1] <https://discord.com/channels/123/456/111>" in content
+        assert "[2] <https://discord.com/channels/123/456/222>" in content
+
+    # ── T-new-3: no markers → Sources: fallback ──
+    def test_no_markers_falls_back_to_sources_line(self):
+        """Body with zero [N] markers → trailing Sources: line unchanged."""
+        topic = self._topic_with_blocks([
+            {
+                "type": "intro",
+                "text": "Plain text with no markers.",
+                "source_message_ids": ["111"],
+            }
+        ])
+        source_metadata = {"111": self._source_meta("111")}
+        units = render_topic_publish_units(topic, source_metadata=source_metadata)
+        content = units[0]["content"]
+        assert "Sources: [1] <https://discord.com/channels/123/456/111>" in content
+        # No masked-link [1]( should appear
+        assert "[1](" not in content
+
+    # ── T-new-4: mixed valid and invalid markers ──
+    def test_mixed_valid_and_invalid_markers(self):
+        """Valid [1],[2] become links; [3] (out of range) stays literal; no Sources: line."""
+        topic = self._topic_with_blocks([
+            {
+                "type": "intro",
+                "text": "Valid [1] and [2], but [3] is out of range.",
+                "source_message_ids": ["111", "222"],
+            }
+        ])
+        source_metadata = {
+            "111": self._source_meta("111"),
+            "222": self._source_meta("222"),
+        }
+        units = render_topic_publish_units(topic, source_metadata=source_metadata)
+        content = units[0]["content"]
+        # [1] and [2] become masked links
+        assert "[1](https://discord.com/channels/123/456/111)" in content
+        assert "[2](https://discord.com/channels/123/456/222)" in content
+        # [3] stays literal (out of range, no link)
+        assert "[3]" in content
+        assert "[3](" not in content
+        # At least one substitution succeeded → no Sources: footer
+        assert "Sources:" not in content
+
+    # ── T-new-5: pre-existing markdown links NOT corrupted ──
+    def test_existing_markdown_links_not_corrupted(self):
+        """Pre-existing [1](url) left untouched; [2] becomes masked link; no Sources: line."""
+        topic = self._topic_with_blocks([
+            {
+                "type": "intro",
+                "text": "Pre-existing [1](https://example.com) link and [2] citation.",
+                "source_message_ids": ["111", "222"],
+            }
+        ])
+        source_metadata = {
+            "111": self._source_meta("111"),
+            "222": self._source_meta("222"),
+        }
+        units = render_topic_publish_units(topic, source_metadata=source_metadata)
+        content = units[0]["content"]
+        # Pre-existing markdown link untouched
+        assert "[1](https://example.com)" in content
+        # [2] gets substituted into a masked link
+        assert "[2](https://discord.com/channels/123/456/222)" in content
+        # At least one substitution succeeded → no Sources: footer
+        assert "Sources:" not in content
 
 
 class TestResolveMediaUrlFromMetadata:

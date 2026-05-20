@@ -1,0 +1,32 @@
+[
+  {
+    "message_id": 200,
+    "guild_id": 1076117621407223829,
+    "channel_id": 777,
+    "channel_name": "model_chatter",
+    "author_id": 45,
+    "content": "Gemini omni thread is moving fast, but most of it is speculation and repeated links.",
+    "created_at": "2026-05-19T17:05:00Z",
+    "attachments": [],
+    "embeds": [],
+    "reaction_count": 3,
+    "reference_id": null,
+    "thread_id": null,
+    "author_context_snapshot": {"username": "casey", "server_nick": "Casey"}
+  },
+  {
+    "message_id": 201,
+    "guild_id": 1076117621407223829,
+    "channel_id": 777,
+    "channel_name": "model_chatter",
+    "author_id": 46,
+    "content": "One concrete bit: the voice demo seems real, but nobody has a reproducible workflow yet.",
+    "created_at": "2026-05-19T17:32:00Z",
+    "attachments": [],
+    "embeds": [],
+    "reaction_count": 5,
+    "reference_id": "200",
+    "thread_id": null,
+    "author_context_snapshot": {"username": "drew", "server_nick": "Drew"}
+  }
+]

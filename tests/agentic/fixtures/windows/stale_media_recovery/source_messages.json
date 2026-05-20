@@ -1,0 +1,38 @@
+[
+  {
+    "message_id": 300,
+    "guild_id": 1076117621407223829,
+    "channel_id": 888,
+    "channel_name": "comfyui",
+    "author_id": 52,
+    "content": "The workflow image link has gone stale, but the text says the fix was switching the relight mask order.",
+    "created_at": "2026-05-19T17:11:00Z",
+    "attachments": [
+      {
+        "url": "https://cdn.example.test/stale-media.png",
+        "content_type": "image/png",
+        "filename": "stale-media.png"
+      }
+    ],
+    "embeds": [],
+    "reaction_count": 7,
+    "reference_id": null,
+    "thread_id": null,
+    "author_context_snapshot": {"username": "erin", "server_nick": "Erin"}
+  },
+  {
+    "message_id": 301,
+    "guild_id": 1076117621407223829,
+    "channel_id": 888,
+    "channel_name": "comfyui",
+    "author_id": 53,
+    "content": "If the image does not resolve, the safe note is to watch this until someone reposts the before/after.",
+    "created_at": "2026-05-19T17:20:00Z",
+    "attachments": [],
+    "embeds": [],
+    "reaction_count": 2,
+    "reference_id": "300",
+    "thread_id": null,
+    "author_context_snapshot": {"username": "fran", "server_nick": "Fran"}
+  }
+]

@@ -588,6 +588,45 @@ class DatabaseHandler:
             return None
         return self._run_async_in_thread(self.storage_handler.store_editorial_observation(observation, environment=environment))
 
+    def create_topic_editor_draft(self, draft: Dict[str, Any], environment: str = 'prod') -> Optional[Dict[str, Any]]:
+        guild_id = draft.get('guild_id')
+        if not self._live_write_allowed(guild_id) or not self.storage_handler:
+            return None
+        return self._run_async_in_thread(self.storage_handler.create_topic_editor_draft(draft, environment=environment))
+
+    def update_topic_editor_draft(
+        self,
+        draft_id: str,
+        updates: Dict[str, Any],
+        guild_id: Optional[int] = None,
+        environment: str = 'prod',
+    ) -> Optional[Dict[str, Any]]:
+        if not self._live_write_allowed(guild_id or (updates or {}).get('guild_id')) or not self.storage_handler:
+            return None
+        return self._run_async_in_thread(
+            self.storage_handler.update_topic_editor_draft(draft_id, updates, environment=environment)
+        )
+
+    def get_recent_topic_editor_drafts(
+        self,
+        guild_id: Optional[int] = None,
+        environment: str = 'prod',
+        limit: int = 20,
+        status: Optional[str] = None,
+        run_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        if not self.storage_handler:
+            return []
+        return self._run_async_in_thread(
+            self.storage_handler.get_recent_topic_editor_drafts(
+                guild_id=guild_id,
+                environment=environment,
+                limit=limit,
+                status=status,
+                run_id=run_id,
+            )
+        )
+
     def get_topic_editor_checkpoint(self, checkpoint_key: str, environment: str = 'prod') -> Optional[Dict[str, Any]]:
         if not self.storage_handler:
             return None
@@ -636,6 +675,29 @@ class DatabaseHandler:
                 guild_id=guild_id,
                 channel_ids=channel_ids,
                 limit=limit,
+                exclude_author_ids=exclude_author_ids,
+            )
+        )
+
+    def get_archived_messages_for_window(
+        self,
+        guild_id: Optional[int],
+        start: str,
+        end: str,
+        limit: int = 1000,
+        channel_ids: Optional[List[int]] = None,
+        exclude_author_ids: Optional[List[int]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Fetch archived messages inside a bounded time window for fixture freezing."""
+        if not self.storage_handler:
+            return []
+        return self._run_async_in_thread(
+            self.storage_handler.get_archived_messages_for_window(
+                guild_id=guild_id,
+                start=start,
+                end=end,
+                limit=limit,
+                channel_ids=channel_ids,
                 exclude_author_ids=exclude_author_ids,
             )
         )

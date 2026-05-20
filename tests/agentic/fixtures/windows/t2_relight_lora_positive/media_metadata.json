@@ -1,0 +1,14 @@
+[
+  {
+    "message_id": 100,
+    "attachment_index": 0,
+    "model": "gpt-4o-mini",
+    "understanding": {
+      "kind": "image",
+      "subject": "A relit generated portrait in a room",
+      "technical_signal": "Identity and texture remain stable while lighting changes",
+      "aesthetic_quality": 8,
+      "description": "A generated character lit by a warmer room light without obvious texture collapse."
+    }
+  }
+]

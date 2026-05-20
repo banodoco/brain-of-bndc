@@ -1,0 +1,11 @@
+[
+  {
+    "topic_id": "topic-existing-watch",
+    "guild_id": 1076117621407223829,
+    "canonical_key": "relighting-workflows",
+    "headline": "Relighting workflows",
+    "state": "watching",
+    "summary": "Community is testing controllable relighting workflows.",
+    "source_message_ids": ["90"]
+  }
+]
