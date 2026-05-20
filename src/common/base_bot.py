@@ -5,12 +5,36 @@ from datetime import datetime
 from typing import Optional, Any, Dict
 import traceback
 import os
+import subprocess
 import aiohttp
 
 import discord
 from discord.ext import commands
 
 from src.common.rate_limiter import RateLimiter
+
+
+def _current_commit_sha() -> str:
+    for env_name in (
+        "RAILWAY_GIT_COMMIT_SHA",
+        "GIT_COMMIT_SHA",
+        "SOURCE_COMMIT",
+        "COMMIT_SHA",
+        "VERCEL_GIT_COMMIT_SHA",
+    ):
+        value = os.getenv(env_name, "").strip()
+        if value:
+            return value[:7]
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short=7", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=1,
+        ).strip() or "unknown"
+    except Exception:
+        return "unknown"
+
 
 class BaseDiscordBot(commands.Bot):
     """
@@ -178,7 +202,7 @@ class BaseDiscordBot(commands.Bot):
                 admin_user = await self.fetch_user(admin_id)
                 self.logger.info(f"Successfully connected and can notify admin: {admin_user.name}")
                 if not self.dev_mode:
-                    sha = os.getenv("RAILWAY_GIT_COMMIT_SHA", "")[:7] or "unknown"
+                    sha = _current_commit_sha()
                     dm = await admin_user.create_dm()
                     await dm.send(f"Bot restarted — `{sha}` on {len(self.guilds)} guild(s)")
         except Exception as e:

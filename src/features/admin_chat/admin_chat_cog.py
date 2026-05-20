@@ -19,6 +19,12 @@ from src.features.grants.solana_client import is_valid_solana_address
 
 logger = logging.getLogger('DiscordBot')
 
+_ADMIN_FALLBACK_REPLY_LINES = frozenset({
+    "I hit an internal error while trying to do that.",
+    "I couldn't complete that right now because the model API failed.",
+    "Sorry, something went wrong on my side. Try again in a moment.",
+})
+
 _CLASSIFIER_TOOL = {
     "name": "classify_payment_reply",
     "description": "Classify whether a recipient confirms seeing the test SOL payment.",
@@ -184,6 +190,13 @@ class AdminChatCog(commands.Cog):
         if negative and not positive:
             return 'negative'
         return 'ambiguous'
+
+    @staticmethod
+    def _strip_fallback_reply_lines(content: str) -> str:
+        """Avoid echoing stale generic failure messages from recent DM/log context."""
+        lines = str(content or "").splitlines()
+        kept = [line for line in lines if line.strip() not in _ADMIN_FALLBACK_REPLY_LINES]
+        return "\n".join(kept).strip()
 
     async def _classify_confirmation(self, content: str) -> tuple[Literal['positive', 'negative', 'ambiguous'], Optional[str]]:
         """Classify a recipient confirmation reply via LLM tool use with keyword fallback."""
@@ -1285,7 +1298,10 @@ class AdminChatCog(commands.Cog):
                     async for msg in ch.history(limit=10):
                         if msg.id == message.id:
                             continue
-                        recent.append(f"[{msg.id}] {msg.author.display_name}: {(msg.content or '')[:150]}")
+                        content_preview = self._strip_fallback_reply_lines(msg.content or '')
+                        if not content_preview:
+                            continue
+                        recent.append(f"[{msg.id}] {msg.author.display_name}: {content_preview[:150]}")
                     recent.reverse()
                     channel_context["recent_messages"] = recent
                 except Exception:
@@ -1317,7 +1333,10 @@ class AdminChatCog(commands.Cog):
                     async for msg in ch.history(limit=10):
                         if msg.id == message.id:
                             continue
-                        recent.append(f"[{msg.id}] {msg.author.display_name}: {(msg.content or '')[:150]}")
+                        content_preview = self._strip_fallback_reply_lines(msg.content or '')
+                        if not content_preview:
+                            continue
+                        recent.append(f"[{msg.id}] {msg.author.display_name}: {content_preview[:150]}")
                     recent.reverse()
                     channel_context["recent_messages"] = recent
                 except Exception:
@@ -1354,6 +1373,7 @@ class AdminChatCog(commands.Cog):
                         await asyncio.sleep(backoffs[attempt])
 
             for response in responses:
+                response = self._strip_fallback_reply_lines(response)
                 if not response or not response.strip():
                     continue
 
