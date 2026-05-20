@@ -6,6 +6,7 @@ from typing import Optional, Any, Dict
 import traceback
 import os
 import subprocess
+import time
 import aiohttp
 
 import discord
@@ -34,6 +35,27 @@ def _current_commit_sha() -> str:
         ).strip() or "unknown"
     except Exception:
         return "unknown"
+
+
+def _claim_startup_notification(bot: commands.Bot, admin_id: int, sha: str) -> bool:
+    db_handler = getattr(bot, "db_handler", None)
+    claim = getattr(db_handler, "try_claim_bot_event", None)
+    if not callable(claim):
+        return True
+
+    # Railway can briefly overlap old and new containers during deploys. One
+    # startup DM per admin per 10-minute window is enough signal without spam.
+    bucket = int(time.time() // 600)
+    return bool(claim(
+        event_key=f"startup_admin_dm:{admin_id}:{bucket}",
+        event_type="startup_admin_dm",
+        payload={
+            "admin_id": str(admin_id),
+            "sha": sha,
+            "deployment_id": os.getenv("RAILWAY_DEPLOYMENT_ID"),
+            "service_id": os.getenv("RAILWAY_SERVICE_ID"),
+        },
+    ))
 
 
 class BaseDiscordBot(commands.Bot):
@@ -203,8 +225,11 @@ class BaseDiscordBot(commands.Bot):
                 self.logger.info(f"Successfully connected and can notify admin: {admin_user.name}")
                 if not self.dev_mode:
                     sha = _current_commit_sha()
-                    dm = await admin_user.create_dm()
-                    await dm.send(f"Bot restarted — `{sha}` on {len(self.guilds)} guild(s)")
+                    if _claim_startup_notification(self, admin_id, sha):
+                        dm = await admin_user.create_dm()
+                        await dm.send(f"Bot restarted — `{sha}` on {len(self.guilds)} guild(s)")
+                    else:
+                        self.logger.info("Startup admin DM suppressed by cross-container cooldown")
         except Exception as e:
             self.logger.error(f"Failed to verify/notify admin: {e}")
 

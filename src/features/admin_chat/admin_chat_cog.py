@@ -198,6 +198,29 @@ class AdminChatCog(commands.Cog):
         kept = [line for line in lines if line.strip() not in _ADMIN_FALLBACK_REPLY_LINES]
         return "\n".join(kept).strip()
 
+    def _claim_admin_chat_message(self, message: discord.Message) -> bool:
+        claim = getattr(self.db_handler, "try_claim_bot_event", None)
+        if not callable(claim):
+            return True
+
+        deployment_id = os.getenv("RAILWAY_DEPLOYMENT_ID") or os.getenv("RAILWAY_SERVICE_ID")
+        return bool(claim(
+            event_key=f"admin_chat_message:{message.id}",
+            event_type="admin_chat_message",
+            payload={
+                "message_id": str(message.id),
+                "channel_id": str(getattr(message.channel, "id", "")),
+                "author_id": str(getattr(message.author, "id", "")),
+                "deployment_id": deployment_id,
+                "commit_sha": (
+                    os.getenv("RAILWAY_GIT_COMMIT_SHA")
+                    or os.getenv("GIT_COMMIT_SHA")
+                    or os.getenv("SOURCE_COMMIT")
+                    or os.getenv("COMMIT_SHA")
+                ),
+            },
+        ))
+
     async def _classify_confirmation(self, content: str) -> tuple[Literal['positive', 'negative', 'ambiguous'], Optional[str]]:
         """Classify a recipient confirmation reply via LLM tool use with keyword fallback."""
         keyword_result = self._classify_confirmation_keyword(content)
@@ -1257,6 +1280,10 @@ class AdminChatCog(commands.Cog):
         resolved_guild_id = message.guild.id if message.guild else None
         source = "DM" if is_dm else f"#{getattr(message.channel, 'name', 'unknown')}"
         logger.info(f"[AdminChat] Received from admin in {source}: {content[:50]}...")
+
+        if not self._claim_admin_chat_message(message):
+            logger.info(f"[AdminChat] Skipping already-claimed message {message.id}")
+            return
 
         if self._busy.get(user_id):
             if self._is_abort(content):
