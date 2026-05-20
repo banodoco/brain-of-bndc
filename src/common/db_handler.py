@@ -2,7 +2,9 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any, Tuple
 import asyncio
+import hashlib
 import inspect
+import json
 import os
 
 from .redaction import redact_wallet as _redact_wallet
@@ -43,7 +45,6 @@ class DatabaseHandler:
                 self.query_handler = SupabaseQueryHandler(self.supabase)
                 # ServerConfig shares the same Supabase client
                 self.server_config = ServerConfig(self.supabase)
-                self._ensure_bot_event_claims_table()
                 logger.debug(f"Supabase handlers initialized for read/write operations")
             except Exception as e:
                 logger.error(f"Failed to initialize Supabase handlers: {e}", exc_info=True)
@@ -53,32 +54,6 @@ class DatabaseHandler:
             logger.error(f"Database initialization error: {e}")
             raise
 
-    def _ensure_bot_event_claims_table(self) -> None:
-        connection_string = os.getenv("SUPABASE_CONNECTION_STRING")
-        if not connection_string:
-            return
-
-        try:
-            import psycopg2
-
-            with psycopg2.connect(connection_string, connect_timeout=5) as conn:
-                with conn.cursor() as cur:
-                    cur.execute("""
-                        create table if not exists public.bot_event_claims (
-                            event_key text primary key,
-                            event_type text not null,
-                            payload jsonb not null default '{}'::jsonb,
-                            claimed_at timestamptz not null default now()
-                        )
-                    """)
-                    cur.execute("""
-                        create index if not exists bot_event_claims_event_type_claimed_at_idx
-                        on public.bot_event_claims (event_type, claimed_at desc)
-                    """)
-                conn.commit()
-        except Exception as e:
-            logger.warning(f"Could not ensure bot_event_claims table: {e}")
-    
     def _run_async_in_thread(self, coro):
         """Helper to run async operations from sync context."""
         if not inspect.isawaitable(coro):
@@ -99,32 +74,60 @@ class DatabaseHandler:
             logger.error(f"Error running async operation: {e}", exc_info=True)
             raise
 
+    @staticmethod
+    def _bot_event_claim_message_id(event_key: str) -> int:
+        digest = hashlib.blake2b(str(event_key).encode("utf-8"), digest_size=8).digest()
+        value = int.from_bytes(digest, "big") & ((1 << 62) - 1)
+        return -(value or 1)
+
     def try_claim_bot_event(
         self,
         event_key: str,
         event_type: str,
         payload: Optional[Dict[str, Any]] = None,
     ) -> bool:
-        """Atomically claim one bot event across overlapping containers."""
+        """Atomically claim one bot event across overlapping containers.
+
+        Uses a synthetic negative row in discord_messages so we can rely on an
+        existing unique constraint instead of requiring a separate migration.
+        """
         if not self.supabase:
             return True
 
+        claim_message_id = self._bot_event_claim_message_id(event_key)
+        now = datetime.utcnow().isoformat()
+        guild_id = (payload or {}).get("guild_id") or os.getenv("BOT_EVENT_CLAIM_GUILD_ID")
+        if guild_id is None:
+            logger.warning(f"No guild_id available for bot event claim {event_key}; processing without lock")
+            return True
+
         row = {
-            "event_key": str(event_key),
-            "event_type": str(event_type),
-            "payload": payload or {},
+            "message_id": claim_message_id,
+            "guild_id": int(guild_id),
+            "channel_id": 0,
+            "author_id": 0,
+            "content": json.dumps({
+                "bot_event_claim": str(event_key),
+                "event_type": str(event_type),
+                "payload": payload or {},
+            }, default=str),
+            "created_at": now,
+            "attachments": [],
+            "embeds": [],
+            "reaction_count": 0,
+            "reactors": [],
+            "is_deleted": True,
+            "indexed_at": now,
+            "synced_at": now,
         }
         try:
-            result = self.supabase.table("bot_event_claims").insert(row).execute()
+            result = self.supabase.table("discord_messages").insert(row).execute()
             return bool(getattr(result, "data", None))
         except Exception as e:
             code = getattr(e, "code", None)
             message = str(e).lower()
             if code == "23505" or "duplicate key" in message or "already exists" in message:
                 return False
-            if code == "42P01" or "bot_event_claims" in message and "does not exist" in message:
-                logger.warning("bot_event_claims table missing; processing event without cross-container lock")
-                return True
             logger.error(f"Failed to claim bot event {event_key}: {e}", exc_info=True)
             return True
 

@@ -204,10 +204,14 @@ class AdminChatCog(commands.Cog):
             return True
 
         deployment_id = os.getenv("RAILWAY_DEPLOYMENT_ID") or os.getenv("RAILWAY_SERVICE_ID")
+        guild_id = getattr(getattr(message, "guild", None), "id", None)
+        if guild_id is None and getattr(self.bot, "guilds", None):
+            guild_id = self.bot.guilds[0].id
         return bool(claim(
             event_key=f"admin_chat_message:{message.id}",
             event_type="admin_chat_message",
             payload={
+                "guild_id": guild_id,
                 "message_id": str(message.id),
                 "channel_id": str(getattr(message.channel, "id", "")),
                 "author_id": str(getattr(message.author, "id", "")),

@@ -51,6 +51,7 @@ def _claim_startup_notification(bot: commands.Bot, admin_id: int, sha: str) -> b
         event_type="startup_admin_dm",
         payload={
             "admin_id": str(admin_id),
+            "guild_id": getattr(bot.guilds[0], "id", None) if getattr(bot, "guilds", None) else None,
             "sha": sha,
             "deployment_id": os.getenv("RAILWAY_DEPLOYMENT_ID"),
             "service_id": os.getenv("RAILWAY_SERVICE_ID"),
