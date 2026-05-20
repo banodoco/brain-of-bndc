@@ -37,6 +37,22 @@ def _preview_text(content: str, limit: int) -> str:
     return f"{clipped}..."
 
 
+def _parse_user_id_list(raw_user_ids: str | None, *, env_name: str) -> set[int]:
+    """Parse a comma/whitespace separated list of Discord user IDs."""
+    if not raw_user_ids:
+        return set()
+
+    user_ids: set[int] = set()
+    for token in re.split(r"[\s,]+", raw_user_ids.strip()):
+        if not token:
+            continue
+        try:
+            user_ids.add(int(token))
+        except ValueError:
+            logger.error("[AdminChat] Invalid %s entry: %r", env_name, token)
+    return user_ids
+
+
 _CLASSIFIER_TOOL = {
     "name": "classify_payment_reply",
     "description": "Classify whether a recipient confirms seeing the test SOL payment.",
@@ -139,6 +155,17 @@ class AdminChatCog(commands.Cog):
         else:
             logger.warning("[AdminChat] ADMIN_USER_ID not set - admin chat disabled")
             self.admin_user_id = None
+        self._allowed_admin_chat_user_ids = _parse_user_id_list(
+            os.getenv('ADMIN_CHAT_ALLOWED_USER_IDS'),
+            env_name='ADMIN_CHAT_ALLOWED_USER_IDS',
+        )
+        if self.admin_user_id is not None:
+            self._allowed_admin_chat_user_ids.add(self.admin_user_id)
+        if self._allowed_admin_chat_user_ids:
+            logger.info(
+                "[AdminChat] Admin chat enabled for user IDs: %s",
+                sorted(self._allowed_admin_chat_user_ids),
+            )
         self._admin_mention = f"<@{self.admin_user_id}>" if self.admin_user_id else "the admin"
         self._startup_reconciled = False
 
@@ -1151,8 +1178,8 @@ class AdminChatCog(commands.Cog):
                 raise
     
     def _is_admin(self, user_id: int) -> bool:
-        """Check if a user is the admin."""
-        return self.admin_user_id is not None and user_id == self.admin_user_id
+        """Check if a user may use the privileged admin chat route."""
+        return user_id in self._allowed_admin_chat_user_ids
 
     async def _resolve_context_guild_id(self, user_id: int, guild_hint: int | None = None) -> int | None:
         """Resolve a trusted guild context for the requester."""

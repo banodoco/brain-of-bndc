@@ -686,6 +686,7 @@ class FakeGrantDB:
 @pytest.fixture(autouse=True)
 def admin_chat_env(monkeypatch):
     monkeypatch.setenv("ADMIN_USER_ID", "999")
+    monkeypatch.delenv("ADMIN_CHAT_ALLOWED_USER_IDS", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
 
@@ -696,6 +697,16 @@ def test_parse_wallet_from_text_extracts_wrapped_address():
     assert cog._parse_wallet_from_text(f"wallet is `<{VALID_SOL_ADDRESS}>`") == VALID_SOL_ADDRESS
     assert cog._parse_wallet_from_text(f"not-a-wallet {VALID_SOL_ADDRESS}.") == VALID_SOL_ADDRESS
     assert cog._parse_wallet_from_text("definitely not a wallet") is None
+
+
+def test_admin_chat_allows_configured_extra_users(monkeypatch):
+    monkeypatch.setenv("ADMIN_CHAT_ALLOWED_USER_IDS", "614602980943069214, 123")
+    cog = AdminChatCog(FakeBot(FakeChannel(), payment_service=object()), FakeIntentDB(), sharer=object())
+
+    assert cog._is_admin(999)
+    assert cog._is_admin(614602980943069214)
+    assert cog._is_admin(123)
+    assert not cog._is_admin(456)
 
 
 @pytest.mark.parametrize(
