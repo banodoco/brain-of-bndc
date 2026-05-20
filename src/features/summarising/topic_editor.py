@@ -9,12 +9,14 @@ Anthropic or Discord dependencies.
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import re
 import os
 import tempfile
 import time
-from dataclasses import dataclass, field
+import uuid
+from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from urllib.parse import unquote, urlparse
@@ -41,6 +43,12 @@ READ_TOOL_NAMES = {
 }
 
 WRITE_TOOL_NAMES = {
+    "create_draft",
+    "edit_draft",
+    "validate_draft",
+    "preview_draft",
+    "submit_draft",
+    "abandon_draft",
     "post_topic",
     "post_simple_topic",
     "post_sectioned_topic",
@@ -51,128 +59,84 @@ WRITE_TOOL_NAMES = {
     "finalize_run",
 }
 
+LEGACY_POST_TOOL_NAMES = {"post_topic", "post_simple_topic", "post_sectioned_topic"}
+DRAFT_TOOL_NAMES = {"create_draft", "edit_draft", "validate_draft", "preview_draft", "submit_draft", "abandon_draft"}
+LEGACY_POST_MODES = {"disabled", "draft_adapter", "direct"}
+TOPIC_EDITOR_DRAFT_TEMPLATES = {
+    "creation_release",
+    "technical_finding",
+    "tool_workflow_update",
+    "community_debate",
+}
 
-TOPIC_EDITOR_SYSTEM_PROMPT = """You are the BNDC live-update writer.
 
-Review the supplied archived Discord messages and active topics. Use read tools
-(search_topics, search_messages, get_author_profile, get_message_context,
-get_reply_chain) when you need more context.
+TOPIC_EDITOR_SYSTEM_PROMPT = """You are the BNDC live-update topic editor.
 
-`search_messages` supports Discord-style filter params. Examples:
-- `search_messages(query="Wan 2.5", from_author_id=*** has=["video"], scope="archive", after="7d")` to find a user's recent video posts about a tool
-- `search_messages(in_channel_id=456, after="24h", has=["image"])` to scan a channel for recent generations
-- `get_reply_chain(message_id="789")` when a source message has `reply_to_message_id` set
+Your job is not to summarize the whole window. Curate a small public update:
+short, source-backed, visual when possible, and split into a few focused cards.
+Leave material out when it is weaker than the best two or three angles.
 
-For every concrete development worth acting on, call a
-decision tool. Prefer `post_topic` for publishing; `post_simple_topic` and
-`post_sectioned_topic` are deprecated — accepted for backward compatibility;
-prefer `post_topic`. Use watch_topic, update_topic_source_messages,
-discard_topic, or record_observation when publishing is not the right action.
+Use the workflow in order:
 
-You operate in a multi-turn loop. After each batch of tool calls you make, you
-will receive tool_result messages and may continue iterating — search, decide,
-search more, decide more. Budget: up to 50 turns per run.
+1. Research: inspect the supplied source messages, `evidence_shelf`, active
+   topics, and cached media understandings. Use search_topics, search_messages,
+   get_author_profile, get_message_context, get_reply_chain, understand_image,
+   and understand_video when you need more context.
+2. Decide: choose publish, watch, update sources, discard, or observation. If
+   there is no publishable public update, do not draft one.
+3. Draft: call create_draft with a template, headline, dek, cards, and
+   editor_note. Select source_message_ids and media_ids from the hydrated
+   evidence shelf. Do not use raw CDN URLs.
+4. Validate: call validate_draft.
+5. Revise: when validation returns errors or meaningful warnings, call
+   edit_draft on the same draft. Do not start a replacement draft for normal
+   revision.
+6. Preview: call preview_draft and inspect the exact text/media units.
+7. Submit: call submit_draft only after a valid preview. Submit refuses stale
+   or invalid previews.
 
-REQUIRED to end the run: call the `finalize_run` tool exactly once, with
-`overall_reasoning` describing what you saw in the window, what you
-considered, what you skipped and why, and what (if anything) you acted on
-(minimum 80 characters, full sentences). The run does not close until you
-call `finalize_run` — you cannot end the turn by emitting plain text alone.
+Card style:
 
-Media-bearing messages in the source payload may include pre-computed
-`media_understandings` (cached from prior runs, keyed by message and
-attachment index). These are surfaced in the ``media_understandings``
-list on each source message so you can read them for free without calling
-a vision tool. For uncached media that could affect editorial judgment,
-call `understand_image` or `understand_video`. Use ``kind`` to
-discriminate: skip ``workflow_graph`` items entirely; consider
-``generation`` items with ``aesthetic_quality >= 6`` for editorial
-framing; cite ``technical_signal`` and ``subject`` when writing about
-any media-backed topic.
+- Each card answers one question: what changed, what someone made, what the
+  community learned, why this is useful now, or what is worth watching next.
+- Keep card bodies concise. Prefer one tight paragraph over an essay.
+- Use inline `[N]` citations next to factual claims. Each marker must map to
+  that card's source_message_ids. Never append a detached "Sources:" footer.
+- Attach media_ids to the card that discusses that image or video so media
+  appears immediately after the relevant text.
+- Avoid digest prose, broad roundups, padded context, and weak "community
+  reacted" points without concrete substance.
+- Too many angles means split topics, watch the extras, or leave them out.
 
-The runtime may auto-shortlist media posts that crossed the reaction threshold.
-These appear in `auto_shortlisted_media` and as active topics with
-`state="watching"`. For each shortlisted media item, explicitly decide what to
-do: use `get_message_context`, `get_reply_chain`, `search_messages`, and
-`understand_image`/`understand_video` when the media could be publishable; then
-publish it with a compact header/context if there is a real story, keep
-watching if signal is still forming, or call `discard_topic` if it is just a
-fun throwaway that is not worth the live feed. If it is publishable but mostly
-visual, the vision result may support a short, playful caption, but do not make
-up details not present in the source or understanding.
+Templates:
 
-## Topic Posts (post_topic with blocks)
+- creation_release: card 1 says what was released or made; card 2 says what
+  the generation/media shows; card 3 says why the community cares or what
+  happens next.
+- technical_finding: card 1 states the problem or discovery; card 2 gives
+  evidence or comparison; card 3 gives a workaround, implication, or next step.
+- tool_workflow_update: card 1 says what changed; card 2 says how someone
+  tested it; card 3 gives caveats, proof, or next step.
+- community_debate: card 1 states the concrete question; card 2 gives the
+  strongest position A; card 3 gives the strongest position B; optional card 4
+  says what remains unresolved.
 
-Use the minimum number of blocks that fits the story. A single creator
-dropping a single artifact = exactly ONE `intro` block with the media attached
-to it. Only add `section` blocks when the topic has genuinely distinct
-contributors, angles, or sub-stories that each independently merit their own
-header. If you find yourself splitting one creator's one video into "The
-Video" / "Audio" / "Community Reaction" sections, you are wrong — collapse it
-to one block.
+Media-bearing messages may include cached `media_understandings`; read those
+before spending vision budget. Skip workflow_graph media. For uncached media
+that affects editorial judgment, use understand_image or understand_video.
 
-Brevity rules:
+Auto-shortlisted media appears in `auto_shortlisted_media` and as active
+watching topics. Explicitly decide publish, watch, update, or discard for those
+items after checking context.
 
-- Intro block body: 1-3 sentences, roughly 30-150 words.
-- Section block body: 1-2 sentences.
-- No bullet lists in posted prose.
-- No padding and no filler restatement of the title.
+Legacy direct-post tools (`post_topic`, `post_simple_topic`,
+`post_sectioned_topic`) are rollback-only or adapter-backed compatibility
+surfaces. In normal mode they are hidden and refused. Use the draft tools for
+publishing.
 
-Worked example:
-
-Input: one creator drops one video, one reply clarifies it is their latest
-piece, and two replies praise the mood and sound.
-
-Do this:
-
-`post_topic` with one block:
-`{"type":"intro","text":"NebSH dropped \"The Last Party,\" a new video with a moody late-night setup, and the replies are already calling out the atmosphere and sound design.","source_message_ids":["100","101","102","103"],"media_refs":[{"message_id":"100","kind":"attachment","index":0}]}`
-
-Don't do this:
-
-- `{"type":"section","title":"The Video","text":"..."}`
-- `{"type":"section","title":"Audio","text":"..."}`
-- `{"type":"section","title":"Community Reaction","text":"..."}`
-
-That is one beat, so it stays one `intro` block.
-
-Rules:
-
-1. **Every factual block gets its own sources.**  Each block object in the
-   `blocks` array must include a `source_message_ids` list citing the
-   Discord messages that support that specific block.  Do NOT rely on a
-   global topic-level `source_message_ids` for blocks — the global field is
-   a backwards-compat fallback only.
-
-2. **Media is attached to the relevant block.**  If a block discusses a
-   specific image or video from a source message, include it in that
-   block's `media_refs`.  Do NOT put all media in a global list — each
-   media ref lives with the block that owns it.
-
-3. **Canonical media-ref shape:** `{"message_id": "...", "kind": "attachment"|"embed"|"external", "index": N}`.
-   Shorthand `{"message_id": "...", "attachment_index": N}` is accepted and
-   normalised to `{"kind": "attachment", "index": N}` automatically.
-   `kind: "external"` refs point to off-platform media links (Reddit, X, etc.)
-   that are resolved best-effort — they are secondary to Discord attachments
-   and always bound to a specific block.
-
-4. **No global Sources footer.**  For structured (blocks) topics, source
-   citations are rendered inline as bracketed links (e.g. `[[1]](url)`)
-   next to the relevant block.  Do NOT append a "Sources: ..." line at the
-   end of the topic — the publisher handles citation rendering per block.
-
-5. **Block types:** Use `"type": "intro"` for the opening/intro block and
-   `"type": "section"` for each following section.  Each block must have
-   `"text"` (the prose content) and may have an optional `"title"`.
-
-6. **Media refs use message_id, not CDN URLs.**  Reference media by the
-   stable `{message_id, kind, index}` tuple — do NOT copy raw CDN URLs.
-   The publisher resolves media URLs at publish time from stored message
-   metadata.
-
-Legacy `sections` field is still accepted for backward compatibility; when
-used the global `source_message_ids` list applies to all sections equally,
-and no per-section media refs are available.
+REQUIRED to end the run: call finalize_run exactly once with full editorial
+reasoning describing what you saw, what you considered, what you skipped and
+why, and what you acted on. The run does not close by plain text alone.
 """
 
 
@@ -249,6 +213,87 @@ TOPIC_EDITOR_TOOLS: List[Dict[str, Any]] = [
         },
     },
     {
+        "name": "create_draft",
+        "description": "Create an editable topic-editor draft from researched evidence. Drafts must be validated and previewed before submit.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "topic_key": {"type": "string"},
+                "template": {"type": "string", "enum": sorted(TOPIC_EDITOR_DRAFT_TEMPLATES) if "TOPIC_EDITOR_DRAFT_TEMPLATES" in globals() else ["creation_release", "technical_finding", "tool_workflow_update", "community_debate"]},
+                "headline": {"type": "string"},
+                "dek": {"type": "string"},
+                "cards": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "angle": {"type": "string"},
+                            "body": {"type": "string"},
+                            "source_message_ids": {"type": "array", "items": {"type": "string"}},
+                            "media_ids": {"type": "array", "items": {"type": "string"}},
+                        },
+                        "required": ["angle", "body", "source_message_ids"],
+                    },
+                },
+                "editor_note": {"type": "string"},
+            },
+            "required": ["topic_key", "template", "headline", "dek", "cards", "editor_note"],
+        },
+    },
+    {
+        "name": "edit_draft",
+        "description": "Patch an existing draft after validation feedback. Edit the same draft rather than creating a replacement.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "draft_id": {"type": "string"},
+                "patch": {"type": "object"},
+                "reason": {"type": "string"},
+            },
+            "required": ["draft_id", "patch", "reason"],
+        },
+    },
+    {
+        "name": "validate_draft",
+        "description": "Run deterministic draft validation and return blocking errors plus warnings.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"draft_id": {"type": "string"}},
+            "required": ["draft_id"],
+        },
+    },
+    {
+        "name": "preview_draft",
+        "description": "Render the exact ordered text/media units Discord would receive. Stores the current valid preview hash.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"draft_id": {"type": "string"}},
+            "required": ["draft_id"],
+        },
+    },
+    {
+        "name": "submit_draft",
+        "description": "Submit a previously validated and previewed draft. Refuses invalid or stale-preview drafts before topic upsert or publish.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"draft_id": {"type": "string"}},
+            "required": ["draft_id"],
+        },
+    },
+    {
+        "name": "abandon_draft",
+        "description": "End a draft attempt when the topic is not publishable after revision.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "draft_id": {"type": "string"},
+                "reason": {"type": "string"},
+                "fallback_action": {"type": "string", "enum": ["watch_topic", "update_topic_sources", "discard_topic"]},
+            },
+            "required": ["draft_id", "reason"],
+        },
+    },
+    {
         "name": "post_topic",
         "description": (
             "Publish a topic using the minimum number of editorial blocks. "
@@ -262,7 +307,9 @@ TOPIC_EDITOR_TOOLS: List[Dict[str, Any]] = [
             "`{\"message_id\": \"...\", \"kind\": \"attachment\"|\"embed\", \"index\": N}` "
             "(shorthand `{\"message_id\": \"...\", \"attachment_index\": N}` is also "
             "accepted). Do NOT include a global Sources footer — citations are "
-            "rendered inline per block."
+            "rendered inline per block using plain integer markers like [1], [2] "
+            "(e.g. \"Body text [1] with a claim [2].\"). Every [N] must match a "
+            "real index in the block's source_message_ids."
         ),
         "input_schema": {
             "type": "object",
@@ -341,7 +388,9 @@ TOPIC_EDITOR_TOOLS: List[Dict[str, Any]] = [
             "`{\"message_id\": \"...\", \"kind\": \"attachment\"|\"embed\", \"index\": N}` "
             "(shorthand `{\"message_id\": \"...\", \"attachment_index\": N}` is also "
             "accepted). Do NOT include a global Sources footer — citations are "
-            "rendered inline per block."
+            "rendered inline per block using plain integer markers like [1], [2] "
+            "(e.g. \"Body text [1] with a claim [2].\"). Every [N] must match a "
+            "real index in the block's source_message_ids."
         ),
         "input_schema": {
             "type": "object",
@@ -515,6 +564,7 @@ class TopicEditor:
         environment: Optional[str] = None,
         model: Optional[str] = None,
         source_limit: Optional[int] = None,
+        actor_brief: Optional[str] = None,
     ) -> None:
         self.bot = bot
         self.db = db_handler or getattr(bot, "db", None) or getattr(bot, "db_handler", None)
@@ -524,10 +574,41 @@ class TopicEditor:
         self.environment = environment or ("dev" if getattr(bot, "dev_mode", False) else os.getenv("LIVE_UPDATE_ENVIRONMENT", "prod"))
         self.model = model or os.getenv("TOPIC_EDITOR_MODEL") or DEFAULT_LIVE_UPDATE_MODEL
         self.source_limit = int(source_limit or os.getenv("TOPIC_EDITOR_SOURCE_LIMIT", "200"))
+        self.actor_brief = actor_brief
         self.publishing_enabled = os.getenv("TOPIC_EDITOR_PUBLISHING_ENABLED", "false").lower() == "true"
         self.trace_channel_id = os.getenv("LIVE_UPDATE_TRACE_CHANNEL_ID")
         self.media_shortlist_min_reactions = self._env_int("TOPIC_EDITOR_MEDIA_SHORTLIST_MIN_REACTIONS", 5)
         self.media_shortlist_limit = self._env_int("TOPIC_EDITOR_MEDIA_SHORTLIST_LIMIT", 5)
+        # Rollout guard for deprecated direct-post tools:
+        # - disabled: default draft-required behavior; legacy tools are hidden and refused.
+        # - draft_adapter: compatibility path that converts legacy input into a draft and submits it.
+        # - direct: rollback-only path that preserves the old direct upsert/publish behavior.
+        self.legacy_post_mode = self._normalize_legacy_post_mode(
+            os.getenv("TOPIC_EDITOR_LEGACY_POST_MODE", "disabled")
+        )
+        self.draft_limits = topic_editor_draft_limits_from_config({
+            "headline_target_chars": os.getenv("TOPIC_EDITOR_DRAFT_HEADLINE_TARGET_CHARS"),
+            "dek_target_chars": os.getenv("TOPIC_EDITOR_DRAFT_DEK_TARGET_CHARS"),
+            "card_body_max_chars": os.getenv("TOPIC_EDITOR_DRAFT_CARD_BODY_MAX_CHARS"),
+            "max_cards": os.getenv("TOPIC_EDITOR_DRAFT_MAX_CARDS"),
+            "max_revision_attempts": os.getenv("TOPIC_EDITOR_DRAFT_MAX_REVISION_ATTEMPTS"),
+            "sources_per_card_warning": os.getenv("TOPIC_EDITOR_DRAFT_SOURCES_PER_CARD_WARNING"),
+            "discord_content_limit": os.getenv("TOPIC_EDITOR_DISCORD_CONTENT_LIMIT"),
+        })
+        self.topic_editor_drafts: Dict[str, Dict[str, Any]] = {}
+
+    @staticmethod
+    def _normalize_legacy_post_mode(value: Any) -> str:
+        mode = str(value or "disabled").strip().lower()
+        return mode if mode in LEGACY_POST_MODES else "disabled"
+
+    def _agent_tools(self) -> List[Dict[str, Any]]:
+        if self.legacy_post_mode != "disabled":
+            return TOPIC_EDITOR_TOOLS
+        return [
+            tool for tool in TOPIC_EDITOR_TOOLS
+            if tool.get("name") not in LEGACY_POST_TOOL_NAMES
+        ]
 
     async def run_once(self, trigger: str = "scheduled") -> Dict[str, Any]:
         if not self.db:
@@ -901,21 +982,32 @@ class TopicEditor:
 
     async def _invoke_anthropic(self, messages_arg: Sequence[Dict[str, Any]]) -> Any:
         """One-shot LLM call. The agent loop in `run_once` drives multi-turn behavior."""
+        system_prompt = self._system_prompt()
         client = getattr(self.llm_client, "client", self.llm_client)
         if hasattr(client, "messages") and hasattr(client.messages, "create"):
             return await client.messages.create(
                 model=self.model,
                 max_tokens=4096,
-                system=TOPIC_EDITOR_SYSTEM_PROMPT,
+                system=system_prompt,
                 messages=list(messages_arg),
-                tools=TOPIC_EDITOR_TOOLS,
+                tools=self._agent_tools(),
             )
         return await self.llm_client.generate_chat_completion(
             model=self.model,
-            system_prompt=TOPIC_EDITOR_SYSTEM_PROMPT,
+            system_prompt=system_prompt,
             messages=list(messages_arg),
             max_tokens=4096,
-            tools=TOPIC_EDITOR_TOOLS,
+            tools=self._agent_tools(),
+        )
+
+    def _system_prompt(self) -> str:
+        if not self.actor_brief:
+            return TOPIC_EDITOR_SYSTEM_PROMPT
+        return (
+            TOPIC_EDITOR_SYSTEM_PROMPT
+            + "\n\nReplay scenario brief. This is the only scenario-specific guidance "
+            + "available to the actor; follow it while preserving the topic editor workflow.\n\n"
+            + str(self.actor_brief).strip()
         )
 
     # Known model presets for enrichment — image models for image understanding,
@@ -936,8 +1028,18 @@ class TopicEditor:
             payload = self._message_payload(message)
             payload["media_understandings"] = self._enrich_media_understandings(message)
             source_messages.append(payload)
+        evidence_shelf = [
+            _canonical_jsonable(item)
+            for item in resolve_topic_editor_evidence_shelf(
+                messages,
+                db=self.db,
+                guild_id=self._resolve_guild_id(),
+                environment=self.environment,
+            )
+        ]
         return {
             "source_messages": source_messages,
+            "evidence_shelf": evidence_shelf,
             "active_topics": [
                 {
                     "topic_id": topic.get("topic_id"),
@@ -1053,6 +1155,21 @@ class TopicEditor:
             if len(encoded) > 2000:
                 encoded = encoded[:1970] + "...<truncated>"
             return f"tool={name} status=ok result={encoded}"
+        draft_id = outcome.get("draft_id")
+        if draft_id:
+            action = outcome.get("action") or name
+            parts = [f"tool={name} status={outcome_name} action={action} draft_id={draft_id}"]
+            validation = outcome.get("validation")
+            if isinstance(validation, dict):
+                errors = validation.get("errors") or []
+                warnings = validation.get("warnings") or []
+                if errors:
+                    parts.append("errors=" + json.dumps(errors, default=str, ensure_ascii=False, separators=(",", ":"))[:1200])
+                if warnings:
+                    parts.append("warnings=" + json.dumps(warnings, default=str, ensure_ascii=False, separators=(",", ":"))[:1200])
+            if outcome.get("error"):
+                parts.append(f"error={outcome.get('error')}")
+            return " ".join(parts)
         action = outcome.get("action") or name
         topic_id = outcome.get("topic_id")
         if topic_id:
@@ -1112,6 +1229,8 @@ class TopicEditor:
         # d3: in-process idempotency fast path for write tools within a single run
         if name in WRITE_TOOL_NAMES and self._is_idempotent_replay(call, context):
             return {"tool_call_id": call.get("id"), "tool": name, "outcome": "idempotent_replay"}
+        if name in DRAFT_TOOL_NAMES:
+            return self._dispatch_draft_tool(call, context)
         if name == "record_observation":
             if int(context.get("observation_count") or 0) >= 3:
                 self._store_transition({
@@ -1148,7 +1267,9 @@ class TopicEditor:
                 "model": self.model,
             })
             return {"tool_call_id": call["id"], "tool": name, "outcome": "accepted", "action": "observation"}
-        if name in {"post_topic", "post_simple_topic", "post_sectioned_topic", "watch_topic"}:
+        if name in LEGACY_POST_TOOL_NAMES:
+            return self._dispatch_legacy_post_tool(call, context)
+        if name == "watch_topic":
             return self._dispatch_create_topic_tool(call, context)
         if name == "update_topic_source_messages":
             return self._dispatch_update_sources(call, context)
@@ -1156,6 +1277,499 @@ class TopicEditor:
             return self._dispatch_discard(call, context)
         if name == "finalize_run":
             return self._dispatch_finalize_run(call, context)
+        return {"tool_call_id": call["id"], "tool": name, "outcome": "unknown_tool"}
+
+    def _draft_source_ids(self, draft_json: Dict[str, Any]) -> List[str]:
+        ids: List[str] = []
+        for card in draft_json.get("cards") or []:
+            if not isinstance(card, dict):
+                continue
+            for sid in card.get("source_message_ids") or []:
+                sid = str(sid)
+                if sid and sid not in ids:
+                    ids.append(sid)
+        return ids
+
+    def _draft_evidence_and_metadata(
+        self,
+        context: Dict[str, Any],
+        draft_json: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[Tuple[TopicEditorEvidenceItem, ...], Dict[str, Dict[str, Any]]]:
+        wanted_ids = self._draft_source_ids(draft_json or {})
+        rows_by_id: Dict[str, Dict[str, Any]] = {}
+        for message in context.get("messages") or []:
+            mid = str(message.get("message_id") or "")
+            if mid:
+                rows_by_id[mid] = message
+        source_rows = [rows_by_id.get(mid) or {"message_id": mid} for mid in wanted_ids]
+        if not wanted_ids:
+            source_rows = list(rows_by_id.values())
+        source_rows = _rehydrate_topic_editor_evidence_rows(
+            source_rows,
+            db=self.db,
+            guild_id=context.get("guild_id"),
+            environment=self.environment,
+        )
+        evidence = resolve_topic_editor_evidence_shelf(
+            source_rows,
+            db=None,
+            guild_id=context.get("guild_id"),
+            environment=self.environment,
+        )
+        source_metadata = {str(row.get("message_id")): row for row in source_rows if row.get("message_id") is not None}
+        return evidence, source_metadata
+
+    def _serialize_validation_result(self, result: TopicEditorDraftValidationResult) -> Dict[str, Any]:
+        return _canonical_jsonable(result)
+
+    def _draft_state_payload(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "draft_id": state.get("draft_id"),
+            "status": state.get("status"),
+            "revision_number": state.get("revision_number"),
+            "revision_hash": state.get("revision_hash"),
+            "revision_attempts": state.get("revision_attempts"),
+            "latest_valid_preview_hash": state.get("latest_valid_preview_hash"),
+            "topic_id": state.get("topic_id"),
+        }
+
+    def _draft_persistence_payload(
+        self,
+        state: Dict[str, Any],
+        context: Dict[str, Any],
+        *,
+        include_topic_id: bool = False,
+    ) -> Dict[str, Any]:
+        payload = {
+            "draft_id": state.get("draft_id"),
+            "run_id": context.get("run_id") or state.get("run_id"),
+            "guild_id": context.get("guild_id") or state.get("guild_id") or self._resolve_guild_id(),
+            "status": state.get("status"),
+            "draft_json": state.get("draft_json") or {},
+            "validation_result": state.get("latest_validation"),
+            "preview_units": state.get("preview_units"),
+            "publish_result": state.get("publish_result"),
+            "publish_diagnostics": state.get("publish_diagnostics"),
+            "revision_number": state.get("revision_number"),
+            "revision_hash": state.get("revision_hash"),
+            "revision_attempts": state.get("revision_attempts"),
+            "latest_valid_preview_hash": state.get("latest_valid_preview_hash"),
+            "submitted_at": state.get("submitted_at"),
+        }
+        payload["topic_id"] = state.get("topic_id") if include_topic_id else None
+        return payload
+
+    def _persist_draft_state(
+        self,
+        state: Dict[str, Any],
+        context: Dict[str, Any],
+        *,
+        create: bool = False,
+        include_topic_id: bool = False,
+    ) -> None:
+        if not self.db or not state.get("draft_id"):
+            return
+        payload = self._draft_persistence_payload(state, context, include_topic_id=include_topic_id)
+        try:
+            if create and hasattr(self.db, "create_topic_editor_draft"):
+                created = self.db.create_topic_editor_draft(payload, environment=self.environment)
+                if created:
+                    return
+            if hasattr(self.db, "update_topic_editor_draft"):
+                self.db.update_topic_editor_draft(
+                    str(state.get("draft_id")),
+                    payload,
+                    guild_id=payload.get("guild_id"),
+                    environment=self.environment,
+                )
+        except Exception as exc:
+            logger.warning("TopicEditor draft persistence failed: draft_id=%s error=%s", state.get("draft_id"), exc)
+
+    def _state_from_persisted_draft_row(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        draft_json = row.get("draft_json") or {}
+        return {
+            "draft_id": row.get("draft_id"),
+            "run_id": row.get("run_id"),
+            "guild_id": row.get("guild_id"),
+            "draft_json": draft_json,
+            "status": row.get("status") or "drafting",
+            "revision_number": row.get("revision_number") or 1,
+            "revision_hash": row.get("revision_hash") or revision_hash_for_topic_editor_draft(draft_json),
+            "revision_attempts": row.get("revision_attempts") or 0,
+            "latest_validation": row.get("validation_result"),
+            "preview_units": row.get("preview_units"),
+            "latest_valid_preview_hash": row.get("latest_valid_preview_hash"),
+            "topic_id": row.get("topic_id"),
+            "publish_result": row.get("publish_result"),
+            "publish_diagnostics": row.get("publish_diagnostics"),
+            "submitted_at": row.get("submitted_at"),
+        }
+
+    def _load_persisted_draft_state(self, draft_id: str, context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if not draft_id or not self.db or not hasattr(self.db, "get_recent_topic_editor_drafts"):
+            return None
+        try:
+            rows = self.db.get_recent_topic_editor_drafts(
+                guild_id=context.get("guild_id") or self._resolve_guild_id(),
+                environment=self.environment,
+                limit=100,
+                run_id=context.get("run_id"),
+            )
+            if not rows:
+                rows = self.db.get_recent_topic_editor_drafts(
+                    guild_id=context.get("guild_id") or self._resolve_guild_id(),
+                    environment=self.environment,
+                    limit=100,
+                )
+        except Exception:
+            rows = []
+        for row in rows or []:
+            if str(row.get("draft_id") or "") != str(draft_id):
+                continue
+            state = self._state_from_persisted_draft_row(row)
+            self.topic_editor_drafts[draft_id] = state
+            context.setdefault("drafts", {})[draft_id] = state
+            return state
+        return None
+
+    def _apply_draft_patch(self, draft_json: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, Any]:
+        updated = json.loads(json.dumps(draft_json))
+        for key, value in (patch or {}).items():
+            if key == "cards" and isinstance(value, list):
+                updated["cards"] = value
+            elif key in {"topic_key", "template", "headline", "dek", "editor_note"}:
+                updated[key] = value
+            elif key.startswith("cards[") and "]." in key:
+                match = re.match(r"cards\[(\d+)\]\.(\w+)$", key)
+                if not match:
+                    continue
+                idx = int(match.group(1))
+                field_name = match.group(2)
+                cards = updated.setdefault("cards", [])
+                if 0 <= idx < len(cards) and isinstance(cards[idx], dict):
+                    cards[idx][field_name] = value
+        return canonical_topic_editor_draft_json(topic_editor_draft_from_json(updated))
+
+    def _legacy_post_refusal(self, call: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+        args = call.get("input") or {}
+        source_ids = self._unique_ids(args.get("source_message_ids") or [])
+        canonical_key = canonicalize_proposed_key(args.get("proposed_key"), args.get("headline") or "")
+        self._store_transition({
+            "run_id": context.get("run_id"),
+            "guild_id": context.get("guild_id"),
+            "tool_call_id": call.get("id"),
+            "action": "legacy_post_disabled",
+            "reason": "legacy_post_disabled",
+            "payload": shape_transition_payload(
+                outcome="tool_error",
+                tool_name=call.get("name"),
+                canonical_key=canonical_key,
+                proposed_key=args.get("proposed_key"),
+                source_message_ids=source_ids,
+                error="legacy_post_disabled",
+                extra={"legacy_post_mode": self.legacy_post_mode},
+            ),
+            "model": self.model,
+        })
+        return {
+            "tool_call_id": call.get("id"),
+            "tool": call.get("name"),
+            "outcome": "tool_error",
+            "error": "legacy_post_disabled",
+            "legacy_post_mode": self.legacy_post_mode,
+        }
+
+    def _dispatch_legacy_post_tool(self, call: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+        if self.legacy_post_mode == "disabled":
+            return self._legacy_post_refusal(call, context)
+        if self.legacy_post_mode == "draft_adapter":
+            return self._dispatch_legacy_post_adapter(call, context)
+        outcome = self._dispatch_create_topic_tool(call, context)
+        outcome["legacy_direct_post_used"] = True
+        outcome["legacy_post_mode"] = "direct"
+        return outcome
+
+    def _legacy_call_to_draft_args(self, call: Dict[str, Any]) -> Dict[str, Any]:
+        name = call.get("name")
+        args = call.get("input") or {}
+        cards: List[Dict[str, Any]] = []
+        if name in {"post_topic", "post_sectioned_topic"} and args.get("blocks"):
+            try:
+                blocks = normalize_document_blocks(
+                    {"blocks": args.get("blocks") or []},
+                    topic_source_message_ids=args.get("source_message_ids") or [],
+                )
+            except Exception:
+                blocks = []
+            for block in blocks:
+                media_ids: List[str] = []
+                for ref in block_media_refs(block):
+                    try:
+                        media_ids.append(media_ref_to_media_id(ref))
+                    except Exception:
+                        continue
+                cards.append({
+                    "angle": block.get("title") or block.get("type") or "What changed",
+                    "body": block.get("text") or "",
+                    "source_message_ids": block_source_ids(block),
+                    "media_ids": media_ids,
+                })
+        elif name == "post_sectioned_topic" and args.get("sections"):
+            source_ids = self._unique_ids(args.get("source_message_ids") or [])
+            for section in args.get("sections") or []:
+                if not isinstance(section, dict):
+                    continue
+                body = section.get("body") or section.get("text") or ""
+                cards.append({
+                    "angle": section.get("title") or "What changed",
+                    "body": body,
+                    "source_message_ids": source_ids,
+                    "media_ids": [],
+                })
+        else:
+            cards.append({
+                "angle": "What changed",
+                "body": args.get("body") or args.get("summary") or "",
+                "source_message_ids": self._unique_ids(args.get("source_message_ids") or []),
+                "media_ids": [],
+            })
+        return {
+            "draft_id": f"draft-{uuid.uuid4().hex[:12]}",
+            "topic_key": args.get("proposed_key"),
+            "template": "tool_workflow_update",
+            "headline": args.get("headline"),
+            "dek": args.get("dek") or args.get("why_interesting") or args.get("notes") or "",
+            "cards": cards,
+            "editor_note": args.get("notes") or args.get("why_interesting") or "Legacy post adapted through the draft pipeline.",
+        }
+
+    def _dispatch_legacy_post_adapter(self, call: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+        create_call = {
+            "id": f"{call.get('id')}:create_draft",
+            "name": "create_draft",
+            "input": self._legacy_call_to_draft_args(call),
+        }
+        created = self._dispatch_draft_tool(create_call, context)
+        draft_id = created.get("draft_id")
+        if created.get("outcome") != "accepted" or not draft_id:
+            return {
+                "tool_call_id": call.get("id"),
+                "tool": call.get("name"),
+                "outcome": "tool_error",
+                "error": "legacy_draft_adapter_create_failed",
+                "legacy_post_mode": "draft_adapter",
+                "create_result": created,
+            }
+        previewed = self._dispatch_draft_tool(
+            {"id": f"{call.get('id')}:preview_draft", "name": "preview_draft", "input": {"draft_id": draft_id}},
+            context,
+        )
+        if previewed.get("outcome") != "accepted":
+            return {
+                "tool_call_id": call.get("id"),
+                "tool": call.get("name"),
+                "outcome": "blocked_for_submit",
+                "error": "legacy_draft_adapter_preview_failed",
+                "legacy_post_mode": "draft_adapter",
+                "draft_id": draft_id,
+                "preview_result": previewed,
+            }
+        submitted = self._dispatch_draft_tool(
+            {"id": f"{call.get('id')}:submit_draft", "name": "submit_draft", "input": {"draft_id": draft_id}},
+            context,
+        )
+        submitted.update({
+            "tool_call_id": call.get("id"),
+            "tool": call.get("name"),
+            "legacy_post_mode": "draft_adapter",
+            "adapter_draft_id": draft_id,
+            "adapted_draft_id": draft_id,
+        })
+        return submitted
+
+    def _dispatch_draft_tool(self, call: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+        name = call["name"]
+        args = call.get("input") or {}
+        draft_id = str(args.get("draft_id") or "")
+
+        if name == "create_draft":
+            draft_id = str(args.get("draft_id") or f"draft-{uuid.uuid4().hex[:12]}")
+            draft = topic_editor_draft_from_json({
+                "draft_id": draft_id,
+                "topic_key": args.get("topic_key"),
+                "template": args.get("template"),
+                "headline": args.get("headline"),
+                "dek": args.get("dek"),
+                "cards": args.get("cards") or [],
+                "editor_note": args.get("editor_note"),
+            })
+            draft_json = canonical_topic_editor_draft_json(draft)
+            revision_hash = revision_hash_for_topic_editor_draft(draft_json)
+            state = {
+                "draft_id": draft_id,
+                "draft_json": draft_json,
+                "status": "drafting",
+                "revision_number": 1,
+                "revision_hash": revision_hash,
+                "revision_attempts": 0,
+                "latest_validation": None,
+                "preview_units": None,
+                "latest_valid_preview_hash": None,
+                "topic_id": None,
+                "publish_diagnostics": None,
+            }
+            self.topic_editor_drafts[draft_id] = state
+            context.setdefault("drafts", {})[draft_id] = state
+            self._persist_draft_state(state, context, create=True, include_topic_id=False)
+            return {"tool_call_id": call["id"], "tool": name, "outcome": "accepted", **self._draft_state_payload(state), "draft": draft_json}
+
+        state = (
+            self.topic_editor_drafts.get(draft_id)
+            or (context.get("drafts") or {}).get(draft_id)
+            or self._load_persisted_draft_state(draft_id, context)
+        )
+        if not state:
+            return {"tool_call_id": call["id"], "tool": name, "outcome": "tool_error", "error": "draft_not_found", "draft_id": draft_id}
+
+        if name == "edit_draft":
+            if int(state.get("revision_attempts") or 0) >= int(self.draft_limits.max_revision_attempts):
+                state["status"] = "needs_revision"
+                self._persist_draft_state(state, context, include_topic_id=False)
+                return {
+                    "tool_call_id": call["id"],
+                    "tool": name,
+                    "outcome": "max_revision_attempts_exceeded",
+                    "error": "max_revision_attempts_exceeded",
+                    "max_revision_attempts": self.draft_limits.max_revision_attempts,
+                    "required_next_action": "abandon_draft_or_watch_update_discard",
+                    **self._draft_state_payload(state),
+                }
+            draft_json = self._apply_draft_patch(state["draft_json"], args.get("patch") or {})
+            state["draft_json"] = draft_json
+            state["revision_number"] = int(state.get("revision_number") or 1) + 1
+            state["revision_attempts"] = int(state.get("revision_attempts") or 0) + 1
+            state["revision_hash"] = revision_hash_for_topic_editor_draft(draft_json)
+            state["status"] = "drafting"
+            state["latest_validation"] = None
+            state["preview_units"] = None
+            state["latest_valid_preview_hash"] = None
+            state["edit_reason"] = args.get("reason")
+            self._persist_draft_state(state, context, include_topic_id=False)
+            return {"tool_call_id": call["id"], "tool": name, "outcome": "accepted", **self._draft_state_payload(state), "draft": draft_json}
+
+        evidence, source_metadata = self._draft_evidence_and_metadata(context, state["draft_json"])
+        if name == "validate_draft":
+            result = validate_topic_editor_draft(
+                state["draft_json"],
+                evidence,
+                source_metadata,
+                self.draft_limits,
+                mode="draft",
+            )
+            state["latest_validation"] = self._serialize_validation_result(result)
+            state["status"] = result.status
+            self._persist_draft_state(state, context, include_topic_id=False)
+            return {"tool_call_id": call["id"], "tool": name, "outcome": "accepted", **self._draft_state_payload(state), "validation": state["latest_validation"]}
+
+        if name == "preview_draft":
+            result = validate_topic_editor_draft(
+                state["draft_json"],
+                evidence,
+                source_metadata,
+                self.draft_limits,
+                mode="preview",
+            )
+            state["latest_validation"] = self._serialize_validation_result(result)
+            if result.errors:
+                state["status"] = "needs_revision"
+                state["preview_units"] = None
+                state["latest_valid_preview_hash"] = None
+                self._persist_draft_state(state, context, include_topic_id=False)
+                return {"tool_call_id": call["id"], "tool": name, "outcome": "needs_revision", **self._draft_state_payload(state), "validation": state["latest_validation"]}
+            preview_units = preview_topic_editor_draft(
+                state["draft_json"],
+                source_metadata,
+                evidence_shelf=evidence,
+                limits=self.draft_limits,
+            )
+            state["preview_units"] = preview_units
+            state["latest_valid_preview_hash"] = state["revision_hash"]
+            state["status"] = "valid"
+            self._persist_draft_state(state, context, include_topic_id=False)
+            return {"tool_call_id": call["id"], "tool": name, "outcome": "accepted", **self._draft_state_payload(state), "validation": state["latest_validation"], "preview_units": preview_units}
+
+        if name == "submit_draft":
+            result = validate_topic_editor_draft(
+                state["draft_json"],
+                evidence,
+                source_metadata,
+                self.draft_limits,
+                mode="submit",
+                latest_valid_preview_hash=state.get("latest_valid_preview_hash"),
+            )
+            state["latest_validation"] = self._serialize_validation_result(result)
+            if result.errors:
+                state["status"] = "needs_revision" if result.status != "blocked_for_submit" else "blocked_for_submit"
+                self._persist_draft_state(state, context, include_topic_id=False)
+                return {"tool_call_id": call["id"], "tool": name, "outcome": "blocked_for_submit", **self._draft_state_payload(state), "validation": state["latest_validation"]}
+            topic = topic_editor_draft_to_structured_topic(
+                state["draft_json"],
+                evidence_shelf=evidence,
+                guild_id=context.get("guild_id"),
+            )
+            submit_call = {
+                "id": call["id"],
+                "name": "post_topic",
+                "input": {
+                    "proposed_key": topic.get("proposed_key"),
+                    "headline": topic.get("headline"),
+                    "source_message_ids": topic.get("source_message_ids") or [],
+                    "blocks": (topic.get("summary") or {}).get("blocks") or [],
+                    "notes": (topic.get("summary") or {}).get("editor_note"),
+                },
+            }
+            submit_outcome = self._dispatch_create_topic_tool(submit_call, context)
+            if submit_outcome.get("outcome") == "accepted":
+                state["status"] = "submitted"
+                state["topic_id"] = submit_outcome.get("topic_id")
+                state["submitted_at"] = datetime.now(timezone.utc).isoformat()
+                topic_id = submit_outcome.get("topic_id")
+                if topic_id:
+                    self._store_transition({
+                        "topic_id": topic_id,
+                        "run_id": context.get("run_id"),
+                        "guild_id": context.get("guild_id"),
+                        "tool_call_id": call.get("id"),
+                        "to_state": "posted",
+                        "action": "submit_draft",
+                        "reason": state["draft_json"].get("editor_note"),
+                        "payload": shape_transition_payload(
+                            outcome="accepted",
+                            tool_name=name,
+                            canonical_key=topic.get("canonical_key"),
+                            proposed_key=topic.get("proposed_key"),
+                            source_message_ids=topic.get("source_message_ids") or [],
+                            extra={
+                                "draft_id": draft_id,
+                                "revision_hash": state.get("revision_hash"),
+                                "revision_number": state.get("revision_number"),
+                            },
+                        ),
+                        "model": self.model,
+                    })
+                self._persist_draft_state(state, context, include_topic_id=True)
+            else:
+                self._persist_draft_state(state, context, include_topic_id=False)
+            return {"tool_call_id": call["id"], "tool": name, "outcome": submit_outcome.get("outcome"), **self._draft_state_payload(state), "submit_result": submit_outcome, "validation": state["latest_validation"]}
+
+        if name == "abandon_draft":
+            state["status"] = "abandoned"
+            state["topic_id"] = None
+            state["abandon_reason"] = args.get("reason")
+            state["fallback_action"] = args.get("fallback_action")
+            self._persist_draft_state(state, context, include_topic_id=False)
+            return {"tool_call_id": call["id"], "tool": name, "outcome": "accepted", **self._draft_state_payload(state), "reason": args.get("reason"), "fallback_action": args.get("fallback_action")}
+
         return {"tool_call_id": call["id"], "tool": name, "outcome": "unknown_tool"}
 
     def _dispatch_read_tool(self, call: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
@@ -1210,12 +1824,25 @@ class TopicEditor:
                     environment=self.environment,
                 )
             elif name == "get_message_context":
-                result = self.db.get_topic_editor_message_context(
+                messages = self.db.get_topic_editor_message_context(
                     args.get("message_ids") or [],
                     guild_id=context.get("guild_id"),
                     environment=self.environment,
                     limit=10,
                 )
+                evidence_by_id = {
+                    item.message_id: _canonical_jsonable(item)
+                    for item in resolve_topic_editor_evidence_shelf(
+                        messages,
+                        db=self.db,
+                        guild_id=context.get("guild_id"),
+                        environment=self.environment,
+                    )
+                }
+                result = [
+                    dict(message, evidence_item=evidence_by_id.get(str(message.get("message_id"))))
+                    for message in messages
+                ]
             elif name == "understand_image":
                 return self._dispatch_understand_media(call, context, "image")
             elif name == "understand_video":
@@ -2086,6 +2713,7 @@ class TopicEditor:
         topic_id = topic.get("topic_id") if topic else None
         if topic_id:
             topic.setdefault("source_message_ids", source_ids)
+            topic.setdefault("run_id", context.get("run_id"))
             if state == "posted":
                 context.setdefault("created_topics", []).append(topic)
             for message_id in source_ids:
@@ -2686,6 +3314,71 @@ class TopicEditor:
             results.append(await self._publish_topic(topic))
         return results
 
+    def _classify_publish_media_failure(
+        self,
+        unit: Dict[str, Any],
+        error: Any,
+        trace: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        text = " ".join(
+            str(part or "").lower()
+            for part in (
+                error,
+                (trace or {}).get("status"),
+                (trace or {}).get("action"),
+                (trace or {}).get("detail"),
+            )
+        )
+        if any(marker in text for marker in ("expired", "http 403", "http 404", " 403", " 404", "not found", "forbidden", "unauthorized")):
+            return "media_url_expired"
+        if any(marker in text for marker in ("too large", "413", "payload", "entity too large", "file size", "maximum file")):
+            return "media_payload_too_large"
+        if unit.get("send_kind") == "file" and any(marker in text for marker in ("resolve", "resolver", "download_failed", "download http", "empty media url")):
+            return "media_resolver_failed"
+        if any(marker in text for marker in ("send failed", "file_send_failed", "file_batch_send_failed", "fallback_url")):
+            return "media_send_failed"
+        return "media_unknown_failure"
+
+    def _record_publish_media_failure(
+        self,
+        diagnostics: Dict[str, Any],
+        unit: Dict[str, Any],
+        error: Any,
+        *,
+        trace: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if unit.get("send_kind") not in {"file_url", "file", "url"}:
+            return
+        reason_code = self._classify_publish_media_failure(unit, error, trace)
+        reason_codes = diagnostics.setdefault("reason_codes", [])
+        if reason_code not in reason_codes:
+            reason_codes.append(reason_code)
+        ref = unit.get("ref") or {}
+        entry = {
+            "reason_code": reason_code,
+            "message_id": str(ref.get("message_id") or "") or None,
+            "source_message_id": str(ref.get("message_id") or "") or None,
+            "media_ref": ref or None,
+            "error": str(error or "")[:300],
+            "trace": trace or None,
+        }
+        failures = diagnostics.setdefault("media_failures", [])
+        if entry not in failures:
+            failures.append(entry)
+
+    def _attach_publish_diagnostics_to_matching_draft(
+        self,
+        topic_id: str,
+        status: str,
+        diagnostics: Dict[str, Any],
+    ) -> None:
+        for state in self.topic_editor_drafts.values():
+            if str(state.get("topic_id") or "") != str(topic_id):
+                continue
+            state["publish_result"] = {"topic_id": topic_id, "status": status}
+            state["publish_diagnostics"] = diagnostics
+            self._persist_draft_state(state, state, include_topic_id=True)
+
     def _format_trace_messages(
         self,
         run_id: str,
@@ -3056,6 +3749,17 @@ class TopicEditor:
 
             # Build ordered publish units (text + media interleaved)
             publish_units = render_topic_publish_units(topic, source_metadata=source_metadata)
+            publish_diagnostics: Dict[str, Any] = {
+                "renderer_safety_chunking_used": any(
+                    unit.get("kind", "text") == "text"
+                    and len(str(unit.get("content") or "")) > 2000
+                    for unit in publish_units
+                ),
+                "reason_codes": [],
+                "media_failures": [],
+            }
+            if publish_diagnostics["renderer_safety_chunking_used"]:
+                publish_diagnostics["reason_codes"].append("renderer_safety_chunking_used")
 
             # Flatten units through paragraph-aware chunking (used for suppressed
             # mode and fallback text display — NOT the primary send path).
@@ -3101,6 +3805,7 @@ class TopicEditor:
                     "flat_messages": flat_messages,
                     "media_indices": sorted(media_indices),
                     "source_media_counts": media_source_counts,
+                    "publish_diagnostics": publish_diagnostics,
                 }
 
             # Build send units from publish_units.
@@ -3146,8 +3851,28 @@ class TopicEditor:
                         if batch_error:
                             error = batch_error
                             had_failure = True
+                            self._record_publish_media_failure(
+                                publish_diagnostics,
+                                batch[0],
+                                batch_error,
+                                trace=batch_traces[-1] if batch_traces else None,
+                            )
                         if not batch_sent_ids:
                             had_failure = True
+                            self._record_publish_media_failure(
+                                publish_diagnostics,
+                                batch[0],
+                                batch_error or "media batch send returned no message id",
+                                trace=batch_traces[-1] if batch_traces else None,
+                            )
+                        for trace in batch_traces:
+                            if trace.get("status") in {"download_failed", "file_batch_send_failed"}:
+                                self._record_publish_media_failure(
+                                    publish_diagnostics,
+                                    batch[0],
+                                    trace.get("detail") or trace.get("status"),
+                                    trace=trace,
+                                )
                         continue
 
                     unit_sent_id, unit_error, unit_trace = await self._send_one_unit(
@@ -3161,8 +3886,27 @@ class TopicEditor:
                     if unit_error:
                         error = unit_error  # last error for top-level reporting
                         had_failure = True
+                        self._record_publish_media_failure(
+                            publish_diagnostics,
+                            unit,
+                            unit_error,
+                            trace=unit_trace,
+                        )
                     if unit_sent_id is None:
                         had_failure = True
+                        self._record_publish_media_failure(
+                            publish_diagnostics,
+                            unit,
+                            unit_error or "send returned no message id",
+                            trace=unit_trace,
+                        )
+                    if unit_trace and unit_trace.get("status") in {"file_send_failed", "exception_fallback", "download_failed", "resolver_failed"}:
+                        self._record_publish_media_failure(
+                            publish_diagnostics,
+                            unit,
+                            unit_trace.get("detail") or unit_trace.get("status"),
+                            trace=unit_trace,
+                        )
             except Exception as exc:
                 error = str(exc)
                 had_failure = True
@@ -3185,6 +3929,23 @@ class TopicEditor:
                 "last_published_at": datetime.now(timezone.utc).isoformat() if sent_ids else None,
             }
             self.db.update_topic(topic_id, updates, guild_id=guild_id, environment=self.environment)
+            self._attach_publish_diagnostics_to_matching_draft(topic_id, status, publish_diagnostics)
+            if topic.get("run_id"):
+                self._store_transition({
+                    "topic_id": topic_id,
+                    "run_id": topic.get("run_id"),
+                    "guild_id": guild_id,
+                    "action": f"publish_{status}",
+                    "reason": error,
+                    "payload": shape_transition_payload(
+                        outcome=status,
+                        tool_name="publish_topic",
+                        source_message_ids=all_source_ids,
+                        error=error,
+                        extra={"publish_diagnostics": publish_diagnostics},
+                    ),
+                    "model": self.model,
+                })
             return {
                 "topic_id": topic_id,
                 "status": status,
@@ -3193,6 +3954,7 @@ class TopicEditor:
                 "media_count": len(media_indices),
                 "flat_message_count": len(flat_messages),
                 "source_media_counts": media_source_counts,
+                "publish_diagnostics": publish_diagnostics,
             }
 
         # --- Legacy simple-topic path (no blocks) ---
@@ -3395,10 +4157,19 @@ class TopicEditor:
                         "action": "fallback_url",
                         "detail": str(exc)[:200],
                     })
-                    sent = await channel.send(source_url)
-                    mid = getattr(sent, "id", None)
-                    if mid is not None:
-                        sent_ids.append(int(mid))
+                    try:
+                        sent = await channel.send(source_url)
+                        mid = getattr(sent, "id", None)
+                        if mid is not None:
+                            sent_ids.append(int(mid))
+                    except Exception as fallback_exc:
+                        error = str(fallback_exc)
+                        traces.append({
+                            "url": safe_url,
+                            "status": "fallback_url_send_failed",
+                            "action": "fallback_failed",
+                            "detail": str(fallback_exc)[:200],
+                        })
 
             if not handles:
                 return sent_ids, error, traces
@@ -3424,10 +4195,20 @@ class TopicEditor:
                 )
                 for unit in units:
                     source_url = unit.get("source_url") or unit.get("fallback_url") or ""
-                    sent = await channel.send(source_url)
-                    mid = getattr(sent, "id", None)
-                    if mid is not None:
-                        sent_ids.append(int(mid))
+                    safe_url = sanitise_url_for_logs(source_url)
+                    try:
+                        sent = await channel.send(source_url)
+                        mid = getattr(sent, "id", None)
+                        if mid is not None:
+                            sent_ids.append(int(mid))
+                    except Exception as fallback_exc:
+                        error = str(fallback_exc)
+                        traces.append({
+                            "url": safe_url,
+                            "status": "fallback_url_send_failed",
+                            "action": "fallback_failed",
+                            "detail": str(fallback_exc)[:200],
+                        })
                 traces.append({
                     "status": "file_batch_send_failed",
                     "action": "fallback_url",
@@ -4124,6 +4905,287 @@ def normalize_media_ref(ref: Dict[str, Any]) -> Dict[str, Any]:
     return {"message_id": message_id, "kind": kind, "index": index}
 
 
+DRAFT_RUNTIME_FIELDS = {
+    "validation_result",
+    "preview_units",
+    "created_at",
+    "updated_at",
+    "submitted_at",
+    "publish_result",
+    "publish_diagnostics",
+    "latest_valid_preview_hash",
+    "revision_hash",
+    "revision_number",
+    "revision_attempts",
+    "status",
+}
+
+
+@dataclass(frozen=True)
+class TopicEditorDraftLimits:
+    """Configurable draft limits used by validation and agent tooling."""
+
+    headline_target_chars: int = 110
+    dek_target_chars: int = 220
+    card_body_max_chars: int = 650
+    max_cards: int = 4
+    max_revision_attempts: int = 3
+    sources_per_card_warning: int = 4
+    discord_content_limit: int = 2000
+
+
+@dataclass(frozen=True)
+class TopicEditorDraftCard:
+    """One focused editorial card in a publishable draft."""
+
+    angle: str
+    body: str
+    source_message_ids: Tuple[str, ...] = field(default_factory=tuple)
+    media_ids: Tuple[str, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
+class TopicEditorEvidenceMedia:
+    """Normalized media item available to a draft."""
+
+    media_id: str
+    kind: str
+    source_url: Optional[str] = None
+    thumbnail_url: Optional[str] = None
+    description: Optional[str] = None
+    aesthetic_quality: Optional[int] = None
+    editorial_notes: Tuple[str, ...] = field(default_factory=tuple)
+    media_ref: Optional[Dict[str, Any]] = None
+    strong_media: bool = False
+
+
+@dataclass(frozen=True)
+class TopicEditorEvidenceItem:
+    """Normalized source-message evidence available to a draft."""
+
+    message_id: str
+    author: Optional[str] = None
+    content: Optional[str] = None
+    jump_url: Optional[str] = None
+    reaction_count: int = 0
+    media: Tuple[TopicEditorEvidenceMedia, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
+class TopicEditorDraft:
+    """Canonical draft document edited before topic publication."""
+
+    draft_id: str
+    topic_key: str
+    template: str
+    headline: str
+    dek: str
+    cards: Tuple[TopicEditorDraftCard, ...]
+    editor_note: str
+
+
+@dataclass(frozen=True)
+class TopicEditorDraftValidationIssue:
+    path: str
+    message: str
+    suggestion: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class TopicEditorDraftValidationResult:
+    status: str
+    errors: Tuple[TopicEditorDraftValidationIssue, ...] = field(default_factory=tuple)
+    warnings: Tuple[TopicEditorDraftValidationIssue, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
+class TopicEditorDraftPreviewUnit:
+    type: str
+    content: Optional[str] = None
+    media_id: Optional[str] = None
+    description: Optional[str] = None
+    source_message_id: Optional[str] = None
+    source_url: Optional[str] = None
+
+
+def topic_editor_draft_limits_from_config(config: Optional[Dict[str, Any]] = None) -> TopicEditorDraftLimits:
+    """Build draft limits from a loose config/env-style mapping."""
+    config = config or {}
+
+    def _int_value(name: str, default: int) -> int:
+        raw = config.get(name)
+        if raw is None:
+            return default
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return default
+
+    defaults = TopicEditorDraftLimits()
+    return TopicEditorDraftLimits(
+        headline_target_chars=_int_value("headline_target_chars", defaults.headline_target_chars),
+        dek_target_chars=_int_value("dek_target_chars", defaults.dek_target_chars),
+        card_body_max_chars=_int_value("card_body_max_chars", defaults.card_body_max_chars),
+        max_cards=_int_value("max_cards", defaults.max_cards),
+        max_revision_attempts=_int_value("max_revision_attempts", defaults.max_revision_attempts),
+        sources_per_card_warning=_int_value("sources_per_card_warning", defaults.sources_per_card_warning),
+        discord_content_limit=_int_value("discord_content_limit", defaults.discord_content_limit),
+    )
+
+
+def _canonical_jsonable(value: Any) -> Any:
+    if is_dataclass(value):
+        value = asdict(value)
+    if isinstance(value, dict):
+        return {
+            str(key): _canonical_jsonable(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            if item is not None
+        }
+    if isinstance(value, (list, tuple)):
+        return [_canonical_jsonable(item) for item in value]
+    return value
+
+
+def canonical_topic_editor_draft_json(draft: TopicEditorDraft | Dict[str, Any]) -> Dict[str, Any]:
+    """Return the stable publishable draft JSON, excluding runtime diagnostics."""
+    raw = _canonical_jsonable(draft)
+    if not isinstance(raw, dict):
+        raise ValueError("draft must serialize to an object")
+    return {
+        key: raw[key]
+        for key in sorted(raw.keys())
+        if key not in DRAFT_RUNTIME_FIELDS
+    }
+
+
+def serialize_topic_editor_draft(draft: TopicEditorDraft | Dict[str, Any]) -> str:
+    """Serialize draft content with deterministic key ordering and separators."""
+    return json.dumps(
+        canonical_topic_editor_draft_json(draft),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+
+
+def revision_hash_for_topic_editor_draft(draft: TopicEditorDraft | Dict[str, Any]) -> str:
+    """Hash meaningful draft content while ignoring volatile runtime fields."""
+    return hashlib.sha256(serialize_topic_editor_draft(draft).encode("utf-8")).hexdigest()
+
+
+def topic_editor_draft_from_json(payload: Dict[str, Any]) -> TopicEditorDraft:
+    """Parse loose draft JSON into canonical dataclasses."""
+    cards = []
+    for card in payload.get("cards") or []:
+        if not isinstance(card, dict):
+            continue
+        cards.append(TopicEditorDraftCard(
+            angle=str(card.get("angle") or ""),
+            body=str(card.get("body") or ""),
+            source_message_ids=tuple(str(sid) for sid in (card.get("source_message_ids") or []) if sid),
+            media_ids=tuple(str(mid) for mid in (card.get("media_ids") or []) if mid),
+        ))
+    return TopicEditorDraft(
+        draft_id=str(payload.get("draft_id") or ""),
+        topic_key=str(payload.get("topic_key") or ""),
+        template=str(payload.get("template") or ""),
+        headline=str(payload.get("headline") or ""),
+        dek=str(payload.get("dek") or ""),
+        cards=tuple(cards),
+        editor_note=str(payload.get("editor_note") or ""),
+    )
+
+
+def _evidence_media_by_id(
+    evidence_shelf: Optional[Sequence[TopicEditorEvidenceItem | Dict[str, Any]]] = None,
+) -> Dict[str, Dict[str, Any]]:
+    media_by_id: Dict[str, Dict[str, Any]] = {}
+    for item in evidence_shelf or []:
+        item_obj = _canonical_jsonable(item)
+        if not isinstance(item_obj, dict):
+            continue
+        for media in item_obj.get("media") or []:
+            if not isinstance(media, dict):
+                continue
+            media_id = str(media.get("media_id") or "")
+            if media_id:
+                media_by_id[media_id] = media
+    return media_by_id
+
+
+def _evidence_media_by_ref(
+    evidence_shelf: Optional[Sequence[TopicEditorEvidenceItem | Dict[str, Any]]] = None,
+) -> Dict[str, Dict[str, Any]]:
+    media_by_ref: Dict[str, Dict[str, Any]] = {}
+    for media_id, media in _evidence_media_by_id(evidence_shelf).items():
+        try:
+            ref_id = media_ref_to_media_id(media.get("media_ref") or media_id_to_media_ref(media_id))
+        except (ValueError, TypeError):
+            continue
+        media_by_ref[ref_id] = media
+    return media_by_ref
+
+
+def topic_editor_draft_to_structured_topic(
+    draft: TopicEditorDraft | Dict[str, Any],
+    *,
+    evidence_shelf: Optional[Sequence[TopicEditorEvidenceItem | Dict[str, Any]]] = None,
+    guild_id: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Convert a draft into the existing structured-topic shape.
+
+    The conversion preserves card order, inline citation markers in body text,
+    source-message ID ordering, and media ordering. Media IDs are resolved from
+    the evidence shelf when present, with a conservative canonical-id fallback
+    for ``message_id:kind:index`` values.
+    """
+    parsed = topic_editor_draft_from_json(draft) if isinstance(draft, dict) else draft
+    media_by_id = _evidence_media_by_id(evidence_shelf)
+    blocks: List[Dict[str, Any]] = []
+    topic_source_ids: List[str] = []
+
+    for index, card in enumerate(parsed.cards):
+        source_ids = list(dict.fromkeys(str(sid) for sid in card.source_message_ids if sid))
+        for sid in source_ids:
+            if sid not in topic_source_ids:
+                topic_source_ids.append(sid)
+
+        media_refs: List[Dict[str, Any]] = []
+        for media_id in card.media_ids:
+            media = media_by_id.get(str(media_id), {})
+            raw_ref = media.get("media_ref") or media_id_to_media_ref(str(media_id))
+            if raw_ref:
+                media_refs.append(normalize_media_ref(raw_ref))
+
+        blocks.append({
+            "type": "intro" if index == 0 else "section",
+            "title": card.angle if index > 0 and card.angle else None,
+            "text": card.body,
+            "source_message_ids": source_ids,
+            "media_refs": media_refs,
+            "draft_card_angle": card.angle,
+            "draft_media_ids": list(card.media_ids),
+        })
+
+    topic: Dict[str, Any] = {
+        "proposed_key": parsed.topic_key,
+        "canonical_key": parsed.topic_key,
+        "headline": parsed.headline,
+        "summary": {
+            "body": parsed.dek,
+            "blocks": blocks,
+            "draft_id": parsed.draft_id,
+            "template": parsed.template,
+            "editor_note": parsed.editor_note,
+        },
+        "source_message_ids": topic_source_ids,
+    }
+    if guild_id is not None:
+        topic["guild_id"] = guild_id
+    return topic
+
+
 
 def normalize_document_blocks(
     summary: Dict[str, Any],
@@ -4243,6 +5305,291 @@ def block_media_refs(block: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [normalize_media_ref(r) for r in (block.get("media_refs") or [])]
 
 
+def media_ref_to_media_id(ref: Dict[str, Any]) -> str:
+    """Return the canonical media ID for a media ref.
+
+    Media IDs are derived only from ``normalize_media_ref`` so the evidence
+    shelf, draft JSON, validation, preview, and publisher all share one
+    normalization path.
+    """
+    normalized = normalize_media_ref(ref)
+    return f"{normalized['message_id']}:{normalized['kind']}:{normalized['index']}"
+
+
+def media_id_to_media_ref(media_id: str) -> Dict[str, Any]:
+    """Parse a canonical ``message_id:kind:index`` media ID into a media ref."""
+    parts = str(media_id or "").rsplit(":", 2)
+    if len(parts) != 3:
+        raise ValueError("media_id must have shape 'message_id:kind:index'")
+    message_id, kind, index = parts
+    return normalize_media_ref({"message_id": message_id, "kind": kind, "index": index})
+
+
+def _json_list(value: Any) -> List[Dict[str, Any]]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    if isinstance(value, dict):
+        return [value]
+    if isinstance(value, str):
+        try:
+            return _json_list(json.loads(value))
+        except (json.JSONDecodeError, TypeError):
+            return []
+    return []
+
+
+def _message_id_value(message: Dict[str, Any]) -> str:
+    return str(message.get("message_id") or "")
+
+
+def _message_jump_url(message: Dict[str, Any]) -> Optional[str]:
+    if message.get("jump_url"):
+        return str(message["jump_url"])
+    guild_id = message.get("guild_id")
+    channel_id = message.get("channel_id")
+    message_id = message.get("message_id")
+    if guild_id and channel_id and message_id:
+        return f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
+    return None
+
+
+def _evidence_author_name(message: Dict[str, Any]) -> Optional[str]:
+    snapshot = message.get("author_context_snapshot") or {}
+    value = (
+        message.get("author")
+        or message.get("author_name")
+        or snapshot.get("server_nick")
+        or snapshot.get("global_name")
+        or snapshot.get("display_name")
+        or snapshot.get("username")
+        or message.get("author_id")
+    )
+    return str(value) if value is not None and str(value) else None
+
+
+def _media_understanding_by_attachment_index(message: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
+    by_index: Dict[int, Dict[str, Any]] = {}
+    for item in message.get("media_understandings") or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            index = int(item.get("attachment_index"))
+        except (TypeError, ValueError):
+            continue
+        existing = by_index.get(index, {})
+        existing_score = existing.get("aesthetic_quality")
+        new_score = item.get("aesthetic_quality")
+        try:
+            should_replace = existing == {} or int(new_score or 0) >= int(existing_score or 0)
+        except (TypeError, ValueError):
+            should_replace = existing == {}
+        if should_replace:
+            by_index[index] = item
+    return by_index
+
+
+def _media_description(
+    *,
+    ref: Dict[str, Any],
+    metadata: Dict[str, Any],
+    understanding: Optional[Dict[str, Any]] = None,
+) -> str:
+    if understanding:
+        for key in ("summary", "visual_read", "subject", "technical_signal"):
+            value = understanding.get(key)
+            if value:
+                return str(value)
+    kind = ref.get("kind")
+    index = int(ref.get("index", 0))
+    if kind == "attachment":
+        attachments = _json_list(metadata.get("attachments"))
+        if 0 <= index < len(attachments):
+            attachment = attachments[index]
+            filename = attachment.get("filename")
+            content_type = attachment.get("content_type")
+            if filename and content_type:
+                return f"Attachment {index}: {filename} ({content_type})."
+            if filename:
+                return f"Attachment {index}: {filename}."
+            if content_type:
+                return f"Attachment {index}: {content_type}."
+        return f"Attachment {index} from source message."
+    if kind == "embed":
+        embeds = _json_list(metadata.get("embeds"))
+        if 0 <= index < len(embeds):
+            embed = embeds[index]
+            title = embed.get("title")
+            url = _resolve_media_url_from_metadata(ref, metadata)
+            if title:
+                return f"Embed {index}: {title}."
+            if url:
+                return f"Embed {index}: {url}."
+        return f"Embed {index} from source message."
+    if kind == "external":
+        url = _resolve_media_url_from_metadata(ref, metadata)
+        return f"External media link: {url}." if url else f"External media link {index} from source message."
+    return f"Media {media_ref_to_media_id(ref)}."
+
+
+def _media_quality_score(ref: Dict[str, Any], understanding: Optional[Dict[str, Any]]) -> Optional[int]:
+    if not understanding:
+        return None
+    for key in ("aesthetic_quality", "highlight_score", "production_quality"):
+        value = understanding.get(key)
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _media_editorial_notes(ref: Dict[str, Any], understanding: Optional[Dict[str, Any]]) -> Tuple[str, ...]:
+    notes: List[str] = []
+    if understanding:
+        for key in ("technical_signal", "edit_value", "cautions", "boundary_notes"):
+            value = understanding.get(key)
+            if value:
+                notes.append(str(value))
+    if not notes and ref.get("kind") == "attachment":
+        notes.append("Conservative attachment description; run media understanding if visual detail matters.")
+    return tuple(notes)
+
+
+def _iter_message_media_refs(message: Dict[str, Any]) -> List[Dict[str, Any]]:
+    message_id = _message_id_value(message)
+    if not message_id:
+        return []
+
+    refs: List[Dict[str, Any]] = []
+    for index, _attachment in enumerate(_json_list(message.get("attachments"))):
+        refs.append(normalize_media_ref({"message_id": message_id, "kind": "attachment", "index": index}))
+    for index, _embed in enumerate(_json_list(message.get("embeds"))):
+        refs.append(normalize_media_ref({"message_id": message_id, "kind": "embed", "index": index}))
+    for external in extract_external_urls(message):
+        refs.append(normalize_media_ref({
+            "message_id": message_id,
+            "kind": external.get("kind", "external"),
+            "index": external.get("index", 0),
+        }))
+    return refs
+
+
+def _rehydrate_topic_editor_evidence_rows(
+    messages: Sequence[Dict[str, Any]],
+    *,
+    db: Optional[Any] = None,
+    guild_id: Optional[Any] = None,
+    environment: str = "prod",
+) -> List[Dict[str, Any]]:
+    ids = [_message_id_value(message) for message in messages if _message_id_value(message)]
+    if not ids or db is None or not hasattr(db, "get_topic_editor_source_messages"):
+        return [dict(message) for message in messages]
+
+    try:
+        archive_rows = db.get_topic_editor_source_messages(
+            ids,
+            guild_id=guild_id,
+            environment=environment,
+            limit=max(len(ids), 1),
+        )
+    except Exception:
+        archive_rows = []
+
+    archive_by_id = {
+        _message_id_value(row): row
+        for row in archive_rows or []
+        if isinstance(row, dict) and _message_id_value(row)
+    }
+
+    hydrated: List[Dict[str, Any]] = []
+    for message in messages:
+        message_id = _message_id_value(message)
+        archive = dict(archive_by_id.get(message_id, {}))
+        merged = dict(message)
+        if archive:
+            merged.update(archive)
+            if message.get("media_understandings") and not merged.get("media_understandings"):
+                merged["media_understandings"] = message.get("media_understandings")
+            if message.get("author_name") and not merged.get("author_name"):
+                merged["author_name"] = message.get("author_name")
+        hydrated.append(merged)
+    return hydrated
+
+
+def resolve_topic_editor_evidence_shelf(
+    messages: Sequence[Dict[str, Any]],
+    *,
+    db: Optional[Any] = None,
+    guild_id: Optional[Any] = None,
+    environment: str = "prod",
+    config: Optional[Dict[str, Any]] = None,
+) -> Tuple[TopicEditorEvidenceItem, ...]:
+    """Normalize source messages into the draft evidence shelf.
+
+    Compact read-tool rows are treated as ID hints: when a DB resolver is
+    available this first rehydrates them through archived source-message storage
+    so media IDs, descriptions, URLs, and jump links come from the canonical
+    archived message shape.
+    """
+    config = config or {}
+    strong_quality_threshold = int(config.get("strong_media_min_aesthetic_quality", 6) or 6)
+    strong_reaction_threshold = int(config.get("strong_media_min_reaction_count", 5) or 5)
+
+    hydrated = _rehydrate_topic_editor_evidence_rows(
+        messages,
+        db=db,
+        guild_id=guild_id,
+        environment=environment,
+    )
+
+    shelf: List[TopicEditorEvidenceItem] = []
+    for message in hydrated:
+        if not isinstance(message, dict):
+            continue
+        message_id = _message_id_value(message)
+        if not message_id:
+            continue
+        understandings = _media_understanding_by_attachment_index(message)
+        reaction_count = 0
+        try:
+            reaction_count = int(message.get("reaction_count") or 0)
+        except (TypeError, ValueError):
+            reaction_count = 0
+
+        media_items: List[TopicEditorEvidenceMedia] = []
+        for ref in _iter_message_media_refs(message):
+            understanding = understandings.get(int(ref.get("index", 0))) if ref.get("kind") == "attachment" else None
+            media_id = media_ref_to_media_id(ref)
+            quality = _media_quality_score(ref, understanding)
+            strong_media = (
+                quality is not None and quality >= strong_quality_threshold
+            ) or reaction_count >= strong_reaction_threshold
+            media_items.append(TopicEditorEvidenceMedia(
+                media_id=media_id,
+                kind=str(ref.get("kind") or "attachment"),
+                source_url=_resolve_media_url_from_metadata(ref, message),
+                thumbnail_url=None,
+                description=_media_description(ref=ref, metadata=message, understanding=understanding),
+                aesthetic_quality=quality,
+                editorial_notes=_media_editorial_notes(ref, understanding),
+                media_ref=ref,
+                strong_media=strong_media,
+            ))
+
+        shelf.append(TopicEditorEvidenceItem(
+            message_id=message_id,
+            author=_evidence_author_name(message),
+            content=str(message.get("content") or message.get("clean_content") or ""),
+            jump_url=_message_jump_url(message),
+            reaction_count=reaction_count,
+            media=tuple(media_items),
+        ))
+
+    return tuple(shelf)
+
+
 def collect_document_source_ids(blocks: List[Dict[str, Any]]) -> List[str]:
     """Return the distinct union of all block-level source message IDs."""
     seen: Set[str] = set()
@@ -4359,21 +5706,50 @@ def render_topic_publish_units(
         if block_text:
             lines.append(block_text)
 
-        # Per-block citations. Discord does not render Markdown link syntax
-        # like ``[label](url)``, so include the actual jump URLs next to the
-        # relevant block instead of emitting fake inline links.
-        if ordered_ids:
+        # Build inline citation map: idx → jump_url and idx → sid.
+        # Negative lookahead (?!\() skips pre-existing [N](url) markdown links.
+        idx_to_url: Dict[int, str] = {}
+        idx_to_sid: Dict[int, str] = {}
+        for idx, sid in enumerate(ordered_ids, start=1):
+            meta = meta_by_id.get(sid, {})
+            guild_id = meta.get("guild_id") or topic.get("guild_id")
+            channel_id = meta.get("channel_id")
+            if guild_id and channel_id and sid:
+                idx_to_url[idx] = (
+                    f"https://discord.com/channels/{guild_id}/"
+                    f"{channel_id}/{sid}"
+                )
+            idx_to_sid[idx] = sid
+
+        # Attempt inline [N] → [N](jump_url) substitution in block body.
+        if block_text and idx_to_url:
+            def _sub_citation(m: re.Match) -> str:
+                n = int(m.group(1))
+                url = idx_to_url.get(n)
+                if url is not None:
+                    return f"[{n}]({url})"
+                return m.group(0)  # out-of-range / unresolvable → literal
+
+            substituted_text = re.sub(
+                r"\[(\d{1,2})\](?!\()", _sub_citation, block_text
+            )
+            inline_substituted = substituted_text != block_text
+        else:
+            substituted_text = block_text
+            inline_substituted = False
+
+        if inline_substituted:
+            # Swap the raw body line with the substituted version so
+            # the trailing Sources: line is omitted for this block.
+            lines = [
+                substituted_text if ln == block_text else ln
+                for ln in lines
+            ]
+        elif ordered_ids:
+            # Fallback: no inline markers resolved → trailing Sources: line
             citation_parts: List[str] = []
-            for idx, sid in enumerate(ordered_ids, start=1):
-                meta = meta_by_id.get(sid, {})
-                guild_id = meta.get("guild_id") or topic.get("guild_id")
-                channel_id = meta.get("channel_id")
-                url = ""
-                if guild_id and channel_id and sid:
-                    url = (
-                        f"https://discord.com/channels/{guild_id}/"
-                        f"{channel_id}/{sid}"
-                    )
+            for idx, sid in idx_to_sid.items():
+                url = idx_to_url.get(idx, "")
                 if url:
                     citation_parts.append(f"[{idx}] <{url}>")
                 else:
@@ -4417,6 +5793,336 @@ def render_topic_publish_units(
     return units
 
 
+def render_draft_publish_units(
+    draft: TopicEditorDraft | Dict[str, Any],
+    source_metadata: Dict[str, Dict[str, Any]],
+    *,
+    evidence_shelf: Optional[Sequence[TopicEditorEvidenceItem | Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    """Render a draft through the same structured-topic renderer used by publish.
+
+    The returned units are intentionally unchunked. Validation and preview
+    callers can inspect these exact renderer units before publisher fallback
+    chunking is allowed to run.
+    """
+    parsed = topic_editor_draft_from_json(draft) if isinstance(draft, dict) else draft
+    guild_id = None
+    for row in (source_metadata or {}).values():
+        if isinstance(row, dict) and row.get("guild_id"):
+            guild_id = row.get("guild_id")
+            break
+    topic = topic_editor_draft_to_structured_topic(
+        parsed,
+        evidence_shelf=evidence_shelf,
+        guild_id=guild_id,
+    )
+    rendered = render_topic_publish_units(topic, source_metadata=source_metadata)
+    if not parsed.dek or not rendered:
+        return rendered
+
+    headline = _clean_render_text(parsed.headline or parsed.topic_key or "Untitled")
+    header = f"## {headline}"
+    intro_prefix = header + "\n\n"
+    units: List[Dict[str, Any]] = [{"kind": "text", "content": f"{header}\n\n{_clean_render_text(parsed.dek)}"}]
+    for index, unit in enumerate(rendered):
+        if index == 0 and unit.get("kind") == "text":
+            content = str(unit.get("content") or "")
+            if content.startswith(intro_prefix):
+                content = content[len(intro_prefix):]
+            units.append(dict(unit, content=content))
+        else:
+            units.append(unit)
+    return units
+
+
+def preview_topic_editor_draft(
+    draft: TopicEditorDraft | Dict[str, Any],
+    source_metadata: Dict[str, Dict[str, Any]],
+    *,
+    evidence_shelf: Optional[Sequence[TopicEditorEvidenceItem | Dict[str, Any]]] = None,
+    limits: Optional[TopicEditorDraftLimits] = None,
+) -> List[Dict[str, Any]]:
+    """Return ordered Discord preview units for a draft.
+
+    Media units include evidence descriptions and source/fallback URLs. Text
+    length safety is computed against unchunked renderer output.
+    """
+    limits = limits or TopicEditorDraftLimits()
+    revision_hash = revision_hash_for_topic_editor_draft(draft)
+    publish_units = render_draft_publish_units(
+        draft,
+        source_metadata,
+        evidence_shelf=evidence_shelf,
+    )
+    safety_chunking_would_be_needed = any(
+        unit.get("kind") == "text"
+        and len(str(unit.get("content") or "")) > limits.discord_content_limit
+        for unit in publish_units
+    )
+    media_by_ref = _evidence_media_by_ref(evidence_shelf)
+
+    preview_units: List[Dict[str, Any]] = []
+    for unit in publish_units:
+        kind = unit.get("kind", "text")
+        if kind == "text":
+            preview_units.append({
+                "type": "text",
+                "content": str(unit.get("content") or ""),
+                "revision_hash": revision_hash,
+                "safety_chunking_would_be_needed": safety_chunking_would_be_needed,
+            })
+            continue
+
+        ref = normalize_media_ref(unit.get("ref") or {})
+        media_id = media_ref_to_media_id(ref)
+        evidence_media = media_by_ref.get(media_id, {})
+        source_message_id = str(ref.get("message_id") or "")
+        source_meta = source_metadata.get(source_message_id, {}) if source_metadata else {}
+        source_url = unit.get("url") or unit.get("fallback_url") or evidence_media.get("source_url")
+        description = (
+            evidence_media.get("description")
+            or _media_description(ref=ref, metadata=source_meta, understanding=None)
+        )
+        preview_units.append({
+            "type": "media",
+            "media_id": media_id,
+            "description": description,
+            "source_message_id": source_message_id,
+            "source_url": source_url,
+            "fallback_url": source_url,
+            "revision_hash": revision_hash,
+            "safety_chunking_would_be_needed": safety_chunking_would_be_needed,
+        })
+
+    return preview_units
+
+
+def _validation_issue(path: str, message: str, suggestion: Optional[str] = None) -> TopicEditorDraftValidationIssue:
+    return TopicEditorDraftValidationIssue(path=path, message=message, suggestion=suggestion)
+
+
+def _draft_cards(draft: TopicEditorDraft | Dict[str, Any]) -> Tuple[TopicEditorDraftCard, ...]:
+    parsed = topic_editor_draft_from_json(draft) if isinstance(draft, dict) else draft
+    return parsed.cards
+
+
+def _citation_markers(text: str) -> List[int]:
+    markers: List[int] = []
+    for match in re.finditer(r"\[(\d{1,2})\](?!\()", text or ""):
+        try:
+            markers.append(int(match.group(1)))
+        except (TypeError, ValueError):
+            continue
+    return markers
+
+
+def _looks_like_digest(text: str) -> bool:
+    lowered = (text or "").lower()
+    digest_terms = ("roundup", "digest", "meanwhile", "also", "in other news")
+    return any(term in lowered for term in digest_terms) or len(re.split(r"[.;]", text or "")) > 6
+
+
+def _quote_count(text: str) -> int:
+    return str(text or "").count('"') + str(text or "").count("'")
+
+
+def validate_topic_editor_draft(
+    draft: TopicEditorDraft | Dict[str, Any],
+    evidence_shelf: Sequence[TopicEditorEvidenceItem | Dict[str, Any]],
+    source_metadata: Dict[str, Dict[str, Any]],
+    limits: Optional[TopicEditorDraftLimits],
+    *,
+    mode: str = "draft",
+    latest_valid_preview_hash: Optional[str] = None,
+) -> TopicEditorDraftValidationResult:
+    """Validate a draft without requiring preview except in submit mode."""
+    if mode not in {"draft", "preview", "submit"}:
+        raise ValueError("mode must be 'draft', 'preview', or 'submit'")
+
+    limits = limits or TopicEditorDraftLimits()
+    parsed = topic_editor_draft_from_json(draft) if isinstance(draft, dict) else draft
+    revision_hash = revision_hash_for_topic_editor_draft(parsed)
+    errors: List[TopicEditorDraftValidationIssue] = []
+    warnings: List[TopicEditorDraftValidationIssue] = []
+
+    evidence_by_id: Dict[str, Dict[str, Any]] = {}
+    strong_media_ids: Set[str] = set()
+    for item in evidence_shelf or []:
+        item_obj = _canonical_jsonable(item)
+        if not isinstance(item_obj, dict):
+            continue
+        message_id = str(item_obj.get("message_id") or "")
+        if message_id:
+            evidence_by_id[message_id] = item_obj
+        for media in item_obj.get("media") or []:
+            if isinstance(media, dict) and media.get("strong_media"):
+                media_id = str(media.get("media_id") or "")
+                if media_id:
+                    strong_media_ids.add(media_id)
+    media_by_id = _evidence_media_by_id(evidence_shelf)
+
+    if len(parsed.headline) > limits.headline_target_chars:
+        warnings.append(_validation_issue(
+            "headline",
+            f"Headline is {len(parsed.headline)} chars; target is {limits.headline_target_chars}.",
+            "Shorten the headline to the core change.",
+        ))
+    if parsed.dek and parsed.headline and parsed.dek.strip().lower() == parsed.headline.strip().lower():
+        warnings.append(_validation_issue("dek", "Dek repeats the headline.", "Use the dek for one concrete supporting detail."))
+    if not parsed.dek or len(parsed.dek.split()) < 5:
+        warnings.append(_validation_issue("dek", "Dek is vague or too short.", "Add a concise concrete reason this update matters now."))
+
+    if len(parsed.cards) > limits.max_cards:
+        errors.append(_validation_issue(
+            "cards",
+            f"Draft has {len(parsed.cards)} cards; max is {limits.max_cards}.",
+            "Keep only the strongest two to four focused cards.",
+        ))
+
+    seen_media_ids: Set[str] = set()
+    for idx, card in enumerate(parsed.cards):
+        path = f"cards[{idx}]"
+        if len(card.body) > limits.card_body_max_chars:
+            errors.append(_validation_issue(
+                f"{path}.body",
+                f"Card is {len(card.body)} chars; max is {limits.card_body_max_chars}.",
+                "Keep one claim, one concrete detail, and one citation.",
+            ))
+        if not card.source_message_ids:
+            errors.append(_validation_issue(
+                f"{path}.source_message_ids",
+                "Card has no resolvable source.",
+                "Attach at least one source message that supports this card.",
+            ))
+        if len(card.source_message_ids) > limits.sources_per_card_warning:
+            warnings.append(_validation_issue(
+                f"{path}.source_message_ids",
+                f"Card uses {len(card.source_message_ids)} sources; warning threshold is {limits.sources_per_card_warning}.",
+                "Prefer the few source messages that directly support the card.",
+            ))
+        for sid in card.source_message_ids:
+            if str(sid) not in evidence_by_id and str(sid) not in (source_metadata or {}):
+                errors.append(_validation_issue(
+                    f"{path}.source_message_ids",
+                    f"Source message {sid} cannot be resolved.",
+                    "Rehydrate the evidence shelf before validating or replace the source.",
+                ))
+            meta = (source_metadata or {}).get(str(sid), {})
+            if not (meta.get("guild_id") and meta.get("channel_id")):
+                errors.append(_validation_issue(
+                    f"{path}.source_message_ids",
+                    f"References for source message {sid} cannot render as Discord jump links.",
+                    "Provide source metadata with guild_id and channel_id.",
+                ))
+
+        markers = _citation_markers(card.body)
+        valid_marker_found = False
+        for marker in markers:
+            if marker <= 0 or marker > len(card.source_message_ids):
+                errors.append(_validation_issue(
+                    f"{path}.body",
+                    f"Inline citation marker [{marker}] does not map to a card source.",
+                    "Use citation numbers that match this card's source_message_ids order.",
+                ))
+            else:
+                valid_marker_found = True
+        if card.source_message_ids and not valid_marker_found:
+            issue = _validation_issue(
+                f"{path}.body",
+                "Card has sources but no inline citation marker.",
+                "Add [1], [2], etc. beside the supported claim.",
+            )
+            if mode == "submit":
+                errors.append(issue)
+            else:
+                warnings.append(issue)
+
+        if _looks_like_digest(card.body):
+            warnings.append(_validation_issue(
+                f"{path}.body",
+                "Draft card reads like a digest or essay.",
+                "Split unrelated points or keep only the strongest angle.",
+            ))
+        if _quote_count(card.body) > 4:
+            warnings.append(_validation_issue(f"{path}.body", "Card uses too many quotes.", "Paraphrase and cite instead of quoting repeatedly."))
+        if "community reacted" in card.body.lower() and len(card.body.split()) < 18:
+            warnings.append(_validation_issue(
+                f"{path}.body",
+                "Weak community reacted point without concrete substance.",
+                "Name the concrete reaction, test result, or implication.",
+            ))
+
+        for media_id in card.media_ids:
+            if media_id in seen_media_ids:
+                errors.append(_validation_issue(
+                    f"{path}.media_ids",
+                    f"Same media repeats unnecessarily: {media_id}.",
+                    "Use each media item once next to the relevant card.",
+                ))
+            seen_media_ids.add(media_id)
+            media = media_by_id.get(media_id)
+            try:
+                ref = normalize_media_ref((media or {}).get("media_ref") or media_id_to_media_ref(media_id))
+            except (ValueError, TypeError):
+                errors.append(_validation_issue(
+                    f"{path}.media_ids",
+                    f"Media id cannot be resolved: {media_id}.",
+                    "Choose a media_id from the evidence shelf.",
+                ))
+                continue
+            meta = (source_metadata or {}).get(str(ref.get("message_id")), {})
+            if not _resolve_media_url_from_metadata(ref, meta) and not (media or {}).get("source_url"):
+                errors.append(_validation_issue(
+                    f"{path}.media_ids",
+                    f"Media id cannot be resolved: {media_id}.",
+                    "Rehydrate the source message or remove the media reference.",
+                ))
+            if not re.search(r"\b(image|video|clip|screenshot|media|shows|watch|see)\b", card.body.lower()):
+                warnings.append(_validation_issue(
+                    f"{path}.media_ids",
+                    "Media appears detached from the relevant text.",
+                    "Mention what the attached media proves or shows.",
+                ))
+
+    if strong_media_ids and not any(card.media_ids for card in parsed.cards):
+        warnings.append(_validation_issue(
+            "cards",
+            "No media is used despite strong media existing in the evidence shelf.",
+            "Attach the strongest media item to the card it supports.",
+        ))
+
+    try:
+        rendered_units = render_draft_publish_units(parsed, source_metadata or {}, evidence_shelf=evidence_shelf)
+        for unit_idx, unit in enumerate(rendered_units):
+            if unit.get("kind") == "text":
+                content = str(unit.get("content") or "")
+                if len(content) > limits.discord_content_limit:
+                    errors.append(_validation_issue(
+                        f"preview_units[{unit_idx}].content",
+                        f"Rendered text unit is {len(content)} chars; Discord limit is {limits.discord_content_limit}.",
+                        "Revise the draft instead of relying on publisher chunking.",
+                    ))
+    except Exception as exc:
+        errors.append(_validation_issue("preview_units", f"Draft cannot render for validation: {exc}"))
+
+    if mode == "submit" and latest_valid_preview_hash != revision_hash:
+        errors.append(_validation_issue(
+            "latest_valid_preview_hash",
+            "submit_draft called before a current valid preview exists.",
+            "Run preview_draft after the latest edit, then submit without further changes.",
+        ))
+
+    if errors:
+        status = "blocked_for_submit" if mode == "submit" else "needs_revision"
+    else:
+        status = "valid"
+    return TopicEditorDraftValidationResult(
+        status=status,
+        errors=tuple(errors),
+        warnings=tuple(warnings),
+    )
+
+
 def _build_send_units(
     publish_units: List[Dict[str, Any]],
     send_units_out: List[Dict[str, Any]],
@@ -4444,7 +6150,8 @@ def _build_send_units(
     for unit in publish_units:
         kind = unit.get("kind", "text")
         if kind == "text":
-            send_units_out.append({"send_kind": "text", "content": unit["content"]})
+            for chunk in chunk_text_for_discord(unit["content"]):
+                send_units_out.append({"send_kind": "text", "content": chunk})
         elif kind == "media":
             ref = unit.get("ref", {})
             meta = source_metadata.get(str(ref.get("message_id")), {})

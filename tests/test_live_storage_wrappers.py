@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 
 from src.common.db_handler import DatabaseHandler
 from src.common.storage_handler import StorageHandler
@@ -167,6 +168,20 @@ def test_storage_topic_editor_helpers_route_to_new_tables_without_touching_legac
         "observation_kind": "near_miss",
         "reason": "Almost enough signal.",
     }))
+    draft = asyncio.run(storage.create_topic_editor_draft({
+        "draft_id": "draft-1",
+        "run_id": "run-1",
+        "topic_id": None,
+        "guild_id": 1,
+        "status": "drafting",
+        "draft_json": {"headline": "Draft"},
+        "validation_result": None,
+        "preview_units": None,
+        "revision_number": 1,
+        "revision_hash": "hash-1",
+        "revision_attempts": 0,
+        "latest_valid_preview_hash": None,
+    }))
 
     assert run["_table"] == "topic_editor_runs"
     assert topic["_table"] == "topics"
@@ -174,6 +189,9 @@ def test_storage_topic_editor_helpers_route_to_new_tables_without_touching_legac
     assert alias["_table"] == "topic_aliases"
     assert transition["_table"] == "topic_transitions"
     assert observation["_table"] == "editorial_observations"
+    assert draft["_table"] == "topic_editor_drafts"
+    assert draft["topic_id"] is None
+    assert draft["revision_hash"] == "hash-1"
     assert {call[1] for call in calls}.isdisjoint({"live_update_editor_runs", "live_update_feed_items"})
 
 
@@ -237,6 +255,18 @@ def test_db_handler_topic_editor_wrappers_are_reachable_through_storage_handler(
             calls.append(("mirror-topic-to-live", checkpoint_key, environment))
             return {"checkpoint_key": checkpoint_key}
 
+        async def create_topic_editor_draft(self, draft, environment="prod"):
+            calls.append(("draft-create", draft, environment))
+            return {"draft_id": draft["draft_id"], "topic_id": draft.get("topic_id")}
+
+        async def update_topic_editor_draft(self, draft_id, updates, environment="prod"):
+            calls.append(("draft-update", draft_id, updates, environment))
+            return {"draft_id": draft_id, **updates}
+
+        async def get_recent_topic_editor_drafts(self, guild_id=None, environment="prod", limit=20, status=None, run_id=None):
+            calls.append(("draft-read", guild_id, environment, limit, status, run_id))
+            return [{"draft_id": "draft-1"}]
+
     db = DatabaseHandler.__new__(DatabaseHandler)
     db.storage_handler = FakeStorage()
     db._run_async_in_thread = lambda coro: asyncio.run(coro)
@@ -256,6 +286,16 @@ def test_db_handler_topic_editor_wrappers_are_reachable_through_storage_handler(
     assert db.upsert_topic_editor_checkpoint({"guild_id": 1, "checkpoint_key": "live", "channel_id": 20}) == {"checkpoint_key": "live"}
     assert db.mirror_live_checkpoint_to_topic_editor("live") == {"checkpoint_key": "live"}
     assert db.mirror_topic_editor_checkpoint_to_live("live") == {"checkpoint_key": "live"}
+    assert db.create_topic_editor_draft({"draft_id": "draft-1", "guild_id": 1, "topic_id": None}) == {
+        "draft_id": "draft-1",
+        "topic_id": None,
+    }
+    assert db.update_topic_editor_draft("draft-1", {
+        "guild_id": 1,
+        "preview_units": [{"type": "text"}],
+        "latest_valid_preview_hash": "hash-1",
+    })["latest_valid_preview_hash"] == "hash-1"
+    assert db.get_recent_topic_editor_drafts(guild_id=1, run_id="run-1") == [{"draft_id": "draft-1"}]
     assert [call[0] for call in calls] == [
         "acquire",
         "complete",
@@ -271,4 +311,21 @@ def test_db_handler_topic_editor_wrappers_are_reachable_through_storage_handler(
         "mirror-live-to-topic",
         "get-topic-checkpoint",
         "mirror-topic-to-live",
+        "draft-create",
+        "draft-update",
+        "draft-read",
     ]
+
+
+def test_topic_editor_drafts_migration_landed_in_canonical_path():
+    sql_path = Path("/Users/peteromalley/Documents/supabase/migrations/20260519000000_topic_editor_drafts.sql")
+    sql = sql_path.read_text()
+
+    assert "create table if not exists public.topic_editor_drafts" in sql
+    assert "topic_id uuid null" in sql
+    assert "publish_diagnostics jsonb null" in sql
+    assert "revision_number integer not null default 1" in sql
+    assert "revision_hash text not null" in sql
+    assert "revision_attempts integer not null default 0" in sql
+    assert "latest_valid_preview_hash text null" in sql
+    assert "idx_topic_editor_drafts_null_topic" in sql

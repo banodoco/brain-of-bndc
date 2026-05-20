@@ -76,7 +76,7 @@ QUERYABLE_TABLES = {
     'social_publications', 'social_channel_routes',
     'topic_editor_runs', 'topics', 'topic_sources', 'topic_aliases',
     'topic_transitions', 'editorial_observations',
-    'topic_editor_checkpoints',
+    'topic_editor_checkpoints', 'topic_editor_drafts',
     'live_update_editor_runs', 'live_update_candidates',
     'live_update_decisions', 'live_update_feed_items',
     'live_update_editorial_memory', 'live_update_watchlist',
@@ -810,7 +810,7 @@ TOOLS = [
     },
     {
         "name": "get_live_update_status",
-        "description": "Get active topic-editor state for live updates: recent runs, posted/watching topics, rejections, overrides, publication problems, and legacy rollback-only live_update_* state.",
+        "description": "Get active topic-editor state for live updates: recent runs, drafts including null-topic abandoned/validation-failed rows, posted/watching topics, rejections, overrides, publication/media diagnostics, and legacy rollback-only live_update_* state.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -2444,6 +2444,7 @@ async def execute_get_live_update_status(params: Dict[str, Any]) -> Dict[str, An
 
         runs = _fetch("topic_editor_runs", order_col="started_at", since_col="started_at")
         topics = _fetch("topics", order_col="updated_at")
+        drafts = _fetch("topic_editor_drafts", order_col="updated_at", since_col="updated_at")
         transitions = _fetch("topic_transitions", order_col="created_at", since_col="created_at")
         observations = _fetch("editorial_observations", order_col="created_at", since_col="created_at")
         legacy_runs = _fetch("live_update_editor_runs", order_col="created_at")
@@ -2462,6 +2463,121 @@ async def execute_get_live_update_status(params: Dict[str, Any]) -> Dict[str, An
             topic for topic in topics
             if topic.get("publication_status") in {"failed", "partial"}
         ]
+        draft_status_counts: Dict[str, int] = {}
+        for draft in drafts:
+            status = str(draft.get("status") or "unknown")
+            draft_status_counts[status] = draft_status_counts.get(status, 0) + 1
+
+        def _diagnostic_codes(row: Dict[str, Any]) -> Set[str]:
+            codes: Set[str] = set()
+            diagnostics = row.get("publish_diagnostics") or {}
+            if isinstance(diagnostics, dict):
+                for code in diagnostics.get("reason_codes") or []:
+                    if code:
+                        codes.add(str(code))
+                for failure in diagnostics.get("media_failures") or []:
+                    if isinstance(failure, dict) and failure.get("reason_code"):
+                        codes.add(str(failure.get("reason_code")))
+                if diagnostics.get("renderer_safety_chunking_used"):
+                    codes.add("renderer_safety_chunking_used")
+                if diagnostics.get("legacy_direct_post_used"):
+                    codes.add("legacy_direct_post_used")
+            validation = row.get("validation_result") or {}
+            if isinstance(validation, dict):
+                if validation.get("errors"):
+                    codes.add("draft_validation_failed")
+                validation_text = str(validation).lower()
+                if "preview" in validation_text and (
+                    "stale" in validation_text
+                    or "missing" in validation_text
+                    or "latest_valid_preview_hash" in validation_text
+                ):
+                    codes.add("stale_or_missing_preview")
+            publish_result = row.get("publish_result") or {}
+            if isinstance(publish_result, dict):
+                status = publish_result.get("status")
+                if status in {"failed", "partial"}:
+                    codes.add(f"publish_{status}")
+            if row.get("status") == "needs_revision":
+                codes.add("draft_validation_failed")
+            if row.get("status") == "abandoned":
+                codes.add("draft_abandoned")
+            return codes
+
+        transition_diagnostic_codes: Set[str] = set()
+        for transition in transitions:
+            action = str(transition.get("action") or "")
+            reason = str(transition.get("reason") or "")
+            extra = transition.get("extra") or transition.get("metadata") or {}
+            text = f"{action} {reason} {extra}".lower()
+            if "legacy_post_disabled" in text:
+                transition_diagnostic_codes.add("legacy_post_disabled")
+            if "legacy_direct_post_used" in text:
+                transition_diagnostic_codes.add("legacy_direct_post_used")
+            if isinstance(extra, dict):
+                transition_diagnostic_codes.update(_diagnostic_codes(extra))
+
+        draft_diagnostic_codes: Set[str] = set()
+        for draft in drafts:
+            draft_diagnostic_codes.update(_diagnostic_codes(draft))
+        topic_diagnostic_codes = {
+            f"publish_{topic.get('publication_status')}"
+            for topic in publication_problems
+            if topic.get("publication_status")
+        }
+        run_diagnostic_codes = set()
+        if runs:
+            latest_run = runs[0]
+            if latest_run.get("status") == "failed":
+                run_diagnostic_codes.add("run_failed")
+            if latest_run.get("source_message_count") is not None and int(latest_run.get("source_message_count") or 0) == 0:
+                run_diagnostic_codes.add("no_recent_source_data")
+            if int(latest_run.get("failed_publish_count") or 0) > 0:
+                run_diagnostic_codes.add("publish_failed")
+
+        diagnostic_categories = sorted(
+            draft_diagnostic_codes
+            | transition_diagnostic_codes
+            | topic_diagnostic_codes
+            | run_diagnostic_codes
+        )
+
+        def _preview_summary(draft: Dict[str, Any]) -> Dict[str, Any]:
+            preview_units = draft.get("preview_units") or []
+            if not isinstance(preview_units, list):
+                preview_units = []
+            media_units = [
+                unit for unit in preview_units
+                if isinstance(unit, dict) and unit.get("type") == "media"
+            ]
+            text_units = [
+                unit for unit in preview_units
+                if isinstance(unit, dict) and unit.get("type") == "text"
+            ]
+            validation = draft.get("validation_result") or {}
+            errors = validation.get("errors") if isinstance(validation, dict) else None
+            warnings = validation.get("warnings") if isinstance(validation, dict) else None
+            return {
+                "draft_id": draft.get("draft_id"),
+                "run_id": draft.get("run_id"),
+                "topic_id": draft.get("topic_id"),
+                "status": draft.get("status"),
+                "revision_number": draft.get("revision_number"),
+                "revision_hash": draft.get("revision_hash"),
+                "revision_attempts": draft.get("revision_attempts"),
+                "latest_valid_preview_hash": draft.get("latest_valid_preview_hash"),
+                "validation_error_count": len(errors or []),
+                "validation_warning_count": len(warnings or []),
+                "preview_unit_count": len(preview_units),
+                "preview_text_unit_count": len(text_units),
+                "preview_media_unit_count": len(media_units),
+                "publish_result": draft.get("publish_result"),
+                "publish_diagnostics": draft.get("publish_diagnostics"),
+                "updated_at": draft.get("updated_at"),
+                "submitted_at": draft.get("submitted_at"),
+            }
+
+        draft_summaries = [_preview_summary(draft) for draft in drafts]
         total_publish_decisions = topic_counts["posted"] + len(recent_rejections)
         override_rate = (len(recent_overrides) / total_publish_decisions) if total_publish_decisions else 0.0
 
@@ -2470,7 +2586,13 @@ async def execute_get_live_update_status(params: Dict[str, Any]) -> Dict[str, An
                 f"Topic-editor primary status: {len(runs)} recent runs; "
                 f"{topic_counts['posted']} posted, {topic_counts['watching']} watching topics."
             ),
+            (
+                f"Drafts: {len(drafts)} recent rows; "
+                f"{draft_status_counts.get('needs_revision', 0)} validation failures, "
+                f"{draft_status_counts.get('abandoned', 0)} abandoned."
+            ),
             f"Failed/partial publications: {len(publication_problems)} topics.",
+            f"Diagnostics: {', '.join(diagnostic_categories) if diagnostic_categories else 'none'}.",
             f"Recent rejections: {len(recent_rejections)}; overrides: {len(recent_overrides)}.",
             "Rollback legacy live-update state only: live_update_* rows are not the active overview system.",
         ])
@@ -2480,14 +2602,20 @@ async def execute_get_live_update_status(params: Dict[str, Any]) -> Dict[str, An
             "hours": hours,
             "runs": runs,
             "topics": topics,
+            "drafts": drafts,
+            "draft_summaries": draft_summaries,
             "transitions": transitions,
             "observations": observations,
             "topic_counts": topic_counts,
+            "draft_status_counts": draft_status_counts,
             "state_counts": {
                 "recent_rejections": len(recent_rejections),
                 "recent_overrides": len(recent_overrides),
                 "publication_problems": len(publication_problems),
+                "draft_validation_failures": draft_status_counts.get("needs_revision", 0),
+                "abandoned_drafts": draft_status_counts.get("abandoned", 0),
             },
+            "diagnostic_categories": diagnostic_categories,
             "override_rate": override_rate,
             "publication_problems": publication_problems,
             "summary": summary,
@@ -4296,7 +4424,10 @@ async def execute_query_table(params: Dict[str, Any]) -> Dict[str, Any]:
         GUILD_SCOPED_TABLES = {'discord_messages', 'discord_channels', 'daily_summaries',
                                'shared_posts', 'pending_intros', 'discord_reactions',
                                'discord_reaction_log', 'competitions', 'social_publications',
-                               'social_channel_routes'}
+                               'social_channel_routes', 'topic_editor_runs', 'topics',
+                               'topic_sources', 'topic_aliases', 'topic_transitions',
+                               'editorial_observations', 'topic_editor_checkpoints',
+                               'topic_editor_drafts'}
         if table in GUILD_SCOPED_TABLES and 'guild_id' not in filters:
             if resolved_guild_id:
                 query = query.eq('guild_id', resolved_guild_id)

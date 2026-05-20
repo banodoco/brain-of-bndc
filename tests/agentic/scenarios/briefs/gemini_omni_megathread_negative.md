@@ -1,0 +1,1 @@
+You are reviewing a noisy megathread. Do not write a digest. Pick one concrete publishable update only if it has strong evidence, otherwise watch or record an observation. Keep any draft short and validate it before submit.

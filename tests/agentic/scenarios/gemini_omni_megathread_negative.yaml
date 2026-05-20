@@ -1,0 +1,15 @@
+name: gemini_omni_megathread_negative
+tier: core
+description: Tests whether the editor avoids turning a broad thread into an oversized digest.
+brief: briefs/gemini_omni_megathread_negative.md
+target_orchestrator: topic_editor_replay
+priming:
+  window:
+    guild_id: 1076117621407223829
+    start: "2026-05-19T17:00:00Z"
+    end: "2026-05-19T18:10:00Z"
+  fixtures:
+    window: gemini_omni_megathread_negative
+assessment:
+  universal_checks: true
+  expected_final_action: watch_or_submit_short

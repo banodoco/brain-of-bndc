@@ -78,6 +78,10 @@ class FakeDB:
         self.reply_chain_rows = []
         self.source_message_rows = []  # for get_topic_editor_source_messages
         self.source_message_calls = []
+        self.drafts = []
+        self.draft_creates = []
+        self.draft_updates = []
+        self.draft_reads = []
 
     def get_topic_editor_checkpoint(self, checkpoint_key, environment="prod"):
         return {
@@ -219,6 +223,34 @@ class FakeDB:
     def store_editorial_observation(self, observation, environment="prod"):
         raise AssertionError("not used in this test")
 
+    def create_topic_editor_draft(self, draft, environment="prod"):
+        self.draft_creates.append((dict(draft), environment))
+        row = {**draft, "environment": environment}
+        self.drafts = [existing for existing in self.drafts if existing.get("draft_id") != draft.get("draft_id")]
+        self.drafts.append(row)
+        return row
+
+    def update_topic_editor_draft(self, draft_id, updates, guild_id=None, environment="prod"):
+        self.draft_updates.append((draft_id, dict(updates), guild_id, environment))
+        for index, row in enumerate(self.drafts):
+            if row.get("draft_id") == draft_id:
+                self.drafts[index] = {**row, **updates, "environment": environment}
+                return self.drafts[index]
+        row = {"draft_id": draft_id, **updates, "environment": environment}
+        self.drafts.append(row)
+        return row
+
+    def get_recent_topic_editor_drafts(self, guild_id=None, environment="prod", limit=20, status=None, run_id=None):
+        self.draft_reads.append((guild_id, environment, limit, status, run_id))
+        rows = [
+            row for row in self.drafts
+            if row.get("environment", environment) == environment
+            and (guild_id is None or row.get("guild_id") == guild_id)
+            and (status is None or row.get("status") == status)
+            and (run_id is None or row.get("run_id") == run_id)
+        ]
+        return rows[:limit]
+
     def update_topic(self, topic_id, updates, guild_id=None, environment="prod"):
         self.topic_updates.append((topic_id, updates, guild_id, environment))
         return {"topic_id": topic_id, **updates}
@@ -237,6 +269,7 @@ class FakeDB:
 
 
 def test_topic_editor_run_once_uses_native_tools_and_topic_run_lifecycle(monkeypatch):
+    monkeypatch.setenv("TOPIC_EDITOR_LEGACY_POST_MODE", "direct")
     monkeypatch.setenv("TOPIC_EDITOR_INPUT_COST_PER_MTOKENS", "3")
     monkeypatch.setenv("TOPIC_EDITOR_OUTPUT_COST_PER_MTOKENS", "15")
     monkeypatch.setenv("LIVE_UPDATE_TRACE_CHANNEL_ID", "999")
@@ -300,10 +333,11 @@ def test_topic_editor_run_once_uses_native_tools_and_topic_run_lifecycle(monkeyp
 
     llm_call = editor.llm_client.client.messages.calls[0]
     assert llm_call["tools"] == TOPIC_EDITOR_TOOLS
-    assert len(llm_call["tools"]) == 15
+    assert len(llm_call["tools"]) == 21
 
 
-def test_post_simple_topic_with_media_ref_is_rejected():
+def test_post_simple_topic_with_media_ref_is_rejected(monkeypatch):
+    monkeypatch.setenv("TOPIC_EDITOR_LEGACY_POST_MODE", "direct")
     response = SimpleNamespace(
         content=[
             SimpleNamespace(
@@ -919,7 +953,8 @@ def test_topic_editor_cold_start_seeds_interval_lookback_and_processes_window(mo
     assert seeded_checkpoint["state"]["lookback_minutes"] == 60.0
 
 
-def test_topic_editor_dispatch_rejects_simple_collisions_and_replays_without_side_effects():
+def test_topic_editor_dispatch_rejects_simple_collisions_and_replays_without_side_effects(monkeypatch):
+    monkeypatch.setenv("TOPIC_EDITOR_LEGACY_POST_MODE", "direct")
     blocks = [
         SimpleNamespace(
             type="tool_use",
@@ -1933,6 +1968,7 @@ def test_get_reply_chain_cycle_detection_terminates():
 
 def test_topic_editor_publisher_sends_only_when_enabled_and_records_status(monkeypatch):
     monkeypatch.setenv("TOPIC_EDITOR_PUBLISHING_ENABLED", "true")
+    monkeypatch.setenv("TOPIC_EDITOR_LEGACY_POST_MODE", "direct")
 
     class SentMessage:
         def __init__(self, message_id):
@@ -2068,11 +2104,187 @@ def test_topic_editor_publisher_records_partial_after_mid_batch_failure(monkeypa
     assert db.topic_updates[0][1]["discord_message_ids"] == [9101]
     assert db.topic_updates[0][1]["publication_attempts"] == 1
     assert "second send failed" in db.topic_updates[0][1]["publication_error"]
+
+
+def test_structured_publisher_returns_safety_chunking_and_media_failure_diagnostics(monkeypatch):
+    monkeypatch.setenv("TOPIC_EDITOR_PUBLISHING_ENABLED", "true")
+
+    class SentMessage:
+        def __init__(self, message_id):
+            self.id = message_id
+
+    class Channel:
+        def __init__(self):
+            self.next_id = 9100
+
+        async def send(self, content=None, **kwargs):
+            if content and str(content).startswith("https://cdn.discordapp.com/"):
+                raise RuntimeError("media payload too large")
+            if kwargs.get("files"):
+                raise RuntimeError("media payload too large")
+            self.next_id += 1
+            return SentMessage(self.next_id)
+
+    db = FakeDB()
+    db.source_message_rows = [{
+        "message_id": "200",
+        "guild_id": 1,
+        "channel_id": 10,
+        "author_name": "alice",
+        "content": "Alice posted a long visual update.",
+        "attachments": [{"url": "https://cdn.discordapp.com/huge.mp4", "content_type": "video/mp4", "filename": "huge.mp4"}],
+        "embeds": [],
+    }]
+    editor = TopicEditor(
+        bot=SimpleNamespace(get_channel=lambda channel_id: Channel()),
+        db_handler=db,
+        llm_client=FakeClaude(SimpleNamespace(content=[], usage=None)),
+        guild_id=1,
+        live_channel_id=2,
+        environment="prod",
+    )
+    async def fail_download(source_url, unit):
+        raise RuntimeError("media payload too large")
+
+    editor._download_publish_media_url = fail_download
+    topic = {
+        "topic_id": "topic-1",
+        "run_id": "run-1",
+        "guild_id": 1,
+        "state": "posted",
+        "headline": "Structured failure",
+        "summary": {
+            "blocks": [{
+                "type": "intro",
+                "text": "A" * 2100,
+                "source_message_ids": ["200"],
+                "media_refs": [{"message_id": "200", "kind": "attachment", "index": 0}],
+            }]
+        },
+        "publication_attempts": 0,
+    }
+
+    result = asyncio.run(editor._publish_topic(topic))
+
+    assert result["status"] == "partial"
+    diagnostics = result["publish_diagnostics"]
+    assert diagnostics["renderer_safety_chunking_used"] is True
+    assert "renderer_safety_chunking_used" in diagnostics["reason_codes"]
+    assert diagnostics["media_failures"]
+    assert db.topic_updates[0][1]["publication_status"] == "partial"
+    assert db.transitions[0][0]["payload"]["publish_diagnostics"]["renderer_safety_chunking_used"] is True
+
+
+def test_structured_publisher_safety_chunks_over_limit_text_before_send(monkeypatch):
+    monkeypatch.setenv("TOPIC_EDITOR_PUBLISHING_ENABLED", "true")
+
+    class SentMessage:
+        def __init__(self, message_id):
+            self.id = message_id
+
+    class Channel:
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, content=None, **kwargs):
+            assert content is not None
+            assert len(content) <= 2000
+            self.sent.append(content)
+            return SentMessage(9100 + len(self.sent))
+
+    channel = Channel()
+    db = FakeDB()
+    editor = TopicEditor(
+        bot=SimpleNamespace(get_channel=lambda channel_id: channel),
+        db_handler=db,
+        llm_client=FakeClaude(SimpleNamespace(content=[], usage=None)),
+        guild_id=1,
+        live_channel_id=2,
+        environment="prod",
+    )
+    topic = {
+        "topic_id": "topic-1",
+        "run_id": "run-1",
+        "guild_id": 1,
+        "state": "posted",
+        "headline": "Structured long text",
+        "summary": {
+            "blocks": [{
+                "type": "intro",
+                "text": "A" * 4100,
+                "source_message_ids": [],
+                "media_refs": [],
+            }]
+        },
+        "publication_attempts": 0,
+    }
+
+    result = asyncio.run(editor._publish_topic(topic))
+
+    assert result["status"] == "sent"
+    assert len(channel.sent) > 1
+    assert all(len(content) <= 2000 for content in channel.sent)
+    assert result["publish_diagnostics"]["renderer_safety_chunking_used"] is True
+    assert "renderer_safety_chunking_used" in result["publish_diagnostics"]["reason_codes"]
+    assert db.topic_updates[0][1]["publication_status"] == "sent"
+
+
+def test_draft_evidence_metadata_rehydrates_compact_context_rows():
+    db = FakeDB()
+    db.source_message_rows = [{
+        "message_id": "222",
+        "guild_id": 1,
+        "channel_id": 10,
+        "author_name": "Archive Author",
+        "content": "Full archived source row.",
+        "attachments": [{"url": "https://cdn.discordapp.com/full.png", "filename": "full.png"}],
+        "embeds": [],
+        "media_understandings": [{
+            "attachment_index": 0,
+            "description": "Full archived media description.",
+            "aesthetic_quality": 8,
+        }],
+    }]
+    editor = TopicEditor(
+        bot=SimpleNamespace(get_channel=lambda channel_id: None),
+        db_handler=db,
+        llm_client=FakeClaude(SimpleNamespace(content=[], usage=None)),
+        guild_id=1,
+        live_channel_id=2,
+        environment="prod",
+    )
+    context = {
+        "guild_id": 1,
+        "messages": [{
+            "message_id": "222",
+            "author_name": "Compact Author",
+            "content": "Compact row",
+            "media_refs_available": [{"kind": "attachment", "index": 0}],
+        }],
+    }
+    draft_json = {
+        "cards": [{
+            "body": "Archive-backed card [1].",
+            "source_message_ids": ["222"],
+            "media_ids": ["222:attachment:0"],
+        }]
+    }
+
+    evidence, source_metadata = editor._draft_evidence_and_metadata(context, draft_json)
+
+    assert db.source_message_calls[-1][0] == ["222"]
+    assert source_metadata["222"]["channel_id"] == 10
+    assert source_metadata["222"]["attachments"][0]["url"] == "https://cdn.discordapp.com/full.png"
+    assert source_metadata["222"]["media_understandings"][0]["description"] == "Full archived media description."
+    assert evidence[0].content == "Full archived source row."
+    assert evidence[0].media[0].source_url == "https://cdn.discordapp.com/full.png"
+
+
 # ------------------------------------------------------------------
 # T12: Structured block-level topic creation and publishing tests
 # ------------------------------------------------------------------
 
-def _make_editor_with_source_rows(db=None, guild_id=1, live_channel_id=2, publishing_enabled=False):
+def _make_editor_with_source_rows(db=None, guild_id=1, live_channel_id=2, publishing_enabled=False, legacy_post_mode=None):
     """Helper to create a TopicEditor with FakeDB for structured topic tests."""
     editor = TopicEditor(
         db_handler=db or FakeDB(),
@@ -2083,6 +2295,12 @@ def _make_editor_with_source_rows(db=None, guild_id=1, live_channel_id=2, publis
     )
     # Override publishing_enabled after init
     editor.publishing_enabled = publishing_enabled
+    if legacy_post_mode is not None:
+        editor.legacy_post_mode = legacy_post_mode
+    elif "TOPIC_EDITOR_LEGACY_POST_MODE" not in topic_editor_module.os.environ:
+        # Most pre-draft structured-topic tests exercise the old direct tool path.
+        # Keep the production default covered by tests that pass legacy_post_mode="disabled".
+        editor.legacy_post_mode = "direct"
     return editor
 
 
@@ -2150,6 +2368,348 @@ def _sample_source_message_rows():
             ],
         },
     ]
+
+
+def test_draft_tool_flow_create_validate_preview_submit_reuses_topic_path():
+    db = FakeDB()
+    db.source_message_rows = [
+        {
+            "message_id": "200",
+            "guild_id": 1,
+            "channel_id": 10,
+            "author_id": 42,
+            "author_name": "alice",
+            "content": "I shipped a new LoRA test with a video.",
+            "attachments": [{"url": "https://cdn.discordapp.com/demo.mp4", "content_type": "video/mp4", "filename": "demo.mp4"}],
+            "embeds": [],
+            "reaction_count": 8,
+        }
+    ]
+    editor = _make_editor_with_source_rows(db=db)
+    ctx = _make_source_context()
+
+    create = editor._dispatch_tool_call({
+        "id": "draft-create",
+        "name": "create_draft",
+        "input": {
+            "topic_key": "alice-lora-video",
+            "template": "creation_release",
+            "headline": "Alice Ships a LoRA Video Test",
+            "dek": "A short test shows the model behavior with attached video evidence.",
+            "cards": [{
+                "angle": "What changed",
+                "body": "Alice posted a LoRA test and the attached video shows the output [1].",
+                "source_message_ids": ["200"],
+                "media_ids": ["200:attachment:0"],
+            }],
+            "editor_note": "Concrete release with media proof.",
+        },
+    }, ctx)
+    draft_id = create["draft_id"]
+    assert create["outcome"] == "accepted"
+
+    validated = editor._dispatch_tool_call({"id": "draft-validate", "name": "validate_draft", "input": {"draft_id": draft_id}}, ctx)
+    assert validated["validation"]["status"] == "valid"
+
+    previewed = editor._dispatch_tool_call({"id": "draft-preview", "name": "preview_draft", "input": {"draft_id": draft_id}}, ctx)
+    assert previewed["outcome"] == "accepted"
+    assert previewed["latest_valid_preview_hash"] == previewed["revision_hash"]
+    assert [unit["type"] for unit in previewed["preview_units"]] == ["text", "text", "media"]
+
+    submitted = editor._dispatch_tool_call({"id": "draft-submit", "name": "submit_draft", "input": {"draft_id": draft_id}}, ctx)
+    assert submitted["outcome"] == "accepted"
+    assert submitted["status"] == "submitted"
+    assert submitted["topic_id"] == "topic-1"
+    assert db.topics[0][0]["canonical_key"] == "alice-lora-video"
+    assert db.topics[0][0]["summary"]["blocks"][0]["media_refs"] == [
+        {"message_id": "200", "kind": "attachment", "index": 0}
+    ]
+    assert ctx["created_topics"][0]["topic_id"] == "topic-1"
+
+
+def test_submit_draft_refuses_stale_preview_before_topic_upsert():
+    db = FakeDB()
+    db.source_message_rows = [
+        {
+            "message_id": "200",
+            "guild_id": 1,
+            "channel_id": 10,
+            "author_name": "alice",
+            "content": "I shipped a new LoRA test.",
+            "attachments": [],
+            "embeds": [],
+            "reaction_count": 2,
+        }
+    ]
+    editor = _make_editor_with_source_rows(db=db)
+    ctx = _make_source_context()
+
+    create = editor._dispatch_tool_call({
+        "id": "draft-create-stale",
+        "name": "create_draft",
+        "input": {
+            "topic_key": "alice-lora",
+            "template": "technical_finding",
+            "headline": "Alice LoRA Test",
+            "dek": "A short test gives one concrete source-backed finding.",
+            "cards": [{
+                "angle": "What changed",
+                "body": "Alice posted a LoRA test [1].",
+                "source_message_ids": ["200"],
+                "media_ids": [],
+            }],
+            "editor_note": "Good enough to draft.",
+        },
+    }, ctx)
+    draft_id = create["draft_id"]
+    assert editor._dispatch_tool_call({"id": "draft-preview-stale", "name": "preview_draft", "input": {"draft_id": draft_id}}, ctx)["outcome"] == "accepted"
+
+    editor._dispatch_tool_call({
+        "id": "draft-edit-stale",
+        "name": "edit_draft",
+        "input": {
+            "draft_id": draft_id,
+            "patch": {"cards[0].body": "Alice posted an updated LoRA test [1]."},
+            "reason": "Sharpen wording.",
+        },
+    }, ctx)
+    submitted = editor._dispatch_tool_call({"id": "draft-submit-stale", "name": "submit_draft", "input": {"draft_id": draft_id}}, ctx)
+
+    assert submitted["outcome"] == "blocked_for_submit"
+    assert submitted["topic_id"] is None
+    assert db.topics == []
+
+
+def test_draft_persistence_keeps_null_topic_until_submit_backfill_and_reload(monkeypatch):
+    db = FakeDB()
+    db.source_message_rows = [
+        {
+            "message_id": "200",
+            "guild_id": 1,
+            "channel_id": 10,
+            "author_name": "alice",
+            "content": "I shipped a new LoRA test with a video.",
+            "attachments": [{"url": "https://cdn.discordapp.com/demo.mp4", "content_type": "video/mp4", "filename": "demo.mp4"}],
+            "embeds": [],
+            "reaction_count": 8,
+        }
+    ]
+    ctx = _make_source_context()
+    editor = _make_editor_with_source_rows(db=db)
+
+    create = editor._dispatch_tool_call({
+        "id": "draft-create-persist",
+        "name": "create_draft",
+        "input": {
+            "topic_key": "alice-persisted-lora",
+            "template": "creation_release",
+            "headline": "Alice Ships a Persisted LoRA Draft",
+            "dek": "A compact cited draft can survive a reload before submit.",
+            "cards": [{
+                "angle": "What changed",
+                "body": "Alice posted the LoRA test with a video proof [1].",
+                "source_message_ids": ["200"],
+                "media_ids": ["200:attachment:0"],
+            }],
+            "editor_note": "Good visual proof.",
+        },
+    }, ctx)
+    draft_id = create["draft_id"]
+    assert db.draft_creates[-1][0]["topic_id"] is None
+
+    previewed = editor._dispatch_tool_call({
+        "id": "draft-preview-persist",
+        "name": "preview_draft",
+        "input": {"draft_id": draft_id},
+    }, ctx)
+    assert previewed["outcome"] == "accepted"
+    assert db.draft_updates[-1][1]["topic_id"] is None
+    assert db.draft_updates[-1][1]["latest_valid_preview_hash"] == previewed["revision_hash"]
+
+    reloaded_editor = _make_editor_with_source_rows(db=db)
+    reloaded_ctx = _make_source_context()
+    submitted = reloaded_editor._dispatch_tool_call({
+        "id": "draft-submit-reload",
+        "name": "submit_draft",
+        "input": {"draft_id": draft_id},
+    }, reloaded_ctx)
+
+    assert submitted["outcome"] == "accepted"
+    assert submitted["topic_id"] == "topic-1"
+    assert db.draft_reads
+    assert db.draft_updates[-1][1]["topic_id"] == "topic-1"
+    assert db.draft_updates[-1][1]["status"] == "submitted"
+
+
+def test_abandoned_draft_persists_nullable_topic_and_revision_attempts(monkeypatch):
+    monkeypatch.setenv("TOPIC_EDITOR_DRAFT_MAX_REVISION_ATTEMPTS", "1")
+    db = FakeDB()
+    db.source_message_rows = [{
+        "message_id": "200",
+        "guild_id": 1,
+        "channel_id": 10,
+        "author_name": "alice",
+        "content": "Alice posted a small test.",
+        "attachments": [],
+        "embeds": [],
+    }]
+    editor = _make_editor_with_source_rows(db=db)
+    ctx = _make_source_context()
+
+    create = editor._dispatch_tool_call({
+        "id": "draft-create-abandon",
+        "name": "create_draft",
+        "input": {
+            "topic_key": "alice-abandon",
+            "template": "technical_finding",
+            "headline": "Alice Test",
+            "dek": "A compact cited draft.",
+            "cards": [{
+                "angle": "What changed",
+                "body": "Alice posted a test [1].",
+                "source_message_ids": ["200"],
+                "media_ids": [],
+            }],
+            "editor_note": "Initial note.",
+        },
+    }, ctx)
+    draft_id = create["draft_id"]
+    edited = editor._dispatch_tool_call({
+        "id": "draft-edit-abandon",
+        "name": "edit_draft",
+        "input": {
+            "draft_id": draft_id,
+            "patch": {"editor_note": "One accepted revision."},
+            "reason": "Use the only revision.",
+        },
+    }, ctx)
+    blocked_edit = editor._dispatch_tool_call({
+        "id": "draft-edit-abandon-over-limit",
+        "name": "edit_draft",
+        "input": {
+            "draft_id": draft_id,
+            "patch": {"editor_note": "Too many revisions."},
+            "reason": "Should be blocked.",
+        },
+    }, ctx)
+    abandoned = editor._dispatch_tool_call({
+        "id": "draft-abandon",
+        "name": "abandon_draft",
+        "input": {
+            "draft_id": draft_id,
+            "reason": "Cannot make this publishable.",
+            "fallback_action": "watch_topic",
+        },
+    }, ctx)
+
+    assert edited["revision_attempts"] == 1
+    assert blocked_edit["outcome"] == "max_revision_attempts_exceeded"
+    assert abandoned["status"] == "abandoned"
+    assert db.draft_updates[-1][1]["topic_id"] is None
+    assert db.draft_updates[-1][1]["status"] == "abandoned"
+    assert db.draft_updates[-1][1]["revision_attempts"] == 1
+
+
+def test_default_legacy_post_refusal_hidden_from_tools_and_no_upsert(monkeypatch):
+    monkeypatch.delenv("TOPIC_EDITOR_LEGACY_POST_MODE", raising=False)
+    db = FakeDB()
+    editor = _make_editor_with_source_rows(db=db, legacy_post_mode="disabled")
+    ctx = _make_source_context()
+
+    assert "post_simple_topic" not in {tool["name"] for tool in editor._agent_tools()}
+    outcome = editor._dispatch_tool_call({
+        "id": "legacy-disabled",
+        "name": "post_simple_topic",
+        "input": {
+            "proposed_key": "Legacy Disabled",
+            "headline": "Legacy disabled",
+            "body": "This must not publish.",
+            "source_message_ids": ["200"],
+        },
+    }, ctx)
+
+    assert outcome["outcome"] == "tool_error"
+    assert outcome["error"] == "legacy_post_disabled"
+    assert db.topics == []
+    assert db.transitions[0][0]["action"] == "legacy_post_disabled"
+
+
+def test_legacy_draft_adapter_success_and_direct_mode_diagnostics(monkeypatch):
+    db = FakeDB()
+    db.source_message_rows = [{
+        "message_id": "200",
+        "guild_id": 1,
+        "channel_id": 10,
+        "author_name": "alice",
+        "content": "Alice posted an adapter-compatible update.",
+        "attachments": [],
+        "embeds": [],
+    }]
+    monkeypatch.setenv("TOPIC_EDITOR_LEGACY_POST_MODE", "draft_adapter")
+    adapter_editor = _make_editor_with_source_rows(db=db)
+    adapter_outcome = adapter_editor._dispatch_tool_call({
+        "id": "legacy-adapter",
+        "name": "post_simple_topic",
+        "input": {
+            "proposed_key": "Adapter Topic",
+            "headline": "Adapter topic",
+            "body": "Alice posted an adapter-compatible update [1].",
+            "source_message_ids": ["200"],
+        },
+    }, _make_source_context())
+
+    assert adapter_outcome["outcome"] == "accepted"
+    assert adapter_outcome["legacy_post_mode"] == "draft_adapter"
+    assert adapter_outcome["adapter_draft_id"]
+    assert db.topics[0][0]["canonical_key"] == "adapter-topic"
+
+    monkeypatch.setenv("TOPIC_EDITOR_LEGACY_POST_MODE", "direct")
+    direct_db = FakeDB()
+    direct_db.source_message_rows = db.source_message_rows
+    direct_editor = _make_editor_with_source_rows(db=direct_db)
+    direct_outcome = direct_editor._dispatch_tool_call({
+        "id": "legacy-direct",
+        "name": "post_simple_topic",
+        "input": {
+            "proposed_key": "Direct Topic",
+            "headline": "Direct topic",
+            "body": "Rollback direct mode remains explicit.",
+            "source_message_ids": ["200"],
+        },
+    }, _make_source_context())
+
+    assert direct_outcome["outcome"] == "accepted"
+    assert direct_outcome["legacy_post_mode"] == "direct"
+    assert direct_outcome["legacy_direct_post_used"] is True
+
+
+def test_legacy_draft_adapter_validation_failure_blocks_topic_upsert(monkeypatch):
+    monkeypatch.setenv("TOPIC_EDITOR_LEGACY_POST_MODE", "draft_adapter")
+    db = FakeDB()
+    db.source_message_rows = [{
+        "message_id": "200",
+        "guild_id": 1,
+        "channel_id": 10,
+        "author_name": "alice",
+        "content": "Alice posted an adapter-compatible update.",
+        "attachments": [],
+        "embeds": [],
+    }]
+    editor = _make_editor_with_source_rows(db=db)
+    outcome = editor._dispatch_tool_call({
+        "id": "legacy-adapter-invalid",
+        "name": "post_simple_topic",
+        "input": {
+            "proposed_key": "Adapter Invalid",
+            "headline": "Adapter invalid",
+            "body": "Alice posted an update without inline citation.",
+            "source_message_ids": ["200"],
+        },
+    }, _make_source_context())
+
+    assert outcome["outcome"] in {"blocked_for_submit", "tool_error"}
+    assert outcome["legacy_post_mode"] == "draft_adapter"
+    assert db.topics == []
 
 
 def _sample_context_messages():
@@ -2383,7 +2943,8 @@ def test_post_topic_collision_returns_tool_error():
     assert transition["payload"]["collisions"][0]["topic_id"] == "topic-existing"
 
 
-def test_legacy_post_simple_topic_still_normalizes_via_alias_and_keeps_existing_storage():
+def test_legacy_post_simple_topic_still_normalizes_via_alias_and_keeps_existing_storage(monkeypatch):
+    monkeypatch.setenv("TOPIC_EDITOR_LEGACY_POST_MODE", "direct")
     db = FakeDB()
     db.source_message_rows = _sample_source_message_rows()
     editor = _make_editor_with_source_rows(db=db)
@@ -2410,7 +2971,8 @@ def test_legacy_post_simple_topic_still_normalizes_via_alias_and_keeps_existing_
     }
 
 
-def test_legacy_post_simple_topic_media_rejection_unchanged():
+def test_legacy_post_simple_topic_media_rejection_unchanged(monkeypatch):
+    monkeypatch.setenv("TOPIC_EDITOR_LEGACY_POST_MODE", "direct")
     db = FakeDB()
     db.source_message_rows = _sample_source_message_rows()
     editor = _make_editor_with_source_rows(db=db)
@@ -2436,7 +2998,8 @@ def test_legacy_post_simple_topic_media_rejection_unchanged():
     assert db.transitions[0][0]["action"] == "rejected_post_simple"
 
 
-def test_legacy_post_sectioned_topic_with_body_and_blocks_preserves_storage_shape():
+def test_legacy_post_sectioned_topic_with_body_and_blocks_preserves_storage_shape(monkeypatch):
+    monkeypatch.setenv("TOPIC_EDITOR_LEGACY_POST_MODE", "direct")
     db = FakeDB()
     db.source_message_rows = _sample_source_message_rows()
     editor = _make_editor_with_source_rows(db=db)

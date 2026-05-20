@@ -1,0 +1,15 @@
+name: t2_relight_lora_positive
+tier: core
+description: Tests whether the editor turns one strong media-backed update into a concise publishable draft.
+brief: briefs/t2_relight_lora_positive.md
+target_orchestrator: topic_editor_replay
+priming:
+  window:
+    guild_id: 1076117621407223829
+    start: "2026-05-19T17:00:00Z"
+    end: "2026-05-19T18:10:00Z"
+  fixtures:
+    window: t2_relight_lora_positive
+assessment:
+  universal_checks: true
+  expected_final_action: submit_draft

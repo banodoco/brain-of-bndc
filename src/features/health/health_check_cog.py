@@ -152,6 +152,12 @@ class HealthCheckCog(commands.Cog):
                 "Latest topic-editor run had failed or partial publications: "
                 f"{latest.get('failed_publish_count')}"
             ]
+        if latest.get('source_message_count') is not None and int(latest.get('source_message_count') or 0) == 0:
+            return ["Latest topic-editor run had no source data"]
+
+        draft_alert = self._check_topic_editor_drafts(sb, cutoff)
+        if draft_alert:
+            return [draft_alert]
 
         publication_result = (
             sb.table('topics')
@@ -172,7 +178,130 @@ class HealthCheckCog(commands.Cog):
                 f"{first.get('headline') or first.get('topic_id')} "
                 f"({first.get('publication_status')})"
             ]
+        transition_alert = self._check_topic_editor_transition_diagnostics(sb, cutoff)
+        if transition_alert:
+            return [transition_alert]
         return []
+
+    @staticmethod
+    def _topic_editor_diagnostic_codes(row: dict) -> set[str]:
+        codes: set[str] = set()
+        diagnostics = row.get('publish_diagnostics') or {}
+        if isinstance(diagnostics, dict):
+            for code in diagnostics.get('reason_codes') or []:
+                if code:
+                    codes.add(str(code))
+            for failure in diagnostics.get('media_failures') or []:
+                if isinstance(failure, dict) and failure.get('reason_code'):
+                    codes.add(str(failure.get('reason_code')))
+            if diagnostics.get('renderer_safety_chunking_used'):
+                codes.add('renderer_safety_chunking_used')
+            if diagnostics.get('legacy_direct_post_used'):
+                codes.add('legacy_direct_post_used')
+        validation = row.get('validation_result') or {}
+        if isinstance(validation, dict):
+            if validation.get('errors'):
+                codes.add('draft_validation_failed')
+            validation_text = str(validation).lower()
+            if 'preview' in validation_text and (
+                'stale' in validation_text
+                or 'missing' in validation_text
+                or 'latest_valid_preview_hash' in validation_text
+            ):
+                codes.add('stale_or_missing_preview')
+        publish_result = row.get('publish_result') or {}
+        if isinstance(publish_result, dict):
+            status = publish_result.get('status')
+            if status in {'failed', 'partial'}:
+                codes.add(f'publish_{status}')
+        if row.get('status') == 'needs_revision':
+            codes.add('draft_validation_failed')
+        if row.get('status') == 'abandoned':
+            codes.add('draft_abandoned')
+        return codes
+
+    @staticmethod
+    def _topic_editor_alert_for_codes(codes: set[str], label: str) -> str | None:
+        if not codes:
+            return None
+        priority = [
+            ('draft_validation_failed', 'draft validation failed'),
+            ('draft_abandoned', 'draft abandoned'),
+            ('stale_or_missing_preview', 'stale or missing preview submit refusal'),
+            ('legacy_post_disabled', 'legacy direct-post refusal'),
+            ('legacy_direct_post_used', 'legacy direct-post usage'),
+            ('publish_failed', 'publish failed'),
+            ('publish_partial', 'publish partially succeeded'),
+            ('media_url_expired', 'media URL expired'),
+            ('media_payload_too_large', 'media payload too large'),
+            ('renderer_safety_chunking_used', 'renderer safety chunking used'),
+        ]
+        for code, message in priority:
+            if code in codes:
+                return f"Topic-editor {message}: {label}"
+        return f"Topic-editor diagnostics present: {label} ({', '.join(sorted(codes))})"
+
+    def _check_topic_editor_drafts(self, sb, cutoff: str) -> str | None:
+        try:
+            result = (
+                sb.table('topic_editor_drafts')
+                .select(
+                    'draft_id,run_id,topic_id,status,validation_result,publish_result,'
+                    'publish_diagnostics,revision_number,revision_hash,'
+                    'latest_valid_preview_hash,updated_at'
+                )
+                .gte('updated_at', cutoff)
+                .order('updated_at', desc=True)
+                .limit(10)
+                .execute()
+            )
+        except Exception as e:
+            logger.debug(f"[HealthCheck] topic_editor_drafts unavailable: {e}")
+            return None
+        for draft in result.data or []:
+            codes = self._topic_editor_diagnostic_codes(draft)
+            alert = self._topic_editor_alert_for_codes(
+                codes,
+                str(draft.get('draft_id') or draft.get('run_id') or 'draft'),
+            )
+            if alert:
+                return alert
+        return None
+
+    def _check_topic_editor_transition_diagnostics(self, sb, cutoff: str) -> str | None:
+        try:
+            result = (
+                sb.table('topic_transitions')
+                .select('transition_id,run_id,topic_id,action,reason,extra,metadata,created_at')
+                .gte('created_at', cutoff)
+                .order('created_at', desc=True)
+                .limit(20)
+                .execute()
+            )
+        except Exception as e:
+            logger.debug(f"[HealthCheck] topic_transitions unavailable: {e}")
+            return None
+        for transition in result.data or []:
+            text = (
+                f"{transition.get('action') or ''} "
+                f"{transition.get('reason') or ''} "
+                f"{transition.get('extra') or transition.get('metadata') or ''}"
+            ).lower()
+            codes: set[str] = set()
+            if 'legacy_post_disabled' in text:
+                codes.add('legacy_post_disabled')
+            if 'legacy_direct_post_used' in text:
+                codes.add('legacy_direct_post_used')
+            extra = transition.get('extra') or transition.get('metadata') or {}
+            if isinstance(extra, dict):
+                codes.update(self._topic_editor_diagnostic_codes(extra))
+            alert = self._topic_editor_alert_for_codes(
+                codes,
+                str(transition.get('transition_id') or transition.get('run_id') or 'transition'),
+            )
+            if alert:
+                return alert
+        return None
 
     # ------------------------------------------------------------------
     # Admin notification

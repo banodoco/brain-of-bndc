@@ -113,6 +113,8 @@ def test_admin_agent_prompt_and_queryable_tables_label_live_state():
     assert "legacy history only" in admin_agent.SYSTEM_PROMPT
     assert "legacy rollback only" in admin_agent.SYSTEM_PROMPT
     assert "topic_editor_runs" in admin_tools.QUERYABLE_TABLES
+    assert "topic_editor_drafts" in admin_tools.QUERYABLE_TABLES
+    assert "topic_editor_drafts" in admin_agent.SYSTEM_PROMPT
     assert "topics" in admin_tools.QUERYABLE_TABLES
     assert "topic_transitions" in admin_tools.QUERYABLE_TABLES
     assert "live_update_feed_items" in admin_tools.QUERYABLE_TABLES
@@ -122,6 +124,7 @@ def test_admin_agent_prompt_and_queryable_tables_label_live_state():
     live_tool = next(tool for tool in admin_tools.TOOLS if tool["name"] == "get_live_update_status")
     assert "legacy" in daily_tool["description"]
     assert "active topic-editor state" in live_tool["description"]
+    assert "null-topic" in live_tool["description"]
 
 
 def test_get_live_update_status_reads_topic_editor_primary_and_labels_legacy_rollback(monkeypatch):
@@ -186,6 +189,31 @@ def test_get_live_update_status_reads_topic_editor_primary_and_labels_legacy_rol
                 "created_at": "2999-01-01T00:00:01+00:00",
             },
         ],
+        "topic_editor_drafts": [
+            {
+                "guild_id": 1,
+                "draft_id": "draft-1",
+                "run_id": "run-1",
+                "topic_id": None,
+                "status": "needs_revision",
+                "validation_result": {
+                    "errors": [{"path": "latest_valid_preview_hash", "message": "missing preview"}],
+                    "warnings": [],
+                },
+                "preview_units": [{"type": "text", "content": "preview"}],
+                "publish_result": None,
+                "publish_diagnostics": {
+                    "reason_codes": ["media_url_expired"],
+                    "renderer_safety_chunking_used": True,
+                    "media_failures": [{"reason_code": "media_payload_too_large"}],
+                },
+                "revision_number": 2,
+                "revision_hash": "hash-2",
+                "revision_attempts": 1,
+                "latest_valid_preview_hash": None,
+                "updated_at": "2999-01-01T00:00:05+00:00",
+            }
+        ],
         "editorial_observations": [
             {
                 "guild_id": 1,
@@ -217,9 +245,77 @@ def test_get_live_update_status_reads_topic_editor_primary_and_labels_legacy_rol
     assert result["state_counts"]["recent_rejections"] == 1
     assert result["state_counts"]["recent_overrides"] == 1
     assert result["state_counts"]["publication_problems"] == 1
+    assert result["state_counts"]["draft_validation_failures"] == 1
+    assert result["drafts"][0]["topic_id"] is None
+    assert result["draft_summaries"][0]["revision_hash"] == "hash-2"
+    assert result["draft_summaries"][0]["preview_text_unit_count"] == 1
+    assert "draft_validation_failed" in result["diagnostic_categories"]
+    assert "stale_or_missing_preview" in result["diagnostic_categories"]
+    assert "media_url_expired" in result["diagnostic_categories"]
+    assert "media_payload_too_large" in result["diagnostic_categories"]
+    assert "renderer_safety_chunking_used" in result["diagnostic_categories"]
     assert result["override_rate"] == 0.5
     assert "Topic-editor primary status" in result["summary"]
     assert "Failed/partial publications: 1 topics" in result["summary"]
     assert "Recent rejections:" in result["summary"]
     assert "Rollback legacy live-update state only" in result["summary"]
     assert result["legacy_rollback_state"]["runs"][0]["run_id"] == "legacy-run"
+
+
+def test_health_check_alerts_for_draft_validation_before_publication_problems():
+    cog = make_health_cog(FakeSupabase({
+        "topic_editor_runs": [
+            {
+                "run_id": "run-1",
+                "status": "completed",
+                "started_at": "2999-01-01T00:00:00+00:00",
+                "source_message_count": 2,
+                "failed_publish_count": 0,
+            }
+        ],
+        "topic_editor_drafts": [
+            {
+                "draft_id": "draft-1",
+                "status": "needs_revision",
+                "validation_result": {"errors": [{"message": "card too long"}]},
+                "updated_at": "2999-01-01T00:00:01+00:00",
+            }
+        ],
+    }))
+
+    alerts = cog._check_live_update_editor()
+
+    assert alerts == ["Topic-editor draft validation failed: draft-1"]
+
+
+def test_health_check_alerts_for_legacy_and_media_diagnostics_from_transitions():
+    cog = make_health_cog(FakeSupabase({
+        "topic_editor_runs": [
+            {
+                "run_id": "run-1",
+                "status": "completed",
+                "started_at": "2999-01-01T00:00:00+00:00",
+                "source_message_count": 2,
+                "failed_publish_count": 0,
+            }
+        ],
+        "topic_editor_drafts": [],
+        "topics": [],
+        "topic_transitions": [
+            {
+                "transition_id": "trans-1",
+                "run_id": "run-1",
+                "action": "publish_partial",
+                "extra": {
+                    "publish_diagnostics": {
+                        "reason_codes": ["legacy_post_disabled", "media_payload_too_large"]
+                    }
+                },
+                "created_at": "2999-01-01T00:00:01+00:00",
+            }
+        ],
+    }))
+
+    alerts = cog._check_live_update_editor()
+
+    assert alerts == ["Topic-editor legacy direct-post refusal: trans-1"]
