@@ -1,17 +1,17 @@
-"""Claude agent with tool use for admin chat.
+"""DeepSeek-backed agent with tool use for admin chat.
 
 Follows the Arnold pattern:
-1. Send message to Claude with available tools
-2. If Claude calls tools, execute them and feed results back
-3. Repeat until Claude calls the 'reply' tool
+1. Send message to the model with available tools
+2. If the model calls tools, execute them and feed results back
+3. Repeat until the model calls the 'reply' tool
 """
 import os
 import json
 import logging
 from typing import List, Dict, Any, Optional
-import anthropic
 from dotenv import load_dotenv
 
+from src.common.llm.deepseek_client import DeepSeekClient
 from .tools import TOOLS, execute_tool
 
 # Tools that already post user-visible output directly to a Discord channel.
@@ -185,7 +185,7 @@ MAX_CONVERSATION_BYTES = 80_000
 
 
 class AdminChatAgent:
-    """Handles Claude conversations with tool use for admin chat."""
+    """Handles DeepSeek conversations with tool use for admin chat."""
 
     def __init__(self, bot, db_handler, sharer):
         self.bot = bot
@@ -193,12 +193,8 @@ class AdminChatAgent:
         self.sharer = sharer
         self._abort_requested: dict[int, bool] = {}
 
-        api_key = os.getenv('ANTHROPIC_API_KEY')
-        if not api_key:
-            raise ValueError("ANTHROPIC_API_KEY not found in environment")
-
-        self.client = anthropic.AsyncAnthropic(api_key=api_key)
-        self.model = "claude-opus-4-6"
+        self.client = DeepSeekClient()
+        self.model = os.getenv("ADMIN_CHAT_MODEL", "deepseek-v4-pro")
 
     def request_abort(self, user_id: int):
         """Signal the agent loop to stop for this user."""
@@ -254,9 +250,9 @@ class AdminChatAgent:
         """Process a chat message and return the response.
 
         Follows the Arnold pattern:
-        1. Send message to Claude with available tools
-        2. If Claude calls tools, execute them and feed results back
-        3. Repeat until Claude calls the 'reply' tool
+        1. Send message to the model with available tools
+        2. If the model calls tools, execute them and feed results back
+        3. Repeat until the model calls the 'reply' tool
 
         Args:
             channel_context: If the message came from a public channel, contains
@@ -335,7 +331,7 @@ class AdminChatAgent:
 
                 logger.debug(f"[AdminChat] Iteration {iteration + 1}")
                 
-                # Call Claude
+                # Call the LLM
                 # Inject runtime values into system prompt
                 bot_user_id = self.bot.user.id if self.bot and self.bot.user else "unknown"
                 sc = getattr(getattr(self.bot, 'db_handler', None), 'server_config', None) if self.bot else None
@@ -361,23 +357,26 @@ class AdminChatAgent:
                 system += _POM_ADDENDUM
 
                 # Show "is typing..." during API call, stops when call completes
-                if channel:
-                    async with channel.typing():
-                        response = await self.client.messages.create(
+                try:
+                    if channel:
+                        async with channel.typing():
+                            response = await self.client.generate_chat_completion(
+                                model=self.model,
+                                system_prompt=system,
+                                messages=messages,
+                                max_tokens=4096,
+                                tools=available_tools,
+                            )
+                    else:
+                        response = await self.client.generate_chat_completion(
                             model=self.model,
+                            system_prompt=system,
+                            messages=messages,
                             max_tokens=4096,
-                            system=system,
                             tools=available_tools,
-                            messages=messages
                         )
-                else:
-                    response = await self.client.messages.create(
-                        model=self.model,
-                        max_tokens=4096,
-                        system=system,
-                        tools=available_tools,
-                        messages=messages
-                    )
+                except Exception as e:
+                    raise _AdminChatModelError(str(e)) from e
                 
                 logger.debug(f"[AdminChat] Response stop_reason: {response.stop_reason}")
                 
@@ -385,8 +384,8 @@ class AdminChatAgent:
                 tool_uses = [c for c in response.content if c.type == "tool_use"]
                 
                 if not tool_uses:
-                    # Claude responded with text only - extract it
-                    messages.append({"role": "assistant", "content": response.content})
+                    # The model responded with text only - extract it
+                    messages.append({"role": "assistant", "content": _content_blocks_to_dicts(response.content)})
                     text_content = next((c for c in response.content if c.type == "text"), None)
                     if text_content and text_content.text:
                         final_replies.append(text_content.text)
@@ -470,7 +469,7 @@ class AdminChatAgent:
                     })
                 
                 # Add assistant message and tool results to conversation
-                messages.append({"role": "assistant", "content": response.content})
+                messages.append({"role": "assistant", "content": _content_blocks_to_dicts(response.content)})
                 messages.append({"role": "user", "content": tool_results})
 
                 # If aborted, break out of the loop
@@ -503,10 +502,45 @@ class AdminChatAgent:
             # Return list of messages (or None if ended without reply)
             return final_replies if final_replies else None
             
-        except anthropic.APIError as e:
-            logger.error(f"[AdminChat] Anthropic API error: {e}", exc_info=True)
+        except _AdminChatModelError as e:
+            logger.error(f"[AdminChat] DeepSeek API error: {e}", exc_info=True)
             return ["I couldn't complete that right now because the model API failed."]
         
         except Exception as e:
             logger.error(f"[AdminChat] Unexpected error: {e}", exc_info=True)
             return ["I hit an internal error while trying to do that."]
+
+
+def _content_blocks_to_dicts(blocks: List[Any]) -> List[Dict[str, Any]]:
+    """Store model content blocks in the Anthropic-like dict shape used by the tool loop."""
+    out: List[Dict[str, Any]] = []
+    for block in blocks or []:
+        if isinstance(block, dict):
+            out.append(dict(block))
+            continue
+
+        block_type = getattr(block, "type", None)
+        if block_type == "text":
+            out.append({"type": "text", "text": getattr(block, "text", "")})
+        elif block_type == "tool_use":
+            out.append({
+                "type": "tool_use",
+                "id": getattr(block, "id", None),
+                "name": getattr(block, "name", None),
+                "input": getattr(block, "input", {}) or {},
+            })
+        elif block_type == "openai_assistant_message":
+            out.append({
+                "type": "openai_assistant_message",
+                "message": getattr(block, "message", {}) or {},
+            })
+        elif block_type == "reasoning_content":
+            out.append({
+                "type": "reasoning_content",
+                "reasoning_content": getattr(block, "reasoning_content", ""),
+            })
+    return out
+
+
+class _AdminChatModelError(Exception):
+    """Raised when the backing LLM call fails."""

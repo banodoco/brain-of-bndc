@@ -9,9 +9,9 @@ from collections import deque
 from typing import Dict, Literal, Optional
 from uuid import uuid4
 import discord
-from anthropic import AsyncAnthropic
 from discord.ext import commands, tasks
 
+from src.common.llm.deepseek_client import DeepSeekClient
 from src.common.db_handler import WalletUpdateBlockedError
 from src.features.payments.payment_service import PaymentActor, PaymentActorKind
 from .agent import AdminChatAgent
@@ -97,11 +97,17 @@ class AdminChatCog(commands.Cog):
         self._guild_context_cache: dict[int, tuple[float, int | None]] = {}
         self._rate_limits: dict[int, deque[float]] = {}
         self._processing_intents: set[str] = set()
-        self._classifier_model = "claude-opus-4-6"
-        api_key = os.getenv('ANTHROPIC_API_KEY')
-        self._classifier_client = AsyncAnthropic(api_key=api_key) if api_key else None
-        if not api_key:
-            logger.warning("[AdminChat] ANTHROPIC_API_KEY not set - payment reply classification will fail closed")
+        self._classifier_model = os.getenv(
+            "ADMIN_CHAT_CLASSIFIER_MODEL",
+            os.getenv("ADMIN_CHAT_MODEL", "deepseek-v4-pro"),
+        )
+        try:
+            self._classifier_client = DeepSeekClient()
+        except Exception:
+            self._classifier_client = None
+            logger.warning(
+                "[AdminChat] DEEPSEEK_API_KEY not set - payment reply classification will use keyword fallback"
+            )
 
         # Get admin user ID
         admin_id_str = os.getenv('ADMIN_USER_ID')
@@ -186,13 +192,13 @@ class AdminChatCog(commands.Cog):
             return keyword_result, None
 
         try:
-            response = await self._classifier_client.messages.create(
+            response = await self._classifier_client.generate_chat_completion(
                 model=self._classifier_model,
+                system_prompt=_CLASSIFIER_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": content or ""}],
                 max_tokens=256,
-                system=_CLASSIFIER_SYSTEM_PROMPT,
                 tools=[_CLASSIFIER_TOOL],
                 tool_choice={"type": "tool", "name": "classify_payment_reply"},
-                messages=[{"role": "user", "content": content or ""}],
             )
         except Exception:
             logger.warning(
