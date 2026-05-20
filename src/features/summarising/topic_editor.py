@@ -722,6 +722,30 @@ class TopicEditor:
                 run_id,
                 len(aliases or []),
             )
+            metadata["source_message_timestamps"] = [m.get("created_at") for m in messages if m.get("created_at")]
+            metadata["source_channel_counts"] = self._tally_channels(messages)
+            metadata["active_topics_count"] = len(active_topics)
+            metadata["auto_shortlisted_media"] = [
+                {
+                    "topic_id": entry.get("topic_id"),
+                    "message_id": entry.get("message_id"),
+                    "reaction_count": entry.get("reaction_count"),
+                    "media_ref": entry.get("media_ref"),
+                    "headline": entry.get("headline"),
+                    "status": entry.get("status"),
+                }
+                for entry in auto_shortlisted_media
+            ]
+            self._persist_run_progress(
+                run_id,
+                checkpoint_before=checkpoint,
+                checkpoint_after=checkpoint,
+                messages=messages,
+                tool_calls=[],
+                outcomes=[],
+                started=started,
+                metadata=metadata,
+            )
             if not messages:
                 updates = self._run_updates(
                     checkpoint_before=checkpoint,
@@ -854,6 +878,27 @@ class TopicEditor:
                         forced_close = True
                         forced_close_reason = "max_turns_reached_without_finalize"
                         break
+                    metadata["tool_calls"] = [
+                        {"id": call["id"], "name": call["name"], "input": call["input"]}
+                        for call in tool_calls
+                    ]
+                    metadata["usage"] = {"input_tokens": total_input_tokens, "output_tokens": total_output_tokens}
+                    metadata["cumulative_cost_usd"] = cumulative_cost_usd if has_cost_estimate else None
+                    metadata["cumulative_tokens"] = cumulative_tokens
+                    metadata["max_cost_usd"] = max_cost_usd
+                    metadata["max_tokens"] = max_tokens
+                    metadata["turn_count"] = turn_count
+                    metadata["reasoning"] = "\n\n".join(text_chunks).strip()
+                    self._persist_run_progress(
+                        run_id,
+                        checkpoint_before=checkpoint,
+                        checkpoint_after=checkpoint,
+                        messages=messages,
+                        tool_calls=tool_calls,
+                        outcomes=outcomes,
+                        started=started,
+                        metadata={**metadata, "outcomes": outcomes},
+                    )
                     continue
 
                 # Dispatch each tool call this turn, building tool_result blocks.
@@ -875,6 +920,31 @@ class TopicEditor:
                 if assistant_content:
                     messages_arg.append({"role": "assistant", "content": assistant_content})
                 messages_arg.append({"role": "user", "content": turn_results})
+                metadata["tool_calls"] = [
+                    {"id": call["id"], "name": call["name"], "input": call["input"]}
+                    for call in tool_calls
+                ]
+                metadata["usage"] = {"input_tokens": total_input_tokens, "output_tokens": total_output_tokens}
+                metadata["cumulative_cost_usd"] = cumulative_cost_usd if has_cost_estimate else None
+                metadata["cumulative_tokens"] = cumulative_tokens
+                metadata["max_cost_usd"] = max_cost_usd
+                metadata["max_tokens"] = max_tokens
+                metadata["turn_count"] = turn_count
+                metadata["reasoning"] = "\n\n".join(text_chunks).strip()
+                self._persist_run_progress(
+                    run_id,
+                    checkpoint_before=checkpoint,
+                    checkpoint_after=checkpoint,
+                    messages=messages,
+                    tool_calls=tool_calls,
+                    outcomes=outcomes,
+                    started=started,
+                    metadata={**metadata, "outcomes": outcomes},
+                    accepted_count=sum(1 for outcome in outcomes if outcome.get("outcome") == "accepted"),
+                    rejected_count=sum(1 for outcome in outcomes if str(outcome.get("outcome", "")).startswith("rejected")),
+                    override_count=sum(int(outcome.get("override_count", 0)) for outcome in outcomes),
+                    observation_count=sum(1 for outcome in outcomes if outcome.get("action") == "observation"),
+                )
 
                 if dispatcher_context.get("finalize"):
                     break
@@ -922,10 +992,10 @@ class TopicEditor:
             metadata["reasoning"] = finalize.get("overall_reasoning") or "\n\n".join(text_chunks).strip()
             metadata["topics_considered"] = finalize.get("topics_considered") or []
             # Capture surface info for the trace embed.
-            metadata["source_message_timestamps"] = [m.get("created_at") for m in messages if m.get("created_at")]
-            metadata["source_channel_counts"] = self._tally_channels(messages)
-            metadata["active_topics_count"] = len(active_topics)
-            metadata["auto_shortlisted_media"] = [
+            metadata.setdefault("source_message_timestamps", [m.get("created_at") for m in messages if m.get("created_at")])
+            metadata.setdefault("source_channel_counts", self._tally_channels(messages))
+            metadata.setdefault("active_topics_count", len(active_topics))
+            metadata.setdefault("auto_shortlisted_media", [
                 {
                     "topic_id": entry.get("topic_id"),
                     "message_id": entry.get("message_id"),
@@ -935,7 +1005,7 @@ class TopicEditor:
                     "status": entry.get("status"),
                 }
                 for entry in auto_shortlisted_media
-            ]
+            ])
 
             publish_results = await self._publish_created_topics(dispatcher_context["created_topics"])
             metadata["publish_results"] = publish_results
@@ -3303,6 +3373,49 @@ class TopicEditor:
             "skipped_reason": skipped_reason,
             "metadata": metadata,
         }
+
+    def _persist_run_progress(
+        self,
+        run_id: str,
+        *,
+        checkpoint_before: Dict[str, Any],
+        checkpoint_after: Dict[str, Any],
+        messages: Sequence[Dict[str, Any]],
+        tool_calls: Sequence[Dict[str, Any]],
+        outcomes: Sequence[Dict[str, Any]],
+        started: float,
+        metadata: Dict[str, Any],
+        accepted_count: int = 0,
+        rejected_count: int = 0,
+        override_count: int = 0,
+        observation_count: int = 0,
+    ) -> None:
+        updater = getattr(self.db, "update_topic_editor_run", None)
+        if not callable(updater):
+            return
+        try:
+            updates = self._run_updates(
+                checkpoint_before=checkpoint_before,
+                checkpoint_after=checkpoint_after,
+                messages=messages,
+                tool_calls=tool_calls,
+                started=started,
+                metadata=metadata,
+                accepted_count=accepted_count,
+                rejected_count=rejected_count,
+                override_count=override_count,
+                observation_count=observation_count,
+                status="running",
+            )
+            updates["metadata"] = {**(updates.get("metadata") or {}), "outcomes": list(outcomes or [])}
+            updater(
+                run_id,
+                updates,
+                guild_id=self._resolve_guild_id(),
+                environment=self.environment,
+            )
+        except Exception as exc:
+            logger.warning("TopicEditor progress persistence failed: %s", exc, exc_info=True)
 
     async def _publish_created_topics(self, topics: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
         publishable = [

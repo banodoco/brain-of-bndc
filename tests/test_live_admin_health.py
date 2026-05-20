@@ -49,6 +49,17 @@ class FakeSupabase:
         return FakeQuery(self.tables.get(name, []))
 
 
+class RaisingSupabase(FakeSupabase):
+    def __init__(self, tables, broken_tables):
+        super().__init__(tables)
+        self.broken_tables = set(broken_tables)
+
+    def table(self, name):
+        if name in self.broken_tables:
+            raise RuntimeError(f'relation "public.{name}" does not exist')
+        return super().table(name)
+
+
 def make_health_cog(fake_supabase):
     cog = HealthCheckCog.__new__(HealthCheckCog)
     cog.db = SimpleNamespace(
@@ -299,6 +310,38 @@ def test_get_live_update_status_reads_topic_editor_primary_and_labels_legacy_rol
     assert "Recent rejections:" in result["summary"]
     assert "Rollback legacy live-update state only" in result["summary"]
     assert result["legacy_rollback_state"]["runs"][0]["run_id"] == "legacy-run"
+
+
+def test_get_live_update_status_reports_optional_schema_gaps_without_failing(monkeypatch):
+    fake_supabase = RaisingSupabase({
+        "topic_editor_runs": [
+            {
+                "guild_id": 1,
+                "run_id": "run-1",
+                "status": "running",
+                "started_at": "2999-01-01T00:00:00+00:00",
+                "source_message_count": 0,
+                "failed_publish_count": 0,
+            }
+        ],
+        "topics": [],
+        "topic_transitions": [],
+        "live_update_editor_runs": [],
+        "live_update_feed_items": [],
+        "live_update_watchlist": [],
+        "live_update_duplicate_state": [],
+    }, broken_tables={"topic_editor_drafts"})
+
+    monkeypatch.setattr(admin_tools, "_get_supabase", lambda: fake_supabase)
+    monkeypatch.setattr(admin_tools, "_resolve_guild_id", lambda _params: 1)
+
+    result = asyncio.run(admin_tools.execute_get_live_update_status({"hours": 24, "limit": 5}))
+
+    assert result["success"] is True
+    assert "topic_editor_drafts" in result["table_errors"]
+    assert "missing_or_unreadable_topic_editor_drafts" in result["diagnostic_categories"]
+    assert "no_recent_source_data" not in result["diagnostic_categories"]
+    assert "Schema/data gaps: topic_editor_drafts" in result["summary"]
 
 
 def test_health_check_alerts_for_draft_validation_before_publication_problems():

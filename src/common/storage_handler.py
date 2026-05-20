@@ -824,6 +824,19 @@ class StorageHandler:
                 payload[key] = self._as_json_object(payload[key])
         return await self._update_live_row('topic_editor_runs', 'run_id', run_id, payload)
 
+    async def update_topic_editor_run(
+        self,
+        run_id: str,
+        updates: Optional[Dict[str, Any]] = None,
+        environment: str = 'prod',
+    ) -> Optional[Dict[str, Any]]:
+        payload = dict(updates or {})
+        payload['environment'] = environment
+        for key in ('checkpoint_before', 'checkpoint_after', 'metadata'):
+            if key in payload:
+                payload[key] = self._as_json_object(payload[key])
+        return await self._update_live_row('topic_editor_runs', 'run_id', run_id, payload)
+
     async def fail_topic_editor_run(
         self,
         run_id: str,

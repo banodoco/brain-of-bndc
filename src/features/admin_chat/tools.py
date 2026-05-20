@@ -2427,6 +2427,7 @@ async def execute_get_live_update_status(params: Dict[str, Any]) -> Dict[str, An
         guild_id = _resolve_guild_id(params)
         sb = _get_supabase()
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        table_errors: Dict[str, str] = {}
 
         def _fetch(
             table: str,
@@ -2434,19 +2435,27 @@ async def execute_get_live_update_status(params: Dict[str, Any]) -> Dict[str, An
             order_col: str = "created_at",
             since_col: Optional[str] = None,
             row_limit: Optional[int] = None,
+            optional: bool = False,
         ):
-            query = sb.table(table).select("*")
-            if guild_id:
-                query = query.eq("guild_id", guild_id)
-            if since_col:
-                query = query.gte(since_col, cutoff)
-            return query.order(order_col, desc=True).limit(row_limit or limit).execute().data or []
+            try:
+                query = sb.table(table).select("*")
+                if guild_id:
+                    query = query.eq("guild_id", guild_id)
+                if since_col:
+                    query = query.gte(since_col, cutoff)
+                return query.order(order_col, desc=True).limit(row_limit or limit).execute().data or []
+            except Exception as exc:
+                if not optional:
+                    raise
+                table_errors[table] = str(exc)
+                logger.warning("[AdminChat] Optional live status table unavailable: %s: %s", table, exc)
+                return []
 
         runs = _fetch("topic_editor_runs", order_col="started_at", since_col="started_at")
         topics = _fetch("topics", order_col="updated_at")
-        drafts = _fetch("topic_editor_drafts", order_col="updated_at", since_col="updated_at")
+        drafts = _fetch("topic_editor_drafts", order_col="updated_at", since_col="updated_at", optional=True)
         transitions = _fetch("topic_transitions", order_col="created_at", since_col="created_at")
-        observations = _fetch("editorial_observations", order_col="created_at", since_col="created_at")
+        observations = _fetch("editorial_observations", order_col="created_at", since_col="created_at", optional=True)
         legacy_runs = _fetch("live_update_editor_runs", order_col="created_at")
         legacy_feed_items = _fetch("live_update_feed_items", order_col="created_at")
         legacy_watchlist = _fetch("live_update_watchlist")
@@ -2530,16 +2539,25 @@ async def execute_get_live_update_status(params: Dict[str, Any]) -> Dict[str, An
             latest_run = runs[0]
             if latest_run.get("status") == "failed":
                 run_diagnostic_codes.add("run_failed")
-            if latest_run.get("source_message_count") is not None and int(latest_run.get("source_message_count") or 0) == 0:
+            if (
+                latest_run.get("status") != "running"
+                and latest_run.get("source_message_count") is not None
+                and int(latest_run.get("source_message_count") or 0) == 0
+            ):
                 run_diagnostic_codes.add("no_recent_source_data")
             if int(latest_run.get("failed_publish_count") or 0) > 0:
                 run_diagnostic_codes.add("publish_failed")
+        schema_diagnostic_codes = {
+            f"missing_or_unreadable_{table}"
+            for table in table_errors
+        }
 
         diagnostic_categories = sorted(
             draft_diagnostic_codes
             | transition_diagnostic_codes
             | topic_diagnostic_codes
             | run_diagnostic_codes
+            | schema_diagnostic_codes
         )
 
         def _preview_summary(draft: Dict[str, Any]) -> Dict[str, Any]:
@@ -2593,6 +2611,7 @@ async def execute_get_live_update_status(params: Dict[str, Any]) -> Dict[str, An
             ),
             f"Failed/partial publications: {len(publication_problems)} topics.",
             f"Diagnostics: {', '.join(diagnostic_categories) if diagnostic_categories else 'none'}.",
+            f"Schema/data gaps: {', '.join(table_errors.keys()) if table_errors else 'none'}.",
             f"Recent rejections: {len(recent_rejections)}; overrides: {len(recent_overrides)}.",
             "Rollback legacy live-update state only: live_update_* rows are not the active overview system.",
         ])
@@ -2616,6 +2635,7 @@ async def execute_get_live_update_status(params: Dict[str, Any]) -> Dict[str, An
                 "abandoned_drafts": draft_status_counts.get("abandoned", 0),
             },
             "diagnostic_categories": diagnostic_categories,
+            "table_errors": table_errors,
             "override_rate": override_rate,
             "publication_problems": publication_problems,
             "summary": summary,

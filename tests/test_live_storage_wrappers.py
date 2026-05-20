@@ -134,6 +134,12 @@ def test_storage_topic_editor_helpers_route_to_new_tables_without_touching_legac
         "trigger": "scheduled",
         "checkpoint_before": {"last_message_id": 100},
     }))
+    run_update = asyncio.run(storage.update_topic_editor_run("run-1", {
+        "guild_id": 1,
+        "status": "running",
+        "source_message_count": 4,
+        "metadata": {"partial": True},
+    }))
     topic = asyncio.run(storage.upsert_topic({
         "guild_id": 1,
         "canonical_key": "demo-topic",
@@ -184,6 +190,9 @@ def test_storage_topic_editor_helpers_route_to_new_tables_without_touching_legac
     }))
 
     assert run["_table"] == "topic_editor_runs"
+    assert run_update["_table"] == "topic_editor_runs"
+    assert run_update["status"] == "running"
+    assert run_update["source_message_count"] == 4
     assert topic["_table"] == "topics"
     assert source["_table"] == "topic_sources"
     assert alias["_table"] == "topic_aliases"
@@ -206,6 +215,10 @@ def test_db_handler_topic_editor_wrappers_are_reachable_through_storage_handler(
         async def complete_topic_editor_run(self, run_id, updates=None, environment="prod"):
             calls.append(("complete", run_id, updates, environment))
             return {"run_id": run_id, "status": "completed"}
+
+        async def update_topic_editor_run(self, run_id, updates=None, environment="prod"):
+            calls.append(("update-run", run_id, updates, environment))
+            return {"run_id": run_id, **(updates or {})}
 
         async def fail_topic_editor_run(self, run_id, error_message, updates=None, environment="prod"):
             calls.append(("fail", run_id, error_message, updates, environment))
@@ -274,6 +287,11 @@ def test_db_handler_topic_editor_wrappers_are_reachable_through_storage_handler(
 
     assert db.acquire_topic_editor_run({"guild_id": 1, "live_channel_id": 20}, environment="dev") == {"run_id": "run-1"}
     assert db.complete_topic_editor_run("run-1", {"guild_id": 1}) == {"run_id": "run-1", "status": "completed"}
+    assert db.update_topic_editor_run("run-1", {"guild_id": 1, "source_message_count": 4}) == {
+        "run_id": "run-1",
+        "guild_id": 1,
+        "source_message_count": 4,
+    }
     assert db.fail_topic_editor_run("run-1", "boom", {"guild_id": 1}) == {"run_id": "run-1", "status": "failed"}
     assert db.upsert_topic({"guild_id": 1, "canonical_key": "demo"}) == {"topic_id": "topic-1"}
     assert db.add_topic_source({"guild_id": 1, "topic_id": "topic-1", "message_id": 100}) == {"topic_source_id": "source-1"}
@@ -299,6 +317,7 @@ def test_db_handler_topic_editor_wrappers_are_reachable_through_storage_handler(
     assert [call[0] for call in calls] == [
         "acquire",
         "complete",
+        "update-run",
         "fail",
         "topic",
         "source",
