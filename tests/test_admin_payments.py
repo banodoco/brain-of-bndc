@@ -687,6 +687,7 @@ class FakeGrantDB:
 def admin_chat_env(monkeypatch):
     monkeypatch.setenv("ADMIN_USER_ID", "999")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
 
 
 def test_parse_wallet_from_text_extracts_wrapped_address():
@@ -723,7 +724,6 @@ def test_classify_confirmation_negative_phrase_beats_embedded_positive_keyword()
 @pytest.mark.anyio
 async def test_classify_confirmation_llm_confirmed_maps_to_positive(monkeypatch):
     cog = AdminChatCog(FakeBot(FakeChannel(), payment_service=object()), FakeIntentDB(), sharer=object())
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     create_mock = AsyncMock(
         return_value=SimpleNamespace(
             content=[
@@ -735,7 +735,7 @@ async def test_classify_confirmation_llm_confirmed_maps_to_positive(monkeypatch)
             ]
         )
     )
-    cog._classifier_client = SimpleNamespace(messages=SimpleNamespace(create=create_mock))
+    cog._classifier_client = SimpleNamespace(generate_chat_completion=create_mock)
 
     result = await cog._classify_confirmation("yes, I see it in my wallet")
 
@@ -746,7 +746,6 @@ async def test_classify_confirmation_llm_confirmed_maps_to_positive(monkeypatch)
 @pytest.mark.anyio
 async def test_classify_confirmation_llm_not_received_maps_to_negative(monkeypatch):
     cog = AdminChatCog(FakeBot(FakeChannel(), payment_service=object()), FakeIntentDB(), sharer=object())
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     create_mock = AsyncMock(
         return_value=SimpleNamespace(
             content=[
@@ -758,7 +757,7 @@ async def test_classify_confirmation_llm_not_received_maps_to_negative(monkeypat
             ]
         )
     )
-    cog._classifier_client = SimpleNamespace(messages=SimpleNamespace(create=create_mock))
+    cog._classifier_client = SimpleNamespace(generate_chat_completion=create_mock)
 
     result = await cog._classify_confirmation("no, I still do not see it")
 
@@ -768,7 +767,6 @@ async def test_classify_confirmation_llm_not_received_maps_to_negative(monkeypat
 @pytest.mark.anyio
 async def test_classify_confirmation_llm_unclear_maps_to_ambiguous_with_reply(monkeypatch):
     cog = AdminChatCog(FakeBot(FakeChannel(), payment_service=object()), FakeIntentDB(), sharer=object())
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     create_mock = AsyncMock(
         return_value=SimpleNamespace(
             content=[
@@ -783,7 +781,7 @@ async def test_classify_confirmation_llm_unclear_maps_to_ambiguous_with_reply(mo
             ]
         )
     )
-    cog._classifier_client = SimpleNamespace(messages=SimpleNamespace(create=create_mock))
+    cog._classifier_client = SimpleNamespace(generate_chat_completion=create_mock)
 
     result = await cog._classify_confirmation("wait let me check")
 
@@ -803,9 +801,8 @@ async def test_classify_confirmation_falls_back_to_keywords_when_api_key_missing
 @pytest.mark.anyio
 async def test_classify_confirmation_falls_back_to_keywords_on_api_error(monkeypatch):
     cog = AdminChatCog(FakeBot(FakeChannel(), payment_service=object()), FakeIntentDB(), sharer=object())
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     create_mock = AsyncMock(side_effect=RuntimeError("boom"))
-    cog._classifier_client = SimpleNamespace(messages=SimpleNamespace(create=create_mock))
+    cog._classifier_client = SimpleNamespace(generate_chat_completion=create_mock)
 
     result = await cog._classify_confirmation("confirmed, got it")
 

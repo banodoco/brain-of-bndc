@@ -47,6 +47,9 @@ class DeepSeekClient(BaseLLMClient):
         }
         if tools:
             params["tools"] = self._to_openai_tools(tools)
+        tool_choice = self._to_openai_tool_choice(kwargs.get("tool_choice"))
+        if tool_choice is not None:
+            params["tool_choice"] = tool_choice
 
         max_tokens = kwargs.get("max_tokens") or kwargs.get("max_completion_tokens")
         if max_tokens is not None:
@@ -141,6 +144,16 @@ class DeepSeekClient(BaseLLMClient):
                 },
             })
         return converted
+
+    def _to_openai_tool_choice(self, tool_choice: Any) -> Any:
+        if not isinstance(tool_choice, dict):
+            return tool_choice
+        if tool_choice.get("type") == "tool" and tool_choice.get("name"):
+            return {
+                "type": "function",
+                "function": {"name": str(tool_choice["name"])},
+            }
+        return tool_choice
 
     def _to_anthropic_like_response(self, response: Any) -> Any:
         message = response.choices[0].message if response.choices else None

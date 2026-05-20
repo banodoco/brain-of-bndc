@@ -25,13 +25,22 @@ def _install_llm_stub() -> None:
         async def generate_chat_completion(self, **_kwargs):
             return "yes|approved"
 
+    class DeepSeekClient:
+        async def generate_chat_completion(self, **_kwargs):
+            return "yes|approved"
+
     llm_module.get_llm_response = get_llm_response
     llm_module.ClaudeClient = ClaudeClient
+    llm_module.DeepSeekClient = DeepSeekClient
     sys.modules["src.common.llm"] = llm_module
 
     claude_client_module = types.ModuleType("src.common.llm.claude_client")
     claude_client_module.ClaudeClient = ClaudeClient
     sys.modules["src.common.llm.claude_client"] = claude_client_module
+
+    deepseek_client_module = types.ModuleType("src.common.llm.deepseek_client")
+    deepseek_client_module.DeepSeekClient = DeepSeekClient
+    sys.modules["src.common.llm.deepseek_client"] = deepseek_client_module
 
 
 def _install_tweepy_stub() -> None:
