@@ -348,6 +348,17 @@ class DatabaseHandler:
             return None
         return self._run_async_in_thread(self.storage_handler.complete_topic_editor_run(run_id, updates, environment=environment))
 
+    def update_topic_editor_run(
+        self,
+        run_id: str,
+        updates: Optional[Dict[str, Any]] = None,
+        guild_id: Optional[int] = None,
+        environment: str = 'prod',
+    ) -> Optional[Dict[str, Any]]:
+        if not self._live_write_allowed(guild_id or (updates or {}).get('guild_id')) or not self.storage_handler:
+            return None
+        return self._run_async_in_thread(self.storage_handler.update_topic_editor_run(run_id, updates, environment=environment))
+
     def fail_topic_editor_run(
         self,
         run_id: str,

@@ -1805,6 +1805,8 @@ def test_search_messages_before_relative_time():
     messages[0]["created_at"] = (now - timedelta(days=6)).isoformat()
     # Message 101: 10 days ago → should remain (older than 7d bound)
     messages[1]["created_at"] = (now - timedelta(days=10)).isoformat()
+    messages[2]["created_at"] = (now - timedelta(days=1)).isoformat()
+    messages[3]["created_at"] = (now - timedelta(days=1)).isoformat()
 
     editor = _make_editor_for_search_tests()
     ctx = _make_context(messages)
