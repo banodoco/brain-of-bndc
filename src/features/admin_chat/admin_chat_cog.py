@@ -198,7 +198,6 @@ class AdminChatCog(commands.Cog):
                 messages=[{"role": "user", "content": content or ""}],
                 max_tokens=256,
                 tools=[_CLASSIFIER_TOOL],
-                tool_choice={"type": "tool", "name": "classify_payment_reply"},
             )
         except Exception:
             logger.warning(

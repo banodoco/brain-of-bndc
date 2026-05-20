@@ -740,7 +740,7 @@ async def test_classify_confirmation_llm_confirmed_maps_to_positive(monkeypatch)
     result = await cog._classify_confirmation("yes, I see it in my wallet")
 
     assert result == ("positive", None)
-    assert create_mock.await_args.kwargs["tool_choice"] == {"type": "tool", "name": "classify_payment_reply"}
+    assert "tool_choice" not in create_mock.await_args.kwargs
 
 
 @pytest.mark.anyio
