@@ -152,7 +152,11 @@ class HealthCheckCog(commands.Cog):
                 "Latest topic-editor run had failed or partial publications: "
                 f"{latest.get('failed_publish_count')}"
             ]
-        if latest.get('source_message_count') is not None and int(latest.get('source_message_count') or 0) == 0:
+        if (
+            status != 'running'
+            and latest.get('source_message_count') is not None
+            and int(latest.get('source_message_count') or 0) == 0
+        ):
             return ["Latest topic-editor run had no source data"]
 
         draft_alert = self._check_topic_editor_drafts(sb, cutoff)
