@@ -378,7 +378,7 @@ class AdminChatAgent:
                 except Exception as e:
                     raise _AdminChatModelError(str(e)) from e
                 
-                logger.debug(f"[AdminChat] Response stop_reason: {response.stop_reason}")
+                logger.debug(f"[AdminChat] Response stop_reason: {getattr(response, 'stop_reason', None)}")
                 
                 # Get tool use blocks
                 tool_uses = [c for c in response.content if c.type == "tool_use"]

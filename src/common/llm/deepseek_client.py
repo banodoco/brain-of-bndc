@@ -156,7 +156,8 @@ class DeepSeekClient(BaseLLMClient):
         return tool_choice
 
     def _to_anthropic_like_response(self, response: Any) -> Any:
-        message = response.choices[0].message if response.choices else None
+        choice = response.choices[0] if response.choices else None
+        message = choice.message if choice else None
         content_blocks: List[Any] = []
         raw_message = _message_to_dict(message)
         if raw_message:
@@ -192,7 +193,12 @@ class DeepSeekClient(BaseLLMClient):
             input_tokens=getattr(usage, "prompt_tokens", 0) if usage else 0,
             output_tokens=getattr(usage, "completion_tokens", 0) if usage else 0,
         )
-        return SimpleNamespace(content=content_blocks, usage=normalized_usage, raw_response=response)
+        return SimpleNamespace(
+            content=content_blocks,
+            stop_reason=getattr(choice, "finish_reason", None) if choice else None,
+            usage=normalized_usage,
+            raw_response=response,
+        )
 
     @staticmethod
     def _raw_openai_assistant_message(content: Sequence[Dict[str, Any]]) -> Dict[str, Any] | None:
