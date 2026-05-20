@@ -573,7 +573,7 @@ class TopicEditor:
         self.live_channel_id = live_channel_id
         self.environment = environment or ("dev" if getattr(bot, "dev_mode", False) else os.getenv("LIVE_UPDATE_ENVIRONMENT", "prod"))
         self.model = model or os.getenv("TOPIC_EDITOR_MODEL") or DEFAULT_LIVE_UPDATE_MODEL
-        self.source_limit = int(source_limit or os.getenv("TOPIC_EDITOR_SOURCE_LIMIT", "200"))
+        self.source_limit = int(source_limit or os.getenv("TOPIC_EDITOR_SOURCE_LIMIT", "80"))
         self.actor_brief = actor_brief
         self.publishing_enabled = os.getenv("TOPIC_EDITOR_PUBLISHING_ENABLED", "false").lower() == "true"
         self.trace_channel_id = os.getenv("LIVE_UPDATE_TRACE_CHANNEL_ID")
