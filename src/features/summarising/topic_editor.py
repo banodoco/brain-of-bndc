@@ -5856,20 +5856,26 @@ def render_topic_publish_units(
                 )
             idx_to_sid[idx] = sid
 
-        if block_text:
-            block_text = _normalize_bare_citation_markers(block_text, set(idx_to_sid))
-            lines = [
-                block_text if ln == block.get("text", "").strip() else ln
-                for ln in lines
-            ]
+        # Previously called _normalize_bare_citation_markers here to wrap bare
+        # digits as citations. That helper couldn't distinguish "see 3." from
+        # "1 in 4" and would silently corrupt arbitrary digits in the block
+        # body. Trust the agent's explicit [N] markers instead; if a draft
+        # ships without brackets, that's a draft-validation problem, not a
+        # rendering problem.
 
-        # Attempt inline [N] → [N](jump_url) substitution in block body.
+        # Inline citation: render as `[[N]](url)`. Discord parses this as a
+        # masked link `[label](url)` where the label happens to be `[N]`, and
+        # renders it as a single clickable span that displays "[N]" with
+        # visible brackets. (Tried alternatives that didn't work: `[N](url)`
+        # strips the brackets entirely; `[\[N\]](url)` leaks literal
+        # backslashes; `\[[N](url)\]` shows brackets but only the digit is
+        # clickable, not the whole marker.)
         if block_text and idx_to_url:
             def _sub_citation(m: re.Match) -> str:
                 n = int(m.group(1))
                 url = idx_to_url.get(n)
                 if url is not None:
-                    return f"[{n}]({url})"
+                    return f"[[{n}]]({url})"
                 return m.group(0)  # out-of-range / unresolvable → literal
 
             substituted_text = re.sub(
@@ -5881,14 +5887,15 @@ def render_topic_publish_units(
             inline_substituted = False
 
         if inline_substituted:
-            # Swap the raw body line with the substituted version so
-            # the trailing Sources: line is omitted for this block.
+            # Use the substituted body; omit the Sources footer to avoid
+            # duplicating citations.
             lines = [
                 substituted_text if ln == block_text else ln
                 for ln in lines
             ]
         elif ordered_ids:
-            # Fallback: no inline markers resolved → trailing Sources: line
+            # Fallback (no inline `[N]` markers found in body): trailing
+            # Sources line so the URLs are still reachable.
             citation_parts: List[str] = []
             for idx, sid in idx_to_sid.items():
                 url = idx_to_url.get(idx, "")
@@ -5931,6 +5938,32 @@ def render_topic_publish_units(
                     "url": url,
                     "ref": ref,
                 })
+
+        # Renderer-side rescue: if a cited source message is URL-only and the
+        # agent forgot to attach it via media_refs (a DeepSeek prompt-adherence
+        # gap), surface the URL as an external unit so the post still embeds.
+        # Skip if the URL already appears in the block body or was already
+        # emitted as an explicit media_ref above.
+        for sid in ordered_ids:
+            meta = meta_by_id.get(sid) or {}
+            content = (meta.get("content") or "").strip()
+            if not content:
+                continue
+            m = re.fullmatch(r"\s*(https?://\S+)\s*", content)
+            if not m:
+                continue
+            url = m.group(1)
+            if url in block_content:
+                continue
+            media_key = (url,)
+            if media_key in emitted_media_keys:
+                continue
+            emitted_media_keys.add(media_key)
+            units.append({
+                "kind": "external",
+                "url": url,
+                "ref": {"message_id": sid, "kind": "external", "auto_attached": True},
+            })
 
     return units
 
