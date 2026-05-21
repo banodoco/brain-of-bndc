@@ -3863,8 +3863,21 @@ class TopicEditor:
                 for row in rows:
                     source_metadata[str(row.get("message_id"))] = row
 
+            # Fetch the guild's channel-name → id map so the renderer can
+            # convert `#channelname` text into clickable `<#id>` mentions.
+            channel_lookup: Dict[str, int] = {}
+            try:
+                if hasattr(self.db, "get_channel_name_lookup"):
+                    channel_lookup = self.db.get_channel_name_lookup(guild_id=guild_id) or {}
+            except Exception as exc:
+                logger.warning("channel name lookup failed for guild=%s: %s", guild_id, exc)
+
             # Build ordered publish units (text + media interleaved)
-            publish_units = render_topic_publish_units(topic, source_metadata=source_metadata)
+            publish_units = render_topic_publish_units(
+                topic,
+                source_metadata=source_metadata,
+                channel_lookup=channel_lookup,
+            )
             publish_diagnostics: Dict[str, Any] = {
                 "renderer_safety_chunking_used": any(
                     unit.get("kind", "text") == "text"
@@ -5777,9 +5790,41 @@ def _normalize_bare_citation_markers(text: str, valid_indexes: Set[int]) -> str:
     return re.sub(r"(?<![\[\]\(\)\w.])(\d{1,2})([.,;:!?])?(?=\s|$)", replace, text)
 
 
+_CHANNEL_MENTION_RE = re.compile(r"(?<![\w#<])#([a-z0-9][a-z0-9_\-]*)")
+
+
+def _substitute_channel_mentions(
+    text: str,
+    channel_lookup: Optional[Dict[str, int]],
+) -> str:
+    """Replace plain `#channelname` with Discord's `<#channel_id>` syntax so
+    the mention renders as a clickable channel link rather than literal text.
+
+    Only substitutes when the captured token (lowercased) is an unambiguous
+    match in ``channel_lookup``. Unknown tokens (`#1`, `#100`, project names,
+    typos) are left untouched.
+
+    Discord channel names are lowercase alphanumeric + `_`/`-`, which is what
+    the regex captures. Forum-thread names with spaces or capitals don't fit
+    the token shape and don't get accidentally targeted.
+    """
+    if not text or not channel_lookup:
+        return text
+
+    def replace(match: "re.Match") -> str:
+        token = match.group(1).lower()
+        channel_id = channel_lookup.get(token)
+        if channel_id is None:
+            return match.group(0)
+        return f"<#{int(channel_id)}>"
+
+    return _CHANNEL_MENTION_RE.sub(replace, text)
+
+
 def render_topic_publish_units(
     topic: Dict[str, Any],
     source_metadata: Optional[Dict[str, Dict[str, Any]]] = None,
+    channel_lookup: Optional[Dict[str, int]] = None,
 ) -> List[Dict[str, Any]]:
     """Render a structured topic into ordered publish units for block-by-block sending.
 
@@ -5820,6 +5865,10 @@ def render_topic_publish_units(
 
     for block in blocks:
         block_text = block.get("text", "").strip()
+        # Translate plain `#channelname` into Discord's `<#id>` syntax so the
+        # mention becomes a clickable channel link. Quietly noops for unknown
+        # tokens.
+        block_text = _substitute_channel_mentions(block_text, channel_lookup)
         block_title = block.get("title")
         block_sids = block_source_ids(block)
 

@@ -1,6 +1,6 @@
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any, Tuple, Set
 import asyncio
 import hashlib
 import inspect
@@ -4670,6 +4670,49 @@ class DatabaseHandler:
         except Exception as e:
             logger.error(f"Error deleting timed mute for member {member_id}: {e}", exc_info=True)
             return False
+
+    def get_channel_name_lookup(self, guild_id: Optional[int] = None) -> Dict[str, int]:
+        """Return a `lowercase_channel_name -> channel_id` map for the guild.
+
+        Used by the topic-editor renderer to convert plain `#channelname`
+        tokens in posted bodies into Discord's `<#id>` mention syntax. Only
+        channels with token-shaped names (lowercase alphanumeric + `_`/`-`)
+        are included; forum threads with arbitrary titles can't be mentioned
+        with `#token` anyway and would just add noise / ambiguity.
+        """
+        if not self.storage_handler or not self.storage_handler.supabase_client:
+            return {}
+        try:
+            query = (
+                self.storage_handler.supabase_client.table('discord_channels')
+                .select('channel_id,channel_name')
+            )
+            if guild_id is not None:
+                query = query.eq('guild_id', guild_id)
+            result = query.execute()
+            import re as _re
+            token = _re.compile(r"^[a-z0-9][a-z0-9_\-]*$")
+            lookup: Dict[str, int] = {}
+            collisions: Set[str] = set()
+            for row in (result.data or []):
+                name = (row.get('channel_name') or '').lower()
+                if not token.match(name):
+                    continue
+                cid = row.get('channel_id')
+                if cid is None:
+                    continue
+                if name in lookup and lookup[name] != cid:
+                    collisions.add(name)
+                else:
+                    lookup[name] = int(cid)
+            # On ambiguous names, drop the entry so the renderer leaves
+            # `#name` as plain text rather than picking the wrong channel.
+            for name in collisions:
+                lookup.pop(name, None)
+            return lookup
+        except Exception as e:
+            logger.error(f"Error building channel name lookup: {e}", exc_info=True)
+            return {}
 
     # ========== Channel Speaker Modes ==========
 
