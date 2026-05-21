@@ -805,8 +805,8 @@ class TopicEditor:
             forced_close = False
             forced_close_reason: Optional[str] = None
             turn_count = 0
-            max_cost_usd = self._env_float("TOPIC_EDITOR_MAX_COST_USD", 0.0)
-            max_tokens = self._env_int("TOPIC_EDITOR_MAX_TOKENS", 0)
+            max_cost_usd = self._env_float("TOPIC_EDITOR_MAX_COST_USD", 2.0)
+            max_tokens = self._env_int("TOPIC_EDITOR_MAX_TOKENS", 1_500_000)
             for turn_count in range(1, max_turns + 1):
                 logger.info(
                     "TopicEditor invoking LLM: run_id=%s turn=%s messages=%s",
@@ -4495,8 +4495,8 @@ class TopicEditor:
         try:
             input_tokens = float(usage.get("input_tokens") or 0)
             output_tokens = float(usage.get("output_tokens") or 0)
-            input_rate = float(os.getenv("TOPIC_EDITOR_INPUT_COST_PER_MTOKENS", "0") or 0)
-            output_rate = float(os.getenv("TOPIC_EDITOR_OUTPUT_COST_PER_MTOKENS", "0") or 0)
+            input_rate = float(os.getenv("TOPIC_EDITOR_INPUT_COST_PER_MTOKENS", "0.55") or 0)
+            output_rate = float(os.getenv("TOPIC_EDITOR_OUTPUT_COST_PER_MTOKENS", "2.19") or 0)
             if input_rate <= 0 and output_rate <= 0:
                 return None
             return round((input_tokens / 1_000_000.0 * input_rate) + (output_tokens / 1_000_000.0 * output_rate), 6)

@@ -229,7 +229,7 @@ async def main() -> None:
     args = parser.parse_args()
 
     load_dotenv(ROOT / ".env", override=True)
-    args.llm_client = args.llm_client or os.getenv("TOPIC_EDITOR_LLM_CLIENT", "claude")
+    args.llm_client = args.llm_client or os.getenv("TOPIC_EDITOR_LLM_CLIENT", "deepseek")
     if args.art_channel_id:
         os.environ["DEV_ART_CHANNEL_ID"] = str(args.art_channel_id)
     if args.summary_channel_id:

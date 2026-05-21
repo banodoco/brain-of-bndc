@@ -560,7 +560,7 @@ class LiveUpdateEditor:
             )
             context_source_limit = max(
                 5,
-                min(50, int(os.getenv("LIVE_UPDATE_CONTEXT_SOURCE_LIMIT", "20"))),
+                min(50, int(os.getenv("LIVE_UPDATE_CONTEXT_SOURCE_LIMIT", "50"))),
             )
             self.logger.info(
                 "[LiveUpdateEditor] expanding source context: source_limit=%s timeout=%ss",
