@@ -573,10 +573,13 @@ class TopicEditor:
         self.live_channel_id = live_channel_id
         self.environment = environment or ("dev" if getattr(bot, "dev_mode", False) else os.getenv("LIVE_UPDATE_ENVIRONMENT", "prod"))
         self.model = model or os.getenv("TOPIC_EDITOR_MODEL") or DEFAULT_LIVE_UPDATE_MODEL
-        self.source_limit = int(source_limit or os.getenv("TOPIC_EDITOR_SOURCE_LIMIT", "80"))
+        # Defaults reflect production usage; override via env if needed.
+        self.source_limit = int(source_limit or os.getenv("TOPIC_EDITOR_SOURCE_LIMIT", "1000"))
         self.actor_brief = actor_brief
-        self.publishing_enabled = os.getenv("TOPIC_EDITOR_PUBLISHING_ENABLED", "false").lower() == "true"
-        self.trace_channel_id = os.getenv("LIVE_UPDATE_TRACE_CHANNEL_ID")
+        self.publishing_enabled = os.getenv("TOPIC_EDITOR_PUBLISHING_ENABLED", "true").lower() == "true"
+        # Hardcoded trace-channel default so a missing env var doesn't silently
+        # disable editorial trace embeds in production.
+        self.trace_channel_id = os.getenv("LIVE_UPDATE_TRACE_CHANNEL_ID", "1316024582041243668")
         self.media_shortlist_min_reactions = self._env_int("TOPIC_EDITOR_MEDIA_SHORTLIST_MIN_REACTIONS", 5)
         self.media_shortlist_limit = self._env_int("TOPIC_EDITOR_MEDIA_SHORTLIST_LIMIT", 5)
         # Rollout guard for deprecated direct-post tools:

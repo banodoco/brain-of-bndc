@@ -35,7 +35,8 @@ def _env_int(name: str, default: int) -> int:
 
 
 def _build_topic_editor_llm_client():
-    provider = os.getenv("TOPIC_EDITOR_LLM_CLIENT", "claude").strip().lower()
+    # Default reflects production usage; override via env if needed.
+    provider = os.getenv("TOPIC_EDITOR_LLM_CLIENT", "deepseek").strip().lower()
     if provider in {"", "claude"}:
         return None
     if provider == "deepseek":
@@ -65,16 +66,13 @@ class SummarizerCog(commands.Cog):
         if db_handler is None:
             raise RuntimeError("SummarizerCog requires bot.db_handler for live-update runtime")
         self.dev_mode = bool(getattr(bot, "dev_mode", False))
-        self.live_updates_enabled = self.dev_mode or _env_flag("LIVE_UPDATES_ENABLED", False)
+        # Default reflects production usage; override via env if needed.
+        self.live_updates_enabled = self.dev_mode or _env_flag("LIVE_UPDATES_ENABLED", True)
         # The old live-top-creations loop directly auto-posted media once it hit
         # the reaction threshold. TopicEditor now auto-shortlists those media
         # posts as watching topics so the agent can inspect context/vision first.
+        # LIVE_TOP_CREATIONS_ENABLED is deprecated and intentionally not read.
         self.live_top_creations_enabled = False
-        if _env_flag("LIVE_TOP_CREATIONS_ENABLED", False):
-            logger.warning(
-                "LIVE_TOP_CREATIONS_ENABLED is ignored; reaction-qualified media "
-                "is now handled by TopicEditor auto-shortlisting."
-            )
         self.live_pass_interval_minutes = _env_int("LIVE_PASS_INTERVAL_MINUTES", 60)
         dry_run_lookback_hours = _env_int("LIVE_UPDATE_DEV_LOOKBACK_HOURS", 6)
         self.live_update_editor = live_update_editor or self._build_live_update_editor(
