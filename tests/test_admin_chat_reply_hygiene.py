@@ -297,28 +297,28 @@ def _make_mock_message(*, content: str = "test", author_id: int = 999,
     return msg
 
 
-def _make_feed_item(*, feed_item_id: str = "feed-1",
-                    title: str = "Test Update",
-                    body: str = "Test body",
-                    discord_message_ids: list = None,
-                    live_channel_id: int = 456,
-                    status: str = "posted"):
+def _make_topic(*, topic_id: str = "t-1",
+                headline: str = "Test Update",
+                summary: str = "Test body",
+                discord_message_ids: list = None,
+                publication_status: str = "sent",
+                state: str = "posted"):
     return {
-        "feed_item_id": feed_item_id,
-        "title": title,
-        "body": body,
-        "discord_message_ids": discord_message_ids or ["9001", "9002"],
-        "live_channel_id": live_channel_id,
-        "status": status,
+        "topic_id": topic_id,
+        "headline": headline,
+        "summary": summary,
+        "discord_message_ids": discord_message_ids or [9001, 9002],
+        "publication_status": publication_status,
+        "state": state,
     }
 
 
 def _make_feedback_row(*, feedback_id: str = "fb-1",
-                       feed_item_id: str = "feed-1",
+                       topic_id: str = "t-1",
                        disposition: str = "correction"):
     return {
         "feedback_id": feedback_id,
-        "feed_item_id": feed_item_id,
+        "topic_id": topic_id,
         "disposition": disposition,
         "admin_user_id": 999,
         "feedback_text": "Needs fix",
@@ -356,11 +356,11 @@ def _build_cog(monkeypatch, *, dev_mode: bool = False,
     db.server_config.get_channel_agent_guidance = MagicMock(return_value=None)
 
     # Default reader methods
-    db.get_feed_item_by_discord_message_id = MagicMock(return_value=None)
+    db.get_topic_by_discord_message_id = MagicMock(return_value=None)
     db.get_live_update_feedback_for = MagicMock(return_value=None)
     db.store_live_update_feedback = MagicMock(return_value={"feedback_id": "fb-1"})
-    db.update_live_update_feed_item_status = MagicMock(
-        return_value={"feed_item_id": "feed-1", "status": "edited"})
+    db.update_topic = MagicMock(
+        return_value={"topic_id": "t-1", "state": "deleted"})
     db.try_claim_bot_event = MagicMock(return_value=True)
 
     db._live_write_allowed = MagicMock(return_value=live_write_allowed)
@@ -369,27 +369,27 @@ def _build_cog(monkeypatch, *, dev_mode: bool = False,
     def _record_call(name):
         def wrapper(*args, **kwargs):
             db_calls.append((name, args, kwargs))
-            if name == "get_feed_item_by_discord_message_id":
-                return db._get_feed_item_result
+            if name == "get_topic_by_discord_message_id":
+                return db._get_topic_result
             if name == "get_live_update_feedback_for":
                 return db._get_feedback_result
             if name == "store_live_update_feedback":
                 return db._store_feedback_result
-            if name == "update_live_update_feed_item_status":
-                return db._update_status_result
+            if name == "update_topic":
+                return db._update_topic_result
             return None
         return wrapper
 
-    db._get_feed_item_result = None
+    db._get_topic_result = None
     db._get_feedback_result = None
     db._store_feedback_result = {"feedback_id": "fb-fallback"}
-    db._update_status_result = {"feed_item_id": "feed-1", "status": "edited"}
+    db._update_topic_result = {"topic_id": "t-1", "state": "deleted"}
 
     # Replace with recording wrappers
-    db.get_feed_item_by_discord_message_id = _record_call("get_feed_item_by_discord_message_id")
+    db.get_topic_by_discord_message_id = _record_call("get_topic_by_discord_message_id")
     db.get_live_update_feedback_for = _record_call("get_live_update_feedback_for")
     db.store_live_update_feedback = _record_call("store_live_update_feedback")
-    db.update_live_update_feed_item_status = _record_call("update_live_update_feed_item_status")
+    db.update_topic = _record_call("update_topic")
 
     sharer = MagicMock()
 
@@ -423,14 +423,14 @@ class TestFeedbackReplyRouting:
         turn even when the bot is not @mentioned."""
         cog, db, calls = _build_cog(monkeypatch)
 
-        feed_item = _make_feed_item()
-        db._get_feed_item_result = feed_item
+        topic = _make_topic()
+        db._get_topic_result = topic
         db._get_feedback_result = _make_feedback_row()
 
         cog.agent.chat.return_value = AdminChatResult(
             replies=["Feedback received!"],
             actions=[{"tool": "log_live_update_feedback",
-                       "input": {"feed_item_id": "feed-1", "feedback_text": "fix"},
+                       "input": {"topic_id": "t-1", "feedback_text": "fix"},
                        "result": {"success": True, "feedback_id": "fb-1"}}],
         )
 
@@ -456,7 +456,7 @@ class TestFeedbackReplyRouting:
         is also absent)."""
         cog, db, calls = _build_cog(monkeypatch)
 
-        db._get_feed_item_result = None  # reverse-lookup returns None
+        db._get_topic_result = None  # reverse-lookup returns None
 
         msg = _make_mock_message(
             content="some random reply",
@@ -478,7 +478,7 @@ class TestFeedbackReplyRouting:
         and early-returns on replies is None for non-feedback turns."""
         cog, db, calls = _build_cog(monkeypatch)
 
-        db._get_feed_item_result = None  # not a feedback reply
+        db._get_topic_result = None  # not a feedback reply
 
         # The bot is @mentioned
         cog.agent.chat.return_value = AdminChatResult(
@@ -520,7 +520,7 @@ class TestFeedbackReplyRouting:
 
         # get_feed_item_by_discord_message_id was never called
         reverse_calls = [c for c in calls
-                         if c[0] == "get_feed_item_by_discord_message_id"]
+                         if c[0] == "get_topic_by_discord_message_id"]
         assert len(reverse_calls) == 0, (
             f"Expected 0 reverse-lookup calls, got {len(reverse_calls)}")
 
@@ -530,8 +530,8 @@ class TestFeedbackReplyRouting:
         (message.reference present)."""
         cog, db, calls = _build_cog(monkeypatch)
 
-        feed_item = _make_feed_item()
-        db._get_feed_item_result = feed_item
+        topic = _make_topic()
+        db._get_topic_result = topic
         db._get_feedback_result = _make_feedback_row()
         cog.agent.chat.return_value = AdminChatResult(
             replies=["Got it"], actions=[])
@@ -546,7 +546,7 @@ class TestFeedbackReplyRouting:
 
         # Exactly one reverse-lookup call
         reverse_calls = [c for c in calls
-                         if c[0] == "get_feed_item_by_discord_message_id"]
+                         if c[0] == "get_topic_by_discord_message_id"]
         assert len(reverse_calls) == 1, (
             f"Expected 1 reverse-lookup call, got {len(reverse_calls)}")
         # The call went through asyncio.to_thread (captured as 'to_thread'
@@ -572,8 +572,8 @@ class TestFeedbackPostTurnProcessing:
         stores a row with disposition='fallback'."""
         cog, db, calls = _build_cog(monkeypatch)
 
-        feed_item = _make_feed_item()
-        db._get_feed_item_result = feed_item
+        topic = _make_topic()
+        db._get_topic_result = topic
         # Auth re-query returns None → trigger fallback
         db._get_feedback_result = None  # first read: no row
         # After fallback store, re-read with disposition='fallback' returns row
@@ -617,14 +617,14 @@ class TestFeedbackPostTurnProcessing:
         get_live_update_feedback_for confirms a feedback row exists."""
         cog, db, calls = _build_cog(monkeypatch)
 
-        feed_item = _make_feed_item()
-        db._get_feed_item_result = feed_item
+        topic = _make_topic()
+        db._get_topic_result = topic
         db._get_feedback_result = _make_feedback_row()  # row exists
 
         cog.agent.chat.return_value = AdminChatResult(
             replies=["Feedback noted"],
             actions=[{"tool": "log_live_update_feedback",
-                       "input": {"feed_item_id": "feed-1",
+                       "input": {"topic_id": "t-1",
                                   "feedback_text": "fix"},
                        "result": {"success": True}}],
         )
@@ -647,8 +647,8 @@ class TestFeedbackPostTurnProcessing:
         ✅ and delete are NOT called."""
         cog, db, calls = _build_cog(monkeypatch)
 
-        feed_item = _make_feed_item()
-        db._get_feed_item_result = feed_item
+        topic = _make_topic()
+        db._get_topic_result = topic
         db._get_feedback_result = None  # no row from agent
 
         # Also make fallback store return None (write failure)
@@ -687,8 +687,8 @@ class TestChannelContextEnrichment:
         message.reference.message_id even when .resolved is None."""
         cog, db, calls = _build_cog(monkeypatch)
 
-        feed_item = _make_feed_item()
-        db._get_feed_item_result = feed_item
+        topic = _make_topic()
+        db._get_topic_result = topic
         db._get_feedback_result = _make_feedback_row()
 
         # Capture channel_context passed to agent.chat()
@@ -721,8 +721,8 @@ class TestChannelContextEnrichment:
         """(l) environment is derived from db_handler.dev_mode."""
         cog, db, calls = _build_cog(monkeypatch, dev_mode=True)
 
-        feed_item = _make_feed_item()
-        db._get_feed_item_result = feed_item
+        topic = _make_topic()
+        db._get_topic_result = topic
         db._get_feedback_result = _make_feedback_row()
 
         captured_ctx = {}
@@ -749,13 +749,12 @@ class TestChannelContextEnrichment:
     @pytest.mark.asyncio
     async def test_guidance_supplied_even_when_channel_not_live_channel_id(self, monkeypatch):
         """(n) Default guidance is supplied for a confirmed feedback reply
-        even when channel_id != feed_item['live_channel_id'], and without
-        any resolve_live_channel_id call."""
+        regardless of which channel the reply lands in (guidance is no longer
+        gated on a per-feed-item live_channel_id)."""
         cog, db, calls = _build_cog(monkeypatch)
 
-        # Feed item's live_channel_id differs from message channel
-        feed_item = _make_feed_item(live_channel_id=999)  # different channel
-        db._get_feed_item_result = feed_item
+        topic = _make_topic()
+        db._get_topic_result = topic
         db._get_feedback_result = _make_feedback_row()
 
         captured_ctx = {}
@@ -799,8 +798,8 @@ class TestSilentFeedbackTurn:
         authoritative re-query, fallback store (if needed), ✅, delete."""
         cog, db, calls = _build_cog(monkeypatch)
 
-        feed_item = _make_feed_item()
-        db._get_feed_item_result = feed_item
+        topic = _make_topic()
+        db._get_topic_result = topic
         db._get_feedback_result = _make_feedback_row()
 
         # Silent turn: replies=None, actions non-empty (tool ran)
@@ -808,7 +807,7 @@ class TestSilentFeedbackTurn:
             replies=None,  # SILENT
             actions=[
                 {"tool": "log_live_update_feedback",
-                 "input": {"feed_item_id": "feed-1", "feedback_text": "fix"},
+                 "input": {"topic_id": "t-1", "feedback_text": "fix"},
                  "result": {"success": True, "feedback_id": "fb-1"}},
             ],
         )
@@ -837,8 +836,8 @@ class TestSilentFeedbackTurn:
         row, then ✅ + delete still execute."""
         cog, db, calls = _build_cog(monkeypatch)
 
-        feed_item = _make_feed_item()
-        db._get_feed_item_result = feed_item
+        topic = _make_topic()
+        db._get_topic_result = topic
         db._get_feedback_result = None  # agent didn't log
 
         # After fallback store succeeds, re-read returns row
@@ -891,20 +890,21 @@ class TestEditorialAudit:
 
     @pytest.mark.asyncio
     async def test_edit_message_action_triggers_edited_audit(self, monkeypatch):
-        """(k) edit_message with singular message_id → status='edited',
-        audit row with disposition='edited'."""
+        """(k) edit_message with singular message_id → 'edited' audit feedback
+        row stored; topics.state is NOT mutated (there is no 'edited' state)."""
         cog, db, calls = _build_cog(monkeypatch)
 
-        feed_item = _make_feed_item(discord_message_ids=["9001", "9002"])
-        db._get_feed_item_result = feed_item
-        db._get_feedback_result = _make_feedback_row()  # agent logged base feedback
+        topic = _make_topic(discord_message_ids=[9001, 9002])
+        db._get_topic_result = topic
+        # No pre-existing feedback row → the 'edited' audit store path fires.
+        db._get_feedback_result = None
 
         # Agent called edit_message on message_id=9001
         cog.agent.chat.return_value = AdminChatResult(
             replies=["Updated!"],
             actions=[
                 {"tool": "log_live_update_feedback",
-                 "input": {"feed_item_id": "feed-1", "feedback_text": "fix"},
+                 "input": {"topic_id": "t-1", "feedback_text": "fix"},
                  "result": {"success": True}},
                 {"tool": "edit_message",
                  "input": {"message_id": "9001", "content": "updated text"},
@@ -920,15 +920,19 @@ class TestEditorialAudit:
 
         await cog._handle_admin_message(msg)
 
-        # update_live_update_feed_item_status was called with 'edited'
-        status_calls = [c for c in calls
-                        if c[0] == "update_live_update_feed_item_status"]
-        assert len(status_calls) >= 1, (
-            "Expected status update call for edit action")
-        # Check that status='edited' was passed
-        edited_call = [c for c in status_calls if c[1][1] == "edited"]
-        assert len(edited_call) >= 1, (
-            f"Expected status='edited' call, got status calls: {status_calls}")
+        # An 'edited' disposition audit row was stored, keyed on topic_id.
+        store_calls = [c for c in calls if c[0] == "store_live_update_feedback"]
+        edited_stores = [
+            c for c in store_calls
+            if c[1] and isinstance(c[1][0], dict)
+            and c[1][0].get("disposition") == "edited"
+            and c[1][0].get("topic_id") == "t-1"
+        ]
+        assert len(edited_stores) >= 1, (
+            f"Expected an 'edited' audit store keyed on topic_id, got: {store_calls}")
+        # topics.state must NOT be mutated on edit (no 'edited' state exists).
+        assert not [c for c in calls if c[0] == "update_topic"], (
+            "edit_message must not call update_topic / mutate topics.state")
 
     @pytest.mark.asyncio
     async def test_delete_message_singular_shape_triggers_deleted_audit(self, monkeypatch):
@@ -936,8 +940,8 @@ class TestEditorialAudit:
         status='deleted', audit row with disposition='deleted'."""
         cog, db, calls = _build_cog(monkeypatch)
 
-        feed_item = _make_feed_item(discord_message_ids=["9001", "9002"])
-        db._get_feed_item_result = feed_item
+        topic = _make_topic(discord_message_ids=[9001, 9002])
+        db._get_topic_result = topic
         db._get_feedback_result = _make_feedback_row()
 
         # Agent called delete_message with singular message_id
@@ -945,7 +949,7 @@ class TestEditorialAudit:
             replies=["Deleted!"],
             actions=[
                 {"tool": "log_live_update_feedback",
-                 "input": {"feed_item_id": "feed-1",
+                 "input": {"topic_id": "t-1",
                             "feedback_text": "delete this",
                             "disposition": "deletion-request"},
                  "result": {"success": True}},
@@ -963,12 +967,14 @@ class TestEditorialAudit:
 
         await cog._handle_admin_message(msg)
 
-        # update_live_update_feed_item_status was called with 'deleted'
-        status_calls = [c for c in calls
-                        if c[0] == "update_live_update_feed_item_status"]
-        deleted_call = [c for c in status_calls if c[1][1] == "deleted"]
-        assert len(deleted_call) >= 1, (
-            f"Expected status='deleted' call, got status calls: {status_calls}")
+        # Soft-delete: update_topic called with state='deleted' (never hard-delete).
+        topic_updates = [c for c in calls if c[0] == "update_topic"]
+        assert len(topic_updates) >= 1, (
+            f"Expected update_topic soft-delete call, got: {calls}")
+        c = topic_updates[0]
+        assert c[1][0] == "t-1", "update_topic must target the resolved topic_id"
+        assert c[1][1] == {"state": "deleted"}, (
+            f"Expected state='deleted' soft-delete, got: {c[1]}")
 
     @pytest.mark.asyncio
     async def test_delete_message_bulk_shape_triggers_deleted_audit(self, monkeypatch):
@@ -976,8 +982,8 @@ class TestEditorialAudit:
         status='deleted', covering BOTH shapes."""
         cog, db, calls = _build_cog(monkeypatch)
 
-        feed_item = _make_feed_item(discord_message_ids=["9001", "9002", "9003"])
-        db._get_feed_item_result = feed_item
+        topic = _make_topic(discord_message_ids=[9001, 9002, 9003])
+        db._get_topic_result = topic
         db._get_feedback_result = _make_feedback_row()
 
         # Agent called delete_message with message_ids (plural) list
@@ -985,7 +991,7 @@ class TestEditorialAudit:
             replies=["Bulk deleted!"],
             actions=[
                 {"tool": "log_live_update_feedback",
-                 "input": {"feed_item_id": "feed-1",
+                 "input": {"topic_id": "t-1",
                             "feedback_text": "bulk delete"},
                  "result": {"success": True}},
                 {"tool": "delete_message",
@@ -1002,13 +1008,11 @@ class TestEditorialAudit:
 
         await cog._handle_admin_message(msg)
 
-        # update_live_update_feed_item_status was called
-        status_calls = [c for c in calls
-                        if c[0] == "update_live_update_feed_item_status"]
-        deleted_call = [c for c in status_calls if c[1][1] == "deleted"]
+        # Soft-delete via update_topic(state='deleted') for the bulk shape too.
+        topic_updates = [c for c in calls if c[0] == "update_topic"]
+        deleted_call = [c for c in topic_updates if c[1][1] == {"state": "deleted"}]
         assert len(deleted_call) >= 1, (
-            f"Expected status='deleted' for bulk delete, "
-            f"got status calls: {status_calls}")
+            f"Expected update_topic state='deleted' for bulk delete, got: {topic_updates}")
 
 
 # ── Test (g): log_live_update_feedback receives injected context ─────────────
@@ -1061,7 +1065,7 @@ class TestAgentContextInjection:
                 _make_response(
                     _make_tool_use_block(
                         "log_live_update_feedback",
-                        {"feed_item_id": "feed-1", "feedback_text": "fix"},
+                        {"topic_id": "t-1", "feedback_text": "fix"},
                         "tu_1",
                     ),
                 ),
@@ -1080,6 +1084,7 @@ class TestAgentContextInjection:
             "environment": "dev",
             "replied_to_message_id": "9001",
             "channel_guidance": "Some guidance",
+            "live_update_topic": {"topic_id": "t-injected"},
         }
 
         result = await agent.chat(
@@ -1106,6 +1111,10 @@ class TestAgentContextInjection:
         assert luf_input.get("replied_to_message_id") == "9001", (
             f"Expected replied_to_message_id='9001', "
             f"got {luf_input.get('replied_to_message_id')!r}")
+        # topic_id injected from channel_context['live_update_topic']
+        assert luf_input.get("topic_id") == "t-injected", (
+            f"Expected topic_id='t-injected' injected from context, "
+            f"got {luf_input.get('topic_id')!r}")
 
 
 # ── Test (i): channel_guidance appended to system ────────────────────────────
@@ -1266,7 +1275,7 @@ class TestReverseLookupViaToThread:
 
     @pytest.mark.asyncio
     async def test_reverse_lookup_offloaded_to_asyncio_to_thread(self, monkeypatch):
-        """(m) get_feed_item_by_discord_message_id is called via
+        """(m) get_topic_by_discord_message_id is called via
         asyncio.to_thread, not directly."""
         to_thread_calls = []
 
@@ -1281,8 +1290,8 @@ class TestReverseLookupViaToThread:
         # Re-patch to_thread since _build_cog already patched it
         monkeypatch.setattr("asyncio.to_thread", _fake_to_thread)
 
-        feed_item = _make_feed_item()
-        db._get_feed_item_result = feed_item
+        topic = _make_topic()
+        db._get_topic_result = topic
         db._get_feedback_result = _make_feedback_row()
         cog.agent.chat.return_value = AdminChatResult(replies=["ok"], actions=[])
 
@@ -1304,7 +1313,7 @@ class TestReverseLookupViaToThread:
         # Separately verify the reverse-lookup was called through the
         # db_calls recording (from _record_call in _build_cog).
         reverse_calls = [c for c in calls
-                         if c[0] == "get_feed_item_by_discord_message_id"]
+                         if c[0] == "get_topic_by_discord_message_id"]
         assert len(reverse_calls) == 1, (
             f"Expected 1 reverse-lookup call via db_handler, "
             f"got {len(reverse_calls)}")

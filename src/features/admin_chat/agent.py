@@ -453,6 +453,12 @@ class AdminChatAgent:
                             tool_input['environment'] = channel_context['environment']
                         if channel_context and channel_context.get('replied_to_message_id'):
                             tool_input['replied_to_message_id'] = channel_context['replied_to_message_id']
+                        # topic_id is injected from the resolved live-update topic,
+                        # never picked by the LLM.
+                        if channel_context and channel_context.get('live_update_topic'):
+                            _topic_id = channel_context['live_update_topic'].get('topic_id')
+                            if _topic_id:
+                                tool_input['topic_id'] = _topic_id
 
                     # Execute the tool
                     dm_channel_id = None

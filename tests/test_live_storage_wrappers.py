@@ -439,6 +439,103 @@ def test_storage_get_feed_item_reverse_lookup_uses_json_array_contains():
     assert _json.loads(captured["value"]) == ["9001"]
 
 
+def test_storage_get_topic_reverse_lookup_uses_bare_string_list_contains():
+    """topics.discord_message_ids is a NATIVE Postgres array (bigint[]), so the
+    containment filter MUST be a bare Python list of strings ([str(id)] ->
+    cs.{"123"}) — NOT a json.dumps string (which would render cs.["123"] and
+    error 22P02 malformed array literal). This drives the *real* query builder
+    so the array-vs-jsonb filter form is actually exercised; the method under
+    test is NOT mocked away.
+    """
+    captured = {}
+
+    class FakeQuery:
+        def select(self, *_a, **_k):
+            return self
+
+        def contains(self, column, value):
+            captured["column"] = column
+            captured["value"] = value
+            return self
+
+        def eq(self, *_a, **_k):
+            return self
+
+        def limit(self, *_a, **_k):
+            return self
+
+        def execute(self):
+            return type("Result", (), {"data": [{"topic_id": "t-1"}]})()
+
+    class FakeSupabase:
+        def table(self, table):
+            captured["table"] = table
+            return FakeQuery()
+
+    storage = StorageHandler.__new__(StorageHandler)
+    storage.supabase_client = FakeSupabase()
+
+    row = asyncio.run(
+        storage.get_topic_by_discord_message_id(123, 1, environment="prod")
+    )
+
+    assert row == {"topic_id": "t-1"}
+    assert captured["table"] == "topics"
+    assert captured["column"] == "discord_message_ids"
+    # The crux: a bare list of strings, NEVER a json.dumps string.
+    assert isinstance(captured["value"], list), (
+        f"contains() must receive a bare list, got {type(captured['value']).__name__}"
+    )
+    assert captured["value"] == ["123"]
+    assert all(isinstance(v, str) for v in captured["value"])
+
+
+def test_storage_get_live_update_feedback_for_topic_only_omits_feed_item_filter():
+    """get_live_update_feedback_for keyed on topic_id only must NOT emit a
+    .eq('feed_item_id', ...) filter (which under the old required-positional
+    signature would have matched nothing). Drives the real query builder.
+    """
+    eq_calls = []
+
+    class FakeQuery:
+        def select(self, *_a, **_k):
+            return self
+
+        def eq(self, column, value):
+            eq_calls.append((column, value))
+            return self
+
+        def order(self, *_a, **_k):
+            return self
+
+        def limit(self, *_a, **_k):
+            return self
+
+        def execute(self):
+            return type("Result", (), {"data": []})()
+
+    class FakeSupabase:
+        def table(self, _table):
+            return FakeQuery()
+
+    storage = StorageHandler.__new__(StorageHandler)
+    storage.supabase_client = FakeSupabase()
+
+    row = asyncio.run(
+        storage.get_live_update_feedback_for(
+            9001, environment="prod", topic_id="t-1",
+        )
+    )
+
+    assert row is None
+    eq_columns = {c for c, _ in eq_calls}
+    assert ("topic_id", "t-1") in eq_calls
+    assert ("replied_to_message_id", 9001) in eq_calls
+    assert ("environment", "prod") in eq_calls
+    # Never filter on feed_item_id when it is None.
+    assert "feed_item_id" not in eq_columns
+
+
 def test_storage_store_live_update_feedback_normalises_types_and_default():
     """store_live_update_feedback normalises IDs to int and defaults environment."""
     calls = []
@@ -446,7 +543,7 @@ def test_storage_store_live_update_feedback_normalises_types_and_default():
 
     row = asyncio.run(
         storage.store_live_update_feedback({
-            "feed_item_id": "feed-1",
+            "topic_id": "t-1",
             "guild_id": "1",                # str → int
             "admin_user_id": 42,
             "feedback_text": "Needs a fix",
@@ -468,47 +565,66 @@ def test_storage_store_live_update_feedback_normalises_types_and_default():
     assert payload["disposition"] == "correction"
     assert payload["environment"] == "prod"     # default applied
     assert payload["status"] == "logged"        # default applied
-    assert payload["feed_item_id"] == "feed-1"
+    assert payload["topic_id"] == "t-1"
+    assert payload["feed_item_id"] is None       # dormant when keyed on topic
 
 
 def test_storage_get_live_update_feedback_for_filters_and_returns_none():
-    """get_live_update_feedback_for filters correctly and returns None when absent."""
-    storage = make_storage([])
+    """get_live_update_feedback_for filters correctly and returns None when
+    absent. Drives the real query builder (method under test NOT mocked away).
+    """
+    eq_calls = []
+    disposition_box = {}
 
-    captured = {}
+    class FakeQuery:
+        def select(self, *_a, **_k):
+            return self
 
-    async def fake_get(feed_item_id, replied_to_message_id,
-                       environment="prod", disposition=None):
-        captured.update(
-            feed_item_id=feed_item_id,
-            replied_to_message_id=replied_to_message_id,
-            environment=environment,
-            disposition=disposition,
-        )
-        # Simulate no row found
-        return None
+        def eq(self, column, value):
+            eq_calls.append((column, value))
+            if column == "disposition":
+                disposition_box["value"] = value
+            return self
 
-    storage.get_live_update_feedback_for = fake_get
+        def order(self, *_a, **_k):
+            return self
 
-    # Without disposition filter
-    row = asyncio.run(
-        storage.get_live_update_feedback_for("feed-1", 9001, environment="dev")
-    )
-    assert row is None
-    assert captured["feed_item_id"] == "feed-1"
-    assert captured["replied_to_message_id"] == 9001
-    assert captured["environment"] == "dev"
-    assert captured["disposition"] is None
+        def limit(self, *_a, **_k):
+            return self
 
-    # With disposition filter
-    captured.clear()
+        def execute(self):
+            return type("Result", (), {"data": []})()
+
+    class FakeSupabase:
+        def table(self, _table):
+            return FakeQuery()
+
+    storage = StorageHandler.__new__(StorageHandler)
+    storage.supabase_client = FakeSupabase()
+
+    # Without disposition filter, keyed on feed_item_id.
     row = asyncio.run(
         storage.get_live_update_feedback_for(
-            "feed-2", 9002, environment="prod", disposition="deletion-request"
+            9001, environment="dev", feed_item_id="feed-1",
         )
     )
     assert row is None
-    assert captured["disposition"] == "deletion-request"
+    assert ("feed_item_id", "feed-1") in eq_calls
+    assert ("replied_to_message_id", 9001) in eq_calls
+    assert ("environment", "dev") in eq_calls
+    assert "disposition" not in {c for c, _ in eq_calls}
+
+    # With disposition filter.
+    eq_calls.clear()
+    disposition_box.clear()
+    row = asyncio.run(
+        storage.get_live_update_feedback_for(
+            9002, environment="prod", disposition="deletion-request",
+            feed_item_id="feed-2",
+        )
+    )
+    assert row is None
+    assert disposition_box["value"] == "deletion-request"
 
 
 def test_storage_update_live_update_feed_item_status_only():
@@ -552,23 +668,30 @@ def test_db_handler_feedback_wrappers_are_synchronous_and_gated():
                 "status": "posted",
             }
 
+        async def get_topic_by_discord_message_id(
+            self, message_id, guild_id, environment="prod"
+        ):
+            calls.append(("topic-reverse-lookup", message_id, guild_id, environment))
+            return {
+                "topic_id": "t-1",
+                "headline": "Test",
+                "summary": "Body",
+                "discord_message_ids": [9001],
+                "publication_status": "sent",
+                "state": "posted",
+            }
+
         async def store_live_update_feedback(self, feedback):
             calls.append(("store-feedback", feedback))
             return {"feedback_id": "fb-1", **feedback}
 
         async def get_live_update_feedback_for(
-            self, feed_item_id, replied_to_message_id,
-            environment="prod", disposition=None,
+            self, replied_to_message_id, environment="prod", disposition=None,
+            *, feed_item_id=None, topic_id=None,
         ):
-            calls.append(("read-feedback", feed_item_id, replied_to_message_id,
-                          environment, disposition))
-            return {"feedback_id": "fb-1", "feed_item_id": feed_item_id}
-
-        async def update_live_update_feed_item_status(
-            self, feed_item_id, status, guild_id, environment="prod",
-        ):
-            calls.append(("update-status", feed_item_id, status, guild_id, environment))
-            return {"feed_item_id": feed_item_id, "status": status}
+            calls.append(("read-feedback", replied_to_message_id,
+                          environment, disposition, feed_item_id, topic_id))
+            return {"feedback_id": "fb-1", "topic_id": topic_id}
 
     db = DatabaseHandler.__new__(DatabaseHandler)
     db.storage_handler = FakeStorage()
@@ -578,47 +701,34 @@ def test_db_handler_feedback_wrappers_are_synchronous_and_gated():
     db._live_write_allowed = lambda guild_id: False
 
     result = db.store_live_update_feedback(
-        {"guild_id": 1, "feed_item_id": "feed-1", "feedback_text": "fix"},
+        {"guild_id": 1, "topic_id": "t-1", "feedback_text": "fix"},
         environment="prod",
     )
     assert result is None  # no-op when write not allowed
 
-    result = db.update_live_update_feed_item_status(
-        "feed-1", "deleted", guild_id=1, environment="prod",
-    )
-    assert result is None  # no-op when write not allowed
-
     # Readers are NOT gated — they still work even when write is disallowed
-    row = db.get_feed_item_by_discord_message_id(9001, 1, environment="prod")
+    row = db.get_topic_by_discord_message_id(9001, 1, environment="prod")
     assert row is not None
-    assert row["feed_item_id"] == "feed-1"
-    assert row["live_channel_id"] == 42
+    assert row["topic_id"] == "t-1"
 
-    row = db.get_live_update_feedback_for("feed-1", 9001, environment="prod")
+    row = db.get_live_update_feedback_for(9001, environment="prod", topic_id="t-1")
     assert row is not None
-    assert row["feed_item_id"] == "feed-1"
+    assert row["topic_id"] == "t-1"
 
     # --- Write-gate ON: writers work ---
     calls.clear()
     db._live_write_allowed = lambda guild_id: True
 
     result = db.store_live_update_feedback(
-        {"guild_id": 1, "feed_item_id": "feed-1", "feedback_text": "fix"},
+        {"guild_id": 1, "topic_id": "t-1", "feedback_text": "fix"},
         environment="dev",
     )
     assert result is not None
     assert result["feedback_id"] == "fb-1"
 
-    result = db.update_live_update_feed_item_status(
-        "feed-1", "edited", guild_id=1, environment="prod",
-    )
-    assert result is not None
-    assert result["status"] == "edited"
-
-    # Verify the write calls went through after gate was re-enabled
+    # Verify the write call went through after gate was re-enabled
     call_types = [c[0] for c in calls]
     assert "store-feedback" in call_types
-    assert "update-status" in call_types
     # Reader calls happened before calls.clear() — confirmed they returned data above
 
 
@@ -627,7 +737,7 @@ def test_db_handler_feedback_wrappers_called_synchronously():
     calls = []
 
     class FakeStorage:
-        async def get_feed_item_by_discord_message_id(
+        async def get_topic_by_discord_message_id(
             self, message_id, guild_id, environment="prod"
         ):
             calls.append("storage-called")
@@ -641,24 +751,19 @@ def test_db_handler_feedback_wrappers_called_synchronously():
             calls.append("storage-called")
             return None
 
-        async def update_live_update_feed_item_status(self, *args, **kwargs):
-            calls.append("storage-called")
-            return None
-
     db = DatabaseHandler.__new__(DatabaseHandler)
     db.storage_handler = FakeStorage()
     db._run_async_in_thread = lambda coro: asyncio.run(coro)
     db._live_write_allowed = lambda guild_id: True
 
     # All calls are synchronous (no await)
-    db.get_feed_item_by_discord_message_id(9001, 1)
-    db.get_live_update_feedback_for("feed-1", 9001)
+    db.get_topic_by_discord_message_id(9001, 1)
+    db.get_live_update_feedback_for(9001, topic_id="t-1")
 
-    # These go through _live_write_allowed gate which is True
+    # This goes through _live_write_allowed gate which is True
     db.store_live_update_feedback(
-        {"guild_id": 1, "feed_item_id": "feed-1", "feedback_text": "fix"}
+        {"guild_id": 1, "topic_id": "t-1", "feedback_text": "fix"}
     )
-    db.update_live_update_feed_item_status("feed-1", "deleted", guild_id=1)
 
-    assert len(calls) == 4
+    assert len(calls) == 3
     assert all(c == "storage-called" for c in calls)

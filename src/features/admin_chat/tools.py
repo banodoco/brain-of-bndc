@@ -1027,24 +1027,24 @@ TOOLS = [
     },
     {
         "name": "log_live_update_feedback",
-        "description": "Log structured feedback for a live update feed item. Use this to record a disposition (e.g., 'approved', 'needs_revision', 'duplicate') and free-text feedback for a feed item that the admin is replying to. The feed_item_id, environment, admin_user_id, and replied_to_message_id are injected from context — you only need to supply feedback_text and optionally disposition.",
+        "description": "Log structured feedback for a live update (topic). Use this to record a disposition (e.g., 'approved', 'needs_revision', 'duplicate') and free-text feedback for the live update that the admin is replying to. The topic_id, environment, admin_user_id, and replied_to_message_id are injected from context — you only need to supply feedback_text and optionally disposition.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "feed_item_id": {
+                "topic_id": {
                     "type": "string",
-                    "description": "UUID of the live update feed item this feedback relates to"
+                    "description": "UUID of the live update (topic) this feedback relates to"
                 },
                 "feedback_text": {
                     "type": "string",
-                    "description": "Free-text feedback describing what should happen to this feed item"
+                    "description": "Free-text feedback describing what should happen to this live update"
                 },
                 "disposition": {
                     "type": "string",
                     "description": "Optional structured disposition: 'approved', 'needs_revision', 'duplicate', 'rejected', etc."
                 }
             },
-            "required": ["feed_item_id", "feedback_text"]
+            "required": ["topic_id", "feedback_text"]
         }
     },
     {
@@ -4764,16 +4764,17 @@ async def execute_log_live_update_feedback(
 ) -> Dict[str, Any]:
     """Persist a live-update feedback row.
 
-    feed_item_id and feedback_text are LLM-supplied.
-    guild_id, admin_user_id, environment, and replied_to_message_id are
-    injected from non-LLM context by the agent before the tool runs.
+    topic_id and feedback_text are LLM-supplied (topic_id is injected from
+    context — the LLM does not pick it). guild_id, admin_user_id, environment,
+    and replied_to_message_id are injected from non-LLM context by the agent
+    before the tool runs.
     """
-    feed_item_id = params.get('feed_item_id', '').strip()
+    topic_id = params.get('topic_id', '').strip()
     feedback_text = params.get('feedback_text', '').strip()
     disposition = params.get('disposition', '').strip() or None
 
-    if not feed_item_id:
-        return {"success": False, "error": "feed_item_id is required"}
+    if not topic_id:
+        return {"success": False, "error": "topic_id is required"}
     if not feedback_text:
         return {"success": False, "error": "feedback_text is required"}
 
@@ -4784,7 +4785,7 @@ async def execute_log_live_update_feedback(
 
     try:
         feedback = {
-            'feed_item_id': feed_item_id,
+            'topic_id': topic_id,
             'guild_id': guild_id,
             'environment': environment,
             'admin_user_id': admin_user_id,

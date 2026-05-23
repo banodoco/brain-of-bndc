@@ -399,6 +399,25 @@ class DatabaseHandler:
             )
         )
 
+    def get_topic_by_discord_message_id(
+        self,
+        message_id: Any,
+        guild_id: int,
+        environment: str = 'prod',
+    ) -> Optional[Dict[str, Any]]:
+        """Reverse-lookup a live-update topic by one of its Discord message IDs.
+
+        Synchronous wrapper.  Reader — NOT gated by _live_write_allowed.
+        See calling-convention block above for required asyncio.to_thread usage.
+        """
+        if not self.storage_handler:
+            return None
+        return self._run_async_in_thread(
+            self.storage_handler.get_topic_by_discord_message_id(
+                message_id, guild_id, environment=environment,
+            )
+        )
+
     def store_live_update_feedback(
         self,
         feedback: Dict[str, Any],
@@ -418,16 +437,19 @@ class DatabaseHandler:
 
     def get_live_update_feedback_for(
         self,
-        feed_item_id: str,
         replied_to_message_id: int,
         environment: str = 'prod',
         disposition: Optional[str] = None,
+        *,
+        feed_item_id: Optional[str] = None,
+        topic_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Authoritative delete-gate reader (SD1 / SD2).
 
         Returns the most recent live_update_feedback row matching
-        feed_item_id + replied_to_message_id + environment, optionally
-        filtered by disposition.
+        replied_to_message_id + environment, optionally narrowed by
+        ``topic_id`` and/or ``feed_item_id`` and ``disposition``.  Both key
+        columns are optional and applied conditionally.
 
         Synchronous wrapper.  Reader — NOT gated by _live_write_allowed.
         See calling-convention block above for required asyncio.to_thread usage.
@@ -436,10 +458,11 @@ class DatabaseHandler:
             return None
         return self._run_async_in_thread(
             self.storage_handler.get_live_update_feedback_for(
-                feed_item_id,
                 replied_to_message_id,
                 environment=environment,
                 disposition=disposition,
+                feed_item_id=feed_item_id,
+                topic_id=topic_id,
             )
         )
 

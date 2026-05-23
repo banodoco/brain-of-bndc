@@ -666,6 +666,48 @@ class StorageHandler:
             )
             return None
 
+    async def get_topic_by_discord_message_id(
+        self,
+        message_id: Any,
+        guild_id: int,
+        environment: str = 'prod',
+    ) -> Optional[Dict[str, Any]]:
+        """Reverse-lookup a *topic* (live-update) by one of its Discord message IDs.
+
+        topics.discord_message_ids is a NATIVE Postgres array (bigint[]), NOT
+        jsonb. The containment filter must therefore be a **bare Python list of
+        strings** so PostgREST renders a PG-array literal (cs.{"123"}) which
+        Postgres coerces to bigint and matches:
+            .contains('discord_message_ids', [str(message_id)])
+        Do NOT pass json.dumps([...]) here — that renders cs.["123"] and
+        Postgres rejects it with 22P02 (malformed array literal). This is the
+        deliberate contrast with get_feed_item_by_discord_message_id above,
+        whose column IS jsonb and so DOES need json.dumps.
+
+        Returns a single row (topic_id, headline, summary, discord_message_ids,
+        publication_status, state) or None.
+        """
+        if not self.supabase_client:
+            logger.error("Supabase client not initialized")
+            return None
+        try:
+            result = await asyncio.to_thread(
+                self.supabase_client.table('topics')
+                .select('topic_id, headline, summary, discord_message_ids, publication_status, state')
+                .contains('discord_message_ids', [str(message_id)])
+                .eq('guild_id', guild_id)
+                .eq('environment', environment)
+                .limit(1)
+                .execute
+            )
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error(
+                f"Error reverse-lookup topic by message_id={message_id}: {e}",
+                exc_info=True,
+            )
+            return None
+
     async def store_live_update_feedback(
         self,
         feedback: Dict[str, Any],
@@ -674,10 +716,12 @@ class StorageHandler:
 
         Normalises guild_id / admin_user_id / replied_to_message_id to int
         and defaults environment to 'prod'.  Returns the inserted row
-        (including feedback_id).
+        (including feedback_id).  Keys feedback to a live-update topic via
+        ``topic_id`` (feed_item_id is retained as a dormant nullable column).
         """
         payload = {
             'feed_item_id': feedback.get('feed_item_id'),
+            'topic_id': feedback.get('topic_id'),
             'guild_id': int(feedback['guild_id']) if feedback.get('guild_id') is not None else None,
             'environment': feedback.get('environment') or 'prod',
             'admin_user_id': int(feedback['admin_user_id']) if feedback.get('admin_user_id') is not None else None,
@@ -690,16 +734,23 @@ class StorageHandler:
 
     async def get_live_update_feedback_for(
         self,
-        feed_item_id: str,
         replied_to_message_id: int,
         environment: str = 'prod',
         disposition: Optional[str] = None,
+        *,
+        feed_item_id: Optional[str] = None,
+        topic_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Authoritative delete-gate reader (SD1 / SD2).
 
         Returns the most recent live_update_feedback row matching
-        feed_item_id + replied_to_message_id + environment,
-        optionally filtered by disposition.  Returns None when no row exists.
+        replied_to_message_id + environment, optionally narrowed by
+        ``topic_id`` and/or ``feed_item_id`` and ``disposition``.
+
+        Both key columns are optional and applied CONDITIONALLY — when a key is
+        None its ``.eq`` filter is omitted entirely, so a topic-only query never
+        emits ``.eq('feed_item_id', None)`` (which would match nothing).
+        Returns None when no row exists.
         """
         if not self.supabase_client:
             logger.error("Supabase client not initialized")
@@ -708,20 +759,23 @@ class StorageHandler:
             query = (
                 self.supabase_client.table('live_update_feedback')
                 .select('*')
-                .eq('feed_item_id', feed_item_id)
                 .eq('replied_to_message_id', replied_to_message_id)
                 .eq('environment', environment)
                 .order('created_at', desc=True)
                 .limit(1)
             )
+            if topic_id is not None:
+                query = query.eq('topic_id', topic_id)
+            if feed_item_id is not None:
+                query = query.eq('feed_item_id', feed_item_id)
             if disposition is not None:
                 query = query.eq('disposition', disposition)
             result = await asyncio.to_thread(query.execute)
             return result.data[0] if result.data else None
         except Exception as e:
             logger.error(
-                f"Error reading live_update_feedback feed_item={feed_item_id}"
-                f" reply={replied_to_message_id}: {e}",
+                f"Error reading live_update_feedback topic={topic_id}"
+                f" feed_item={feed_item_id} reply={replied_to_message_id}: {e}",
                 exc_info=True,
             )
             return None

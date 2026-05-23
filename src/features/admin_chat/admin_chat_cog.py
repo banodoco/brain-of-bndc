@@ -102,17 +102,15 @@ LIVE_UPDATE_FEEDBACK_GUIDANCE = """\
 This channel is for admin feedback on live updates. When an admin replies to
 a bot-posted live-update message, you are handling that feedback turn.
 
-- The replied-to message is part of a specific live update (feed item). You
-  are given the feed item context — research it using your available tools
-  as needed.
-- **Log the feedback** by calling `log_live_update_feedback` with the
-  feed_item_id, the admin's feedback text, and an optional disposition
-  (e.g. "correction", "approval", "deletion-request").
+- The replied-to message is part of a specific live update. You are given the
+  live update context — research it using your available tools as needed.
+- **Log the feedback** by calling `log_live_update_feedback` with the admin's
+  feedback text and an optional disposition (e.g. "correction", "approval",
+  "deletion-request"). The live update (topic_id) is injected from context.
 - If the feedback calls for a change, **act on the update itself**:
-  - Edit the update message(s) with `edit_message` — the bot will also
-    mark the feed item status as "edited".
+  - Edit the update message(s) with `edit_message`.
   - Delete the update message(s) with `delete_message` — the bot will
-    soft-delete the feed item (status "deleted"; row retained).
+    soft-delete the live update (state "deleted"; row retained).
 - After you log the feedback, the admin's reply will be ✅ acknowledged
   and then **removed** from the channel to keep it clean. This turn is a
   silent action — do not send a separate confirmation reply."""
@@ -1345,25 +1343,30 @@ class AdminChatCog(commands.Cog):
             return
 
         # Step 6 (T8): Reverse-lookup for live-update feedback replies BEFORE the
-        # @mention gate.  A reply whose parent resolves to a live_update_feed_items
-        # row is feedback and bypasses the @mention requirement (SD1).
+        # @mention gate.  A reply whose parent resolves to a `topics` row (the
+        # table backing the live-updates channel) is feedback and bypasses the
+        # @mention requirement (SD1).
         is_live_update_feedback = False
-        resolved_feed_item = None
+        resolved_topic = None
         parent_id = None
 
         if not is_dm and message.reference:
             parent_id = message.reference.message_id
             if parent_id and message.guild:
                 try:
-                    resolved_feed_item = await asyncio.to_thread(
-                        self.db_handler.get_feed_item_by_discord_message_id,
+                    resolved_topic = await asyncio.to_thread(
+                        self.db_handler.get_topic_by_discord_message_id,
                         parent_id,
                         message.guild.id,
                         self._live_environment(),
                     )
-                    is_live_update_feedback = resolved_feed_item is not None
+                    is_live_update_feedback = resolved_topic is not None
                 except Exception:
-                    pass
+                    logger.exception(
+                        "[AdminChat] live-update topic reverse-lookup failed for "
+                        "parent_id=%s",
+                        parent_id,
+                    )
 
         if not is_dm and not is_live_update_feedback and self.bot.user.id not in [m.id for m in message.mentions]:
             return
@@ -1492,7 +1495,7 @@ class AdminChatCog(commands.Cog):
             # Guidance is supplied unconditionally when is_live_update_feedback is True,
             # NOT gated on channel_id == live_channel_id (closes issue_hints-2).
             if is_live_update_feedback:
-                channel_context["live_update_feed_item"] = resolved_feed_item
+                channel_context["live_update_topic"] = resolved_topic
                 sc = self.db_handler.server_config if self.db_handler else None
                 override = (
                     sc.get_channel_agent_guidance(resolved_guild_id, message.channel.id)
@@ -1568,8 +1571,8 @@ class AdminChatCog(commands.Cog):
                 logger.info(f"[AdminChat] Sent {messages_sent} message(s) ({total_chars} chars total)")
 
             # ── Step 8 (T10): Post-turn feedback processing ──
-            if is_live_update_feedback and resolved_feed_item and parent_id:
-                feed_item_id = resolved_feed_item.get('feed_item_id')
+            if is_live_update_feedback and resolved_topic and parent_id:
+                topic_id = resolved_topic.get('topic_id')
                 replied_to_message_id = int(parent_id)
                 environment = self._live_environment()
                 guild_id = resolved_guild_id
@@ -1578,7 +1581,8 @@ class AdminChatCog(commands.Cog):
                 # never trust an in-turn flag.
                 feedback_row = await asyncio.to_thread(
                     self.db_handler.get_live_update_feedback_for,
-                    feed_item_id, replied_to_message_id, environment,
+                    replied_to_message_id, environment, None,
+                    topic_id=topic_id,
                 )
 
                 # 8.3: Fallback — if no row exists, store one with raw reply text
@@ -1588,7 +1592,7 @@ class AdminChatCog(commands.Cog):
                     await asyncio.to_thread(
                         self.db_handler.store_live_update_feedback,
                         {
-                            'feed_item_id': feed_item_id,
+                            'topic_id': topic_id,
                             'guild_id': guild_id,
                             'environment': environment,
                             'admin_user_id': user_id,
@@ -1600,13 +1604,13 @@ class AdminChatCog(commands.Cog):
                     )
                     feedback_row = await asyncio.to_thread(
                         self.db_handler.get_live_update_feedback_for,
-                        feed_item_id, replied_to_message_id, environment,
-                        'fallback',
+                        replied_to_message_id, environment, 'fallback',
+                        topic_id=topic_id,
                     )
 
                 # 8.4: Enforced editorial audit (SD2) — inspect result.actions
                 # for executed edit_message / delete_message calls.
-                discord_message_ids = resolved_feed_item.get('discord_message_ids') or []
+                discord_message_ids = resolved_topic.get('discord_message_ids') or []
                 discord_message_ids_str = {str(mid) for mid in discord_message_ids}
 
                 for action in result.actions:
@@ -1620,20 +1624,19 @@ class AdminChatCog(commands.Cog):
                         if res.get('message_id'):
                             candidate_ids.add(str(res['message_id']))
                         if candidate_ids & discord_message_ids_str:
-                            await asyncio.to_thread(
-                                self.db_handler.update_live_update_feed_item_status,
-                                feed_item_id, 'edited', guild_id, environment,
-                            )
+                            # NOTE: topics has no 'edited' state (valid states are
+                            # posted/watching/discarded/deleted) — do NOT mutate
+                            # topics.state on edit; only record the audit row.
                             audit_row = await asyncio.to_thread(
                                 self.db_handler.get_live_update_feedback_for,
-                                feed_item_id, replied_to_message_id, environment,
-                                'edited',
+                                replied_to_message_id, environment, 'edited',
+                                topic_id=topic_id,
                             )
                             if not audit_row:
                                 await asyncio.to_thread(
                                     self.db_handler.store_live_update_feedback,
                                     {
-                                        'feed_item_id': feed_item_id,
+                                        'topic_id': topic_id,
                                         'guild_id': guild_id,
                                         'environment': environment,
                                         'admin_user_id': user_id,
@@ -1658,20 +1661,23 @@ class AdminChatCog(commands.Cog):
                         for mid in (res.get('deleted_ids') or []):
                             candidate_ids.add(str(mid))
                         if candidate_ids & discord_message_ids_str:
+                            # Soft-delete the topic (NEVER hard-delete): set
+                            # topics.state='deleted'.  The feedback migration
+                            # extends topics_state_check to permit 'deleted'.
                             await asyncio.to_thread(
-                                self.db_handler.update_live_update_feed_item_status,
-                                feed_item_id, 'deleted', guild_id, environment,
+                                self.db_handler.update_topic,
+                                topic_id, {'state': 'deleted'}, guild_id, environment,
                             )
                             audit_row = await asyncio.to_thread(
                                 self.db_handler.get_live_update_feedback_for,
-                                feed_item_id, replied_to_message_id, environment,
-                                'deleted',
+                                replied_to_message_id, environment, 'deleted',
+                                topic_id=topic_id,
                             )
                             if not audit_row:
                                 await asyncio.to_thread(
                                     self.db_handler.store_live_update_feedback,
                                     {
-                                        'feed_item_id': feed_item_id,
+                                        'topic_id': topic_id,
                                         'guild_id': guild_id,
                                         'environment': environment,
                                         'admin_user_id': user_id,
