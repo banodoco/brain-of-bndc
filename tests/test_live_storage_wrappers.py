@@ -389,6 +389,56 @@ def test_storage_get_feed_item_by_discord_message_id_contains_filter():
     assert captured["environment"] == "prod"
 
 
+def test_storage_get_feed_item_reverse_lookup_uses_json_array_contains():
+    """Regression: discord_message_ids is a jsonb column, so the containment
+    filter must be a JSON-array literal (json.dumps(["123"]) -> cs.["123"]),
+    NOT a bare Python list (which postgrest renders as the PG-array literal
+    cs.{123} and Postgres rejects with 22P02 'invalid input syntax for type
+    json'). Unlike the spy-based test above, this drives the *real* query
+    builder so the jsonb-vs-array filter form is actually exercised.
+    """
+    import json as _json
+
+    captured = {}
+
+    class FakeQuery:
+        def select(self, *_a, **_k):
+            return self
+
+        def contains(self, column, value):
+            captured["column"] = column
+            captured["value"] = value
+            return self
+
+        def eq(self, *_a, **_k):
+            return self
+
+        def limit(self, *_a, **_k):
+            return self
+
+        def execute(self):
+            return type("Result", (), {"data": [{"feed_item_id": "feed-1"}]})()
+
+    class FakeSupabase:
+        def table(self, _table):
+            return FakeQuery()
+
+    storage = StorageHandler.__new__(StorageHandler)
+    storage.supabase_client = FakeSupabase()
+
+    row = asyncio.run(
+        storage.get_feed_item_by_discord_message_id(9001, 1, environment="prod")
+    )
+
+    assert row == {"feed_item_id": "feed-1"}
+    assert captured["column"] == "discord_message_ids"
+    # The crux of the fix: a JSON string, never a bare Python list.
+    assert isinstance(captured["value"], str), (
+        f"contains() must receive a JSON string, got {type(captured['value']).__name__}"
+    )
+    assert _json.loads(captured["value"]) == ["9001"]
+
+
 def test_storage_store_live_update_feedback_normalises_types_and_default():
     """store_live_update_feedback normalises IDs to int and defaults environment."""
     calls = []

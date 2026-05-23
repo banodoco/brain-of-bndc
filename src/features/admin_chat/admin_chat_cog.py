@@ -1531,7 +1531,17 @@ class AdminChatCog(commands.Cog):
                             raise
                         await asyncio.sleep(backoffs[attempt])
 
-            if result.replies:
+            # Live-update-feedback turns are silent actions (log + ✅ + delete the
+            # reply). Suppress any conversational reply the agent emits so the live
+            # channel stays clean even if the model ignores the silent-action
+            # guidance. The raw reply text is still used below for the fallback row.
+            if result.replies and is_live_update_feedback:
+                logger.info(
+                    f"[AdminChat] Suppressing {len(result.replies)} reply(ies) in "
+                    f"live-update-feedback mode (silent action)"
+                )
+
+            if result.replies and not is_live_update_feedback:
                 for response in result.replies:
                     response = self._strip_fallback_reply_lines(response)
                     if not response or not response.strip():

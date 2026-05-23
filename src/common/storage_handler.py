@@ -636,8 +636,11 @@ class StorageHandler:
     ) -> Optional[Dict[str, Any]]:
         """Reverse-lookup a feed item by one of its Discord message IDs.
 
-        Uses the verified text[] filter from Phase 0 audit:
-            .contains('discord_message_ids', [str(message_id)])
+        discord_message_ids is a jsonb array of string IDs, so the containment
+        filter must be a JSON array literal (cs.["123"]), not a PG-array literal
+        (cs.{123}). Pass json.dumps([str(id)]); a bare list renders as the latter
+        and Postgres rejects it (22P02 invalid input syntax for type json).
+            .contains('discord_message_ids', json.dumps([str(message_id)]))
 
         Returns a single row (feed_item_id, title, body, discord_message_ids,
         live_channel_id, status) or None.
@@ -649,7 +652,7 @@ class StorageHandler:
             result = await asyncio.to_thread(
                 self.supabase_client.table('live_update_feed_items')
                 .select('feed_item_id, title, body, discord_message_ids, live_channel_id, status')
-                .contains('discord_message_ids', [str(message_id)])
+                .contains('discord_message_ids', json.dumps([str(message_id)]))
                 .eq('guild_id', guild_id)
                 .eq('environment', environment)
                 .limit(1)
