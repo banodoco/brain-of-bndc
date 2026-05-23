@@ -357,6 +357,115 @@ class DatabaseHandler:
             self.storage_handler.get_recent_live_update_feed_items(guild_id, live_channel_id, limit, since_hours, environment=environment)
         )
 
+    # ------------------------------------------------------------------
+    # Live-update feedback wrappers (synchronous — see calling convention)
+    # ------------------------------------------------------------------
+    # Each of these is a synchronous def that delegates to the corresponding
+    # async StorageHandler method via self._run_async_in_thread().
+    #
+    # CALLING CONVENTION: when invoked from an async cog, the call MUST be
+    # wrapped in await asyncio.to_thread(self.db_handler.<wrapper>, ...)
+    # to avoid blocking the event loop.  _run_async_in_thread (line 57-69)
+    # blocks on future.result when a running loop is detected, so calling it
+    # directly from an async context would stall the event loop.
+    #
+    #   CORRECT:
+    #       row = await asyncio.to_thread(
+    #           self.db_handler.get_feed_item_by_discord_message_id,
+    #           message_id, guild_id, environment,
+    #       )
+    #
+    #   INCORRECT (blocks event loop):
+    #       row = self.db_handler.get_feed_item_by_discord_message_id(
+    #           message_id, guild_id, environment,
+    #       )
+
+    def get_feed_item_by_discord_message_id(
+        self,
+        message_id: Any,
+        guild_id: int,
+        environment: str = 'prod',
+    ) -> Optional[Dict[str, Any]]:
+        """Reverse-lookup a live_update_feed_item by one of its Discord message IDs.
+
+        Synchronous wrapper.  Reader — NOT gated by _live_write_allowed.
+        See calling-convention block above for required asyncio.to_thread usage.
+        """
+        if not self.storage_handler:
+            return None
+        return self._run_async_in_thread(
+            self.storage_handler.get_feed_item_by_discord_message_id(
+                message_id, guild_id, environment=environment,
+            )
+        )
+
+    def store_live_update_feedback(
+        self,
+        feedback: Dict[str, Any],
+        environment: str = 'prod',
+    ) -> Optional[Dict[str, Any]]:
+        """Persist a live-update feedback row.
+
+        Synchronous wrapper.  Write — gated by _live_write_allowed(guild_id).
+        See calling-convention block above for required asyncio.to_thread usage.
+        """
+        guild_id = feedback.get('guild_id')
+        if not self._live_write_allowed(guild_id) or not self.storage_handler:
+            return None
+        return self._run_async_in_thread(
+            self.storage_handler.store_live_update_feedback(feedback)
+        )
+
+    def get_live_update_feedback_for(
+        self,
+        feed_item_id: str,
+        replied_to_message_id: int,
+        environment: str = 'prod',
+        disposition: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Authoritative delete-gate reader (SD1 / SD2).
+
+        Returns the most recent live_update_feedback row matching
+        feed_item_id + replied_to_message_id + environment, optionally
+        filtered by disposition.
+
+        Synchronous wrapper.  Reader — NOT gated by _live_write_allowed.
+        See calling-convention block above for required asyncio.to_thread usage.
+        """
+        if not self.storage_handler:
+            return None
+        return self._run_async_in_thread(
+            self.storage_handler.get_live_update_feedback_for(
+                feed_item_id,
+                replied_to_message_id,
+                environment=environment,
+                disposition=disposition,
+            )
+        )
+
+    def update_live_update_feed_item_status(
+        self,
+        feed_item_id: str,
+        status: str,
+        guild_id: int,
+        environment: str = 'prod',
+    ) -> Optional[Dict[str, Any]]:
+        """Status-only updater for live_update_feed_items (SD7).
+
+        Sets ONLY the status column — does NOT touch title, body, or any
+        other field.
+
+        Synchronous wrapper.  Write — gated by _live_write_allowed(guild_id).
+        See calling-convention block above for required asyncio.to_thread usage.
+        """
+        if not self._live_write_allowed(guild_id) or not self.storage_handler:
+            return None
+        return self._run_async_in_thread(
+            self.storage_handler.update_live_update_feed_item_status(
+                feed_item_id, status, guild_id, environment=environment,
+            )
+        )
+
     def find_live_update_duplicate(
         self,
         duplicate_key: str,

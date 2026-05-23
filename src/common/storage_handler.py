@@ -626,6 +626,122 @@ class StorageHandler:
             'posted_at': datetime.utcnow().isoformat() if status == 'posted' else None,
         })
 
+    # ── live_update_feedback storage handlers ──────────────────────────────
+
+    async def get_feed_item_by_discord_message_id(
+        self,
+        message_id: Any,
+        guild_id: int,
+        environment: str = 'prod',
+    ) -> Optional[Dict[str, Any]]:
+        """Reverse-lookup a feed item by one of its Discord message IDs.
+
+        Uses the verified text[] filter from Phase 0 audit:
+            .contains('discord_message_ids', [str(message_id)])
+
+        Returns a single row (feed_item_id, title, body, discord_message_ids,
+        live_channel_id, status) or None.
+        """
+        if not self.supabase_client:
+            logger.error("Supabase client not initialized")
+            return None
+        try:
+            result = await asyncio.to_thread(
+                self.supabase_client.table('live_update_feed_items')
+                .select('feed_item_id, title, body, discord_message_ids, live_channel_id, status')
+                .contains('discord_message_ids', [str(message_id)])
+                .eq('guild_id', guild_id)
+                .eq('environment', environment)
+                .limit(1)
+                .execute
+            )
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error(
+                f"Error reverse-lookup feed item by message_id={message_id}: {e}",
+                exc_info=True,
+            )
+            return None
+
+    async def store_live_update_feedback(
+        self,
+        feedback: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Insert a row into live_update_feedback.
+
+        Normalises guild_id / admin_user_id / replied_to_message_id to int
+        and defaults environment to 'prod'.  Returns the inserted row
+        (including feedback_id).
+        """
+        payload = {
+            'feed_item_id': feedback.get('feed_item_id'),
+            'guild_id': int(feedback['guild_id']) if feedback.get('guild_id') is not None else None,
+            'environment': feedback.get('environment') or 'prod',
+            'admin_user_id': int(feedback['admin_user_id']) if feedback.get('admin_user_id') is not None else None,
+            'feedback_text': feedback.get('feedback_text'),
+            'replied_to_message_id': int(feedback['replied_to_message_id']) if feedback.get('replied_to_message_id') is not None else None,
+            'disposition': feedback.get('disposition'),
+            'status': feedback.get('status') or 'logged',
+        }
+        return await self._insert_live_row('live_update_feedback', payload)
+
+    async def get_live_update_feedback_for(
+        self,
+        feed_item_id: str,
+        replied_to_message_id: int,
+        environment: str = 'prod',
+        disposition: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Authoritative delete-gate reader (SD1 / SD2).
+
+        Returns the most recent live_update_feedback row matching
+        feed_item_id + replied_to_message_id + environment,
+        optionally filtered by disposition.  Returns None when no row exists.
+        """
+        if not self.supabase_client:
+            logger.error("Supabase client not initialized")
+            return None
+        try:
+            query = (
+                self.supabase_client.table('live_update_feedback')
+                .select('*')
+                .eq('feed_item_id', feed_item_id)
+                .eq('replied_to_message_id', replied_to_message_id)
+                .eq('environment', environment)
+                .order('created_at', desc=True)
+                .limit(1)
+            )
+            if disposition is not None:
+                query = query.eq('disposition', disposition)
+            result = await asyncio.to_thread(query.execute)
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error(
+                f"Error reading live_update_feedback feed_item={feed_item_id}"
+                f" reply={replied_to_message_id}: {e}",
+                exc_info=True,
+            )
+            return None
+
+    async def update_live_update_feed_item_status(
+        self,
+        feed_item_id: str,
+        status: str,
+        guild_id: int,
+        environment: str = 'prod',
+    ) -> Optional[Dict[str, Any]]:
+        """Status-only updater for live_update_feed_items (SD7).
+
+        Sets *only* the status column — does NOT touch title, body, or any
+        other field.  Filtered by feed_item_id + environment.
+        """
+        return await self._update_live_row(
+            'live_update_feed_items',
+            'feed_item_id',
+            feed_item_id,
+            {'status': status},
+        )
+
     async def get_recent_live_update_feed_items(
         self,
         guild_id: Optional[int] = None,

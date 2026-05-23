@@ -8,6 +8,7 @@ Follows the Arnold pattern:
 import os
 import json
 import logging
+from dataclasses import dataclass
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 
@@ -36,6 +37,7 @@ _ADMIN_IDENTITY_INJECTED_TOOLS = frozenset({
     "release_payment",
     "mute_speaker",
     "unmute_speaker",
+    "log_live_update_feedback",
 })
 from src.common.soul import BOT_VOICE
 
@@ -184,6 +186,19 @@ ADMIN_MAX_CONVERSATION_LENGTH = 20
 MAX_CONVERSATION_BYTES = 80_000
 
 
+@dataclass
+class AdminChatResult:
+    """Return contract for AdminChatAgent.chat().
+
+    ``replies`` is the list of chat-text reply strings (may be None for
+    silent / tool-only turns). ``actions`` is the ordered list of tool
+    invocations performed during the turn, each a dict with keys
+    ``tool``, ``input``, ``result``.
+    """
+    replies: Optional[List[str]]
+    actions: List[dict]
+
+
 class AdminChatAgent:
     """Handles DeepSeek conversations with tool use for admin chat."""
 
@@ -246,7 +261,7 @@ class AdminChatAgent:
         channel_context: dict = None,
         channel=None,
         requester_id: Optional[int] = None,
-    ) -> Optional[List[str]]:
+    ) -> AdminChatResult:
         """Process a chat message and return the response.
 
         Follows the Arnold pattern:
@@ -263,7 +278,7 @@ class AdminChatAgent:
         # Handle special commands
         if user_message.strip().lower() in ['clear', 'reset', '/clear', '/reset']:
             self.clear_conversation(user_id)
-            return ["Conversation cleared!"]
+            return AdminChatResult(replies=["Conversation cleared!"], actions=[])
 
         # Build messages with conversation history
         conversation = self.get_conversation(user_id)
@@ -356,6 +371,12 @@ class AdminChatAgent:
                 )
                 system += _POM_ADDENDUM
 
+                # Post-render append: inject channel-specific agent guidance (SD3).
+                # Works whether base SYSTEM_PROMPT or per-guild prompt_admin_chat_system
+                # is in effect — no {channel_guidance} template placeholder needed.
+                if channel_context and channel_context.get('channel_guidance'):
+                    system += "\n\n## Channel Guidance\n\n" + channel_context['channel_guidance']
+
                 # Show "is typing..." during API call, stops when call completes
                 try:
                     if channel:
@@ -423,6 +444,15 @@ class AdminChatAgent:
                         if tool_input is tool_use.input:
                             tool_input = dict(tool_input)
                         tool_input['admin_user_id'] = user_id
+
+                    # Inject non-LLM context for log_live_update_feedback
+                    if tool_name == "log_live_update_feedback":
+                        if tool_input is tool_use.input:
+                            tool_input = dict(tool_input)
+                        if channel_context and channel_context.get('environment'):
+                            tool_input['environment'] = channel_context['environment']
+                        if channel_context and channel_context.get('replied_to_message_id'):
+                            tool_input['replied_to_message_id'] = channel_context['replied_to_message_id']
 
                     # Execute the tool
                     dm_channel_id = None
@@ -509,15 +539,24 @@ class AdminChatAgent:
                 final_replies = ["\n\n".join(reply for reply in final_replies if reply)]
 
             # Return list of messages (or None if ended without reply)
-            return final_replies if final_replies else None
-            
+            return AdminChatResult(
+                replies=final_replies if final_replies else None,
+                actions=actions,
+            )
+
         except _AdminChatModelError as e:
             logger.error(f"[AdminChat] DeepSeek API error: {e}", exc_info=True)
-            return ["I couldn't complete that right now because the model API failed."]
-        
+            return AdminChatResult(
+                replies=["I couldn't complete that right now because the model API failed."],
+                actions=actions,
+            )
+
         except Exception as e:
             logger.error(f"[AdminChat] Unexpected error: {e}", exc_info=True)
-            return ["I hit an internal error while trying to do that."]
+            return AdminChatResult(
+                replies=["I hit an internal error while trying to do that."],
+                actions=actions,
+            )
 
 
 def _content_blocks_to_dicts(blocks: List[Any]) -> List[Dict[str, Any]]:

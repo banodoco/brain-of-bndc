@@ -877,5 +877,6 @@ def test_admin_tool_registration_and_identity_injection_sets():
         "release_payment",
         "mute_speaker",
         "unmute_speaker",
+        "log_live_update_feedback",
     }
     assert "initiate_batch_payment" in admin_agent._CHANNEL_POSTING_TOOLS

@@ -1026,6 +1026,28 @@ TOOLS = [
         }
     },
     {
+        "name": "log_live_update_feedback",
+        "description": "Log structured feedback for a live update feed item. Use this to record a disposition (e.g., 'approved', 'needs_revision', 'duplicate') and free-text feedback for a feed item that the admin is replying to. The feed_item_id, environment, admin_user_id, and replied_to_message_id are injected from context — you only need to supply feedback_text and optionally disposition.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "feed_item_id": {
+                    "type": "string",
+                    "description": "UUID of the live update feed item this feedback relates to"
+                },
+                "feedback_text": {
+                    "type": "string",
+                    "description": "Free-text feedback describing what should happen to this feed item"
+                },
+                "disposition": {
+                    "type": "string",
+                    "description": "Optional structured disposition: 'approved', 'needs_revision', 'duplicate', 'rejected', etc."
+                }
+            },
+            "required": ["feed_item_id", "feedback_text"]
+        }
+    },
+    {
         "name": "upload_file",
         "description": "Upload a file to a Discord channel. Use for sharing videos, images, or other files. The file must be accessible on the local filesystem.",
         "input_schema": {
@@ -4736,6 +4758,49 @@ async def execute_inspect_social_publication(
         return {"success": False, "error": str(e)}
 
 
+async def execute_log_live_update_feedback(
+    db_handler,
+    params: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Persist a live-update feedback row.
+
+    feed_item_id and feedback_text are LLM-supplied.
+    guild_id, admin_user_id, environment, and replied_to_message_id are
+    injected from non-LLM context by the agent before the tool runs.
+    """
+    feed_item_id = params.get('feed_item_id', '').strip()
+    feedback_text = params.get('feedback_text', '').strip()
+    disposition = params.get('disposition', '').strip() or None
+
+    if not feed_item_id:
+        return {"success": False, "error": "feed_item_id is required"}
+    if not feedback_text:
+        return {"success": False, "error": "feedback_text is required"}
+
+    guild_id = params.get('guild_id')
+    admin_user_id = params.get('admin_user_id')
+    environment = params.get('environment') or 'prod'
+    replied_to_message_id = params.get('replied_to_message_id')
+
+    try:
+        feedback = {
+            'feed_item_id': feed_item_id,
+            'guild_id': guild_id,
+            'environment': environment,
+            'admin_user_id': admin_user_id,
+            'feedback_text': feedback_text,
+            'replied_to_message_id': replied_to_message_id,
+            'disposition': disposition,
+        }
+        row = db_handler.store_live_update_feedback(feedback, environment=environment)
+        if row is None:
+            return {"success": False, "error": "Feedback storage rejected (write gate or storage unavailable)"}
+        return {"success": True, "feedback_id": row.get('feedback_id')}
+    except Exception as e:
+        logger.error("[AdminChat] log_live_update_feedback failed: %s", e, exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
 # ========== Tool Executor Dispatcher ==========
 
 async def execute_tool(
@@ -4877,6 +4942,8 @@ async def execute_tool(
         return await execute_edit_message(bot, trusted_tool_input)
     elif tool_name == "delete_message":
         return await execute_delete_message(bot, trusted_tool_input)
+    elif tool_name == "log_live_update_feedback":
+        return await execute_log_live_update_feedback(db_handler, trusted_tool_input)
     elif tool_name == "upload_file":
         return await execute_upload_file(bot, trusted_tool_input)
     elif tool_name == "resolve_user":

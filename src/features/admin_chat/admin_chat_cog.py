@@ -92,6 +92,32 @@ Strict rules:
 """.strip()
 
 
+# ── Built-in live-update-feedback agent guidance ──────────────────────────
+# Injected as channel_guidance when an admin replies in a live channel.
+# The caller may override this with a per-channel DB value via
+# ServerConfig.get_channel_agent_guidance().
+LIVE_UPDATE_FEEDBACK_GUIDANCE = """\
+## Live Update Feedback Channel
+
+This channel is for admin feedback on live updates. When an admin replies to
+a bot-posted live-update message, you are handling that feedback turn.
+
+- The replied-to message is part of a specific live update (feed item). You
+  are given the feed item context — research it using your available tools
+  as needed.
+- **Log the feedback** by calling `log_live_update_feedback` with the
+  feed_item_id, the admin's feedback text, and an optional disposition
+  (e.g. "correction", "approval", "deletion-request").
+- If the feedback calls for a change, **act on the update itself**:
+  - Edit the update message(s) with `edit_message` — the bot will also
+    mark the feed item status as "edited".
+  - Delete the update message(s) with `delete_message` — the bot will
+    soft-delete the feed item (status "deleted"; row retained).
+- After you log the feedback, the admin's reply will be ✅ acknowledged
+  and then **removed** from the channel to keep it clean. This turn is a
+  silent action — do not send a separate confirmation reply."""
+
+
 class AdminChatCog(commands.Cog):
     """Cog that handles admin chat plus approved member requests."""
 
@@ -168,6 +194,10 @@ class AdminChatCog(commands.Cog):
             )
         self._admin_mention = f"<@{self.admin_user_id}>" if self.admin_user_id else "the admin"
         self._startup_reconciled = False
+
+    def _live_environment(self) -> str:
+        """Return the current environment string for live-update lookups (SD5)."""
+        return "dev" if self.db_handler.dev_mode else "prod"
 
     @classmethod
     def _parse_wallet_from_text(cls, content: str) -> Optional[str]:
@@ -1313,7 +1343,29 @@ class AdminChatCog(commands.Cog):
         is_dm = isinstance(message.channel, discord.DMChannel)
         if not is_dm and not self.bot.user:
             return
-        if not is_dm and self.bot.user.id not in [m.id for m in message.mentions]:
+
+        # Step 6 (T8): Reverse-lookup for live-update feedback replies BEFORE the
+        # @mention gate.  A reply whose parent resolves to a live_update_feed_items
+        # row is feedback and bypasses the @mention requirement (SD1).
+        is_live_update_feedback = False
+        resolved_feed_item = None
+        parent_id = None
+
+        if not is_dm and message.reference:
+            parent_id = message.reference.message_id
+            if parent_id and message.guild:
+                try:
+                    resolved_feed_item = await asyncio.to_thread(
+                        self.db_handler.get_feed_item_by_discord_message_id,
+                        parent_id,
+                        message.guild.id,
+                        self._live_environment(),
+                    )
+                    is_live_update_feedback = resolved_feed_item is not None
+                except Exception:
+                    pass
+
+        if not is_dm and not is_live_update_feedback and self.bot.user.id not in [m.id for m in message.mentions]:
             return
         content = message.content if is_dm else self._strip_mention(message.content, message.guild)
         if not content:
@@ -1412,9 +1464,46 @@ class AdminChatCog(commands.Cog):
                 except Exception:
                     pass
 
+            # ── Step 7 (T9): Enrich channel_context with live-update-feedback fields ──
+            # replied_to_message_id from message.reference.message_id (always present
+            # when message.reference exists — independent of the cache-dependent
+            # 'replied_to' block).
+            if message.reference:
+                channel_context["replied_to_message_id"] = str(message.reference.message_id)
+                # Best-effort hydrate parent content when resolved is not cached
+                if not is_dm and message.reference.resolved is None and parent_id is not None:
+                    try:
+                        parent_msg = await message.channel.fetch_message(parent_id)
+                        if "replied_to" not in channel_context:
+                            channel_context["replied_to"] = {
+                                "message_id": str(parent_msg.id),
+                                "author": parent_msg.author.display_name,
+                                "content": _preview_text(parent_msg.content or '', 500),
+                            }
+                            channel_context["replied_to_anchor_note"] = (
+                                "USER IS REPLYING TO THIS MESSAGE — treat it as the primary referent."
+                            )
+                    except Exception:
+                        pass
+
+            channel_context["environment"] = self._live_environment()
+
+            # Live-update-feedback specific enrichment (SD1/SD3):
+            # Guidance is supplied unconditionally when is_live_update_feedback is True,
+            # NOT gated on channel_id == live_channel_id (closes issue_hints-2).
+            if is_live_update_feedback:
+                channel_context["live_update_feed_item"] = resolved_feed_item
+                sc = self.db_handler.server_config if self.db_handler else None
+                override = (
+                    sc.get_channel_agent_guidance(resolved_guild_id, message.channel.id)
+                    if sc and resolved_guild_id is not None
+                    else None
+                )
+                channel_context["channel_guidance"] = override or LIVE_UPDATE_FEEDBACK_GUIDANCE
+
             self._busy[user_id] = True
             try:
-                responses = await self.agent.chat(
+                result = await self.agent.chat(
                     user_id=user_id,
                     user_message=content,
                     channel_context=channel_context,
@@ -1424,7 +1513,7 @@ class AdminChatCog(commands.Cog):
             finally:
                 self._busy[user_id] = False
 
-            if responses is None:
+            if result.replies is None and not is_live_update_feedback:
                 logger.info("[AdminChat] Turn ended without reply (silent action)")
                 return
 
@@ -1442,30 +1531,160 @@ class AdminChatCog(commands.Cog):
                             raise
                         await asyncio.sleep(backoffs[attempt])
 
-            for response in responses:
-                response = self._strip_fallback_reply_lines(response)
-                if not response or not response.strip():
-                    continue
-
-                parts = response.split('\n---SPLIT---\n')
-                for part in parts:
-                    part = part.strip()
-                    if not part:
+            if result.replies:
+                for response in result.replies:
+                    response = self._strip_fallback_reply_lines(response)
+                    if not response or not response.strip():
                         continue
 
-                    total_chars += len(part)
-                    if len(part) <= 2000:
-                        await _send_with_retry(message.channel, part, reference=reply_ref)
-                        messages_sent += 1
-                    else:
-                        chunks = [part[i:i + 1990] for i in range(0, len(part), 1990)]
-                        for chunk in chunks:
-                            if chunk.strip():
-                                await _send_with_retry(message.channel, chunk, reference=reply_ref)
-                                messages_sent += 1
-                    reply_ref = None
+                    parts = response.split('\n---SPLIT---\n')
+                    for part in parts:
+                        part = part.strip()
+                        if not part:
+                            continue
 
-            logger.info(f"[AdminChat] Sent {messages_sent} message(s) ({total_chars} chars total)")
+                        total_chars += len(part)
+                        if len(part) <= 2000:
+                            await _send_with_retry(message.channel, part, reference=reply_ref)
+                            messages_sent += 1
+                        else:
+                            chunks = [part[i:i + 1990] for i in range(0, len(part), 1990)]
+                            for chunk in chunks:
+                                if chunk.strip():
+                                    await _send_with_retry(message.channel, chunk, reference=reply_ref)
+                                    messages_sent += 1
+                        reply_ref = None
+
+                logger.info(f"[AdminChat] Sent {messages_sent} message(s) ({total_chars} chars total)")
+
+            # ── Step 8 (T10): Post-turn feedback processing ──
+            if is_live_update_feedback and resolved_feed_item and parent_id:
+                feed_item_id = resolved_feed_item.get('feed_item_id')
+                replied_to_message_id = int(parent_id)
+                environment = self._live_environment()
+                guild_id = resolved_guild_id
+
+                # 8.2: Authoritative delete-gate (SD1/SD2) — re-query the table,
+                # never trust an in-turn flag.
+                feedback_row = await asyncio.to_thread(
+                    self.db_handler.get_live_update_feedback_for,
+                    feed_item_id, replied_to_message_id, environment,
+                )
+
+                # 8.3: Fallback — if no row exists, store one with raw reply text
+                # and disposition='fallback', then re-read to confirm.
+                if not feedback_row:
+                    raw_reply = result.replies[0] if result.replies else ""
+                    await asyncio.to_thread(
+                        self.db_handler.store_live_update_feedback,
+                        {
+                            'feed_item_id': feed_item_id,
+                            'guild_id': guild_id,
+                            'environment': environment,
+                            'admin_user_id': user_id,
+                            'feedback_text': raw_reply,
+                            'replied_to_message_id': replied_to_message_id,
+                            'disposition': 'fallback',
+                        },
+                        environment,
+                    )
+                    feedback_row = await asyncio.to_thread(
+                        self.db_handler.get_live_update_feedback_for,
+                        feed_item_id, replied_to_message_id, environment,
+                        'fallback',
+                    )
+
+                # 8.4: Enforced editorial audit (SD2) — inspect result.actions
+                # for executed edit_message / delete_message calls.
+                discord_message_ids = resolved_feed_item.get('discord_message_ids') or []
+                discord_message_ids_str = {str(mid) for mid in discord_message_ids}
+
+                for action in result.actions:
+                    tool_name = action.get('tool', '')
+                    if tool_name == 'edit_message':
+                        candidate_ids = set()
+                        inp = action.get('input', {})
+                        res = action.get('result', {})
+                        if inp.get('message_id'):
+                            candidate_ids.add(str(inp['message_id']))
+                        if res.get('message_id'):
+                            candidate_ids.add(str(res['message_id']))
+                        if candidate_ids & discord_message_ids_str:
+                            await asyncio.to_thread(
+                                self.db_handler.update_live_update_feed_item_status,
+                                feed_item_id, 'edited', guild_id, environment,
+                            )
+                            audit_row = await asyncio.to_thread(
+                                self.db_handler.get_live_update_feedback_for,
+                                feed_item_id, replied_to_message_id, environment,
+                                'edited',
+                            )
+                            if not audit_row:
+                                await asyncio.to_thread(
+                                    self.db_handler.store_live_update_feedback,
+                                    {
+                                        'feed_item_id': feed_item_id,
+                                        'guild_id': guild_id,
+                                        'environment': environment,
+                                        'admin_user_id': user_id,
+                                        'feedback_text': '',
+                                        'replied_to_message_id': replied_to_message_id,
+                                        'disposition': 'edited',
+                                    },
+                                    environment,
+                                )
+                            # Also refresh feedback_row so ✅ / delete gate passes
+                            if not feedback_row:
+                                feedback_row = audit_row
+
+                    elif tool_name == 'delete_message':
+                        candidate_ids = set()
+                        inp = action.get('input', {})
+                        res = action.get('result', {})
+                        if inp.get('message_id'):
+                            candidate_ids.add(str(inp['message_id']))
+                        for mid in (inp.get('message_ids') or []):
+                            candidate_ids.add(str(mid))
+                        for mid in (res.get('deleted_ids') or []):
+                            candidate_ids.add(str(mid))
+                        if candidate_ids & discord_message_ids_str:
+                            await asyncio.to_thread(
+                                self.db_handler.update_live_update_feed_item_status,
+                                feed_item_id, 'deleted', guild_id, environment,
+                            )
+                            audit_row = await asyncio.to_thread(
+                                self.db_handler.get_live_update_feedback_for,
+                                feed_item_id, replied_to_message_id, environment,
+                                'deleted',
+                            )
+                            if not audit_row:
+                                await asyncio.to_thread(
+                                    self.db_handler.store_live_update_feedback,
+                                    {
+                                        'feed_item_id': feed_item_id,
+                                        'guild_id': guild_id,
+                                        'environment': environment,
+                                        'admin_user_id': user_id,
+                                        'feedback_text': '',
+                                        'replied_to_message_id': replied_to_message_id,
+                                        'disposition': 'deleted',
+                                    },
+                                    environment,
+                                )
+                            if not feedback_row:
+                                feedback_row = audit_row
+
+                # 8.5: ✅ reaction + reply deletion — ONLY after a confirmed
+                # feedback row exists (from 8.2, 8.3, or 8.4).
+                if feedback_row:
+                    try:
+                        await message.add_reaction('\u2705')
+                    except Exception:
+                        pass
+                    try:
+                        await message.delete()
+                    except Exception:
+                        pass
         except Exception:
             logger.exception("[AdminChat] Error processing message")
             try:

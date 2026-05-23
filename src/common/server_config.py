@@ -447,6 +447,35 @@ class ServerConfig:
         return None
 
     # ------------------------------------------------------------------
+    # Per-channel agent guidance
+    # ------------------------------------------------------------------
+
+    def get_channel_agent_guidance(
+        self,
+        guild_id: int,
+        channel_id: int,
+    ) -> Optional[str]:
+        """Return per-channel agent guidance override, or None.
+
+        Reads the optional ``channel_agent_guidance`` JSON field from the
+        server_config row.  It is a map of ``channel_id`` → guidance text.
+        Returns the explicit override for *channel_id* if present, otherwise
+        None.  The caller (the cog) supplies its own built-in default —
+        this method does NOT fabricate the live-update default.
+        """
+        self._maybe_refresh()
+        server = self._servers.get(guild_id)
+        if not server:
+            return None
+        guidance_map = server.get('channel_agent_guidance')
+        if not isinstance(guidance_map, dict):
+            return None
+        override = guidance_map.get(str(channel_id))
+        if not isinstance(override, str) or not override.strip():
+            return None
+        return override.strip()
+
+    # ------------------------------------------------------------------
     # Refresh from DB
     # ------------------------------------------------------------------
 
