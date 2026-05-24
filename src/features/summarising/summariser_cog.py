@@ -95,7 +95,7 @@ class SummarizerCog(commands.Cog):
                     "Live-update pass disabled; set LIVE_UPDATES_ENABLED=true "
                     "to enable in production."
                 )
-            digest_hour = _env_int("DAILY_DIGEST_HOUR_UTC", 9)
+            digest_hour = _env_int("DAILY_DIGEST_HOUR_UTC", 11)
             digest_time = datetime.time(hour=digest_hour, tzinfo=datetime.timezone.utc)
             self.run_daily_digest.change_interval(time=digest_time)
             if self.daily_digest_enabled:
