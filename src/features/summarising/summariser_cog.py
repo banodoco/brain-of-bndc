@@ -1,10 +1,12 @@
 # src/features/summarising/summariser_cog.py
 
+import datetime
 from discord.ext import commands
 import logging
 import os
 from discord.ext import tasks
 
+from .daily_digest import daily_digest_run
 from .live_update_editor import LiveUpdateEditor as LegacyLiveUpdateEditor
 from .topic_editor import TopicEditor
 from .live_top_creations import LiveTopCreations
@@ -73,6 +75,10 @@ class SummarizerCog(commands.Cog):
         # posts as watching topics so the agent can inspect context/vision first.
         # LIVE_TOP_CREATIONS_ENABLED is deprecated and intentionally not read.
         self.live_top_creations_enabled = False
+        # Unlike live_updates_enabled, daily_digest_enabled does NOT carry the
+        # `self.dev_mode or` prefix — the digest loop must be explicitly opted
+        # into via DAILY_DIGEST_ENABLED=true in both dev and prod.
+        self.daily_digest_enabled = _env_flag("DAILY_DIGEST_ENABLED", False)
         self.live_pass_interval_minutes = _env_int("LIVE_PASS_INTERVAL_MINUTES", 60)
         dry_run_lookback_hours = _env_int("LIVE_UPDATE_DEV_LOOKBACK_HOURS", 6)
         self.live_update_editor = live_update_editor or self._build_live_update_editor(
@@ -89,10 +95,21 @@ class SummarizerCog(commands.Cog):
                     "Live-update pass disabled; set LIVE_UPDATES_ENABLED=true "
                     "to enable in production."
                 )
+            digest_hour = _env_int("DAILY_DIGEST_HOUR_UTC", 9)
+            digest_time = datetime.time(hour=digest_hour, tzinfo=datetime.timezone.utc)
+            self.run_daily_digest.change_interval(time=digest_time)
+            if self.daily_digest_enabled:
+                self.run_daily_digest.start()
+            else:
+                logger.info(
+                    "Daily digest loop disabled; set DAILY_DIGEST_ENABLED=true to enable."
+                )
 
     def cog_unload(self):
         if self.run_live_pass.is_running():
             self.run_live_pass.cancel()
+        if self.run_daily_digest.is_running():
+            self.run_daily_digest.cancel()
 
     @tasks.loop(minutes=60)
     async def run_live_pass(self):
@@ -181,6 +198,66 @@ class SummarizerCog(commands.Cog):
             else:
                 logger.debug("No --summary-now flag detected on startup.")
                 self._release_startup_live_gate()
+
+    @tasks.loop(hours=24)
+    async def run_daily_digest(self):
+        """Daily live-update digest pass."""
+        dev_mode = bool(getattr(self.bot, "dev_mode", False))
+        environment = "dev" if dev_mode else "prod"
+        guild_id, channel_id = self._resolve_digest_guild_channel()
+        logger.info(
+            "Daily digest run starting: guild=%s env=%s channel=%s",
+            guild_id, environment, channel_id,
+        )
+        try:
+            result = await daily_digest_run(
+                self.bot,
+                self.bot.db_handler,
+                guild_id=guild_id,
+                channel_id=channel_id,
+                environment=environment,
+            )
+            logger.info("Daily digest run finished: %s", result)
+        except Exception as e:
+            logger.error("Error during daily digest run: %s", e, exc_info=True)
+
+    @run_daily_digest.before_loop
+    async def before_run_daily_digest(self):
+        await self.bot.wait_until_ready()
+
+    def _resolve_digest_guild_channel(self) -> tuple:
+        """Return (guild_id, channel_id) for the daily digest from env vars."""
+        dev = bool(getattr(self.bot, "dev_mode", False))
+        if dev:
+            guild_str = os.getenv("DEV_GUILD_ID") or "1076117621407223829"
+            channel_str = os.getenv("DEV_DAILY_DIGEST_CHANNEL_ID") or "1507878962515148952"
+        else:
+            guild_str = os.getenv("GUILD_ID") or "1076117621407223829"
+            channel_str = os.getenv("DAILY_DIGEST_CHANNEL_ID") or "1507878962515148952"
+        return int(guild_str), int(channel_str)
+
+    @commands.command(name="dailydigest")
+    @commands.is_owner()
+    async def daily_digest_command(self, ctx):
+        """Manually triggers one daily live-update digest run."""
+        dev_mode = bool(getattr(self.bot, "dev_mode", False))
+        environment = "dev" if dev_mode else "prod"
+        guild_id, channel_id = self._resolve_digest_guild_channel()
+        logger.info("Manual daily digest triggered by %s", ctx.author.name)
+        await ctx.send("Starting daily digest run...")
+        try:
+            result = await daily_digest_run(
+                self.bot,
+                self.bot.db_handler,
+                guild_id=guild_id,
+                channel_id=channel_id,
+                environment=environment,
+            )
+            status = result.get("status", "unknown") if isinstance(result, dict) else "unknown"
+            await ctx.send(f"Daily digest complete: {status}.")
+        except Exception as e:
+            logger.error("Error during manual daily digest: %s", e, exc_info=True)
+            await ctx.send(f"An error occurred during daily digest: {e}")
 
     @commands.command(name="summarynow")
     @commands.is_owner() # Or check for specific admin role/ID

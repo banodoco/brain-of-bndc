@@ -44,11 +44,14 @@ class FakeLoop:
         self.started = False
         self.cancelled = False
 
-    def change_interval(self, *, minutes=None, hours=None):
+    def change_interval(self, *, minutes=None, hours=None, time=None, **kwargs):
         if minutes is not None:
             self.interval_minutes = minutes
         elif hours is not None:
             self.interval_minutes = hours * 60
+        elif time is not None:
+            # Daily digest loop uses time=datetime.time(...)
+            self.interval_minutes = (time.hour * 60) + time.minute
 
     def start(self):
         self.started = True
@@ -98,7 +101,9 @@ def make_cog(bot, live_editor=None, top_creations=None):
 
 def test_default_runtime_backend_constructs_topic_editor(monkeypatch):
     monkeypatch.delenv("LIVE_UPDATE_EDITOR_BACKEND", raising=False)
-    monkeypatch.delenv("TOPIC_EDITOR_LLM_CLIENT", raising=False)
+    # .env may set TOPIC_EDITOR_LLM_CLIENT=deepseek; force the default
+    # constructor path this test is asserting.
+    monkeypatch.setenv("TOPIC_EDITOR_LLM_CLIENT", "")
     constructed = {}
 
     class FakeTopicEditor:
@@ -244,8 +249,11 @@ def test_startup_without_summary_now_releases_live_gate_without_running_editor()
 
 
 def test_production_live_loops_disabled_by_default(monkeypatch):
-    monkeypatch.delenv("LIVE_UPDATES_ENABLED", raising=False)
+    # LIVE_UPDATES_ENABLED now defaults to True in production; explicitly set
+    # false here to verify the env-flag gating path.
+    monkeypatch.setenv("LIVE_UPDATES_ENABLED", "false")
     monkeypatch.delenv("LIVE_TOP_CREATIONS_ENABLED", raising=False)
+    monkeypatch.delenv("DAILY_DIGEST_ENABLED", raising=False)
     bot = FakeBot(summary_now=False, dev_mode=False)
     cog = SummarizerCog(
         bot,
@@ -254,6 +262,7 @@ def test_production_live_loops_disabled_by_default(monkeypatch):
         start_loops=False,
     )
     cog.run_live_pass = FakeLoop()
+    cog.run_daily_digest = FakeLoop()
     cog.__init__(
         bot,
         live_update_editor=FakeLiveEditor(),
@@ -263,7 +272,9 @@ def test_production_live_loops_disabled_by_default(monkeypatch):
 
     assert cog.live_updates_enabled is False
     assert cog.live_top_creations_enabled is False
+    assert cog.daily_digest_enabled is False
     assert cog.run_live_pass.started is False
+    assert cog.run_daily_digest.started is False
 
 
 def test_dev_live_loops_run_hourly_without_env(monkeypatch):
