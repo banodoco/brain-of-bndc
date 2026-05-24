@@ -34,5 +34,5 @@ jobs:
         env:
           RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
-          railway link --project 21997b36-f46b-41f6-add1-bc9313a093f0 --environment production --service megaplan-brain-social-chain
+          railway link --project 21997b36-f46b-41f6-add1-bc9313a093f0 --environment production --service brain-of-bdnc
           railway up --ci --detach

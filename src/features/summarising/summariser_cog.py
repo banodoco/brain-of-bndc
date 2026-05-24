@@ -75,10 +75,9 @@ class SummarizerCog(commands.Cog):
         # posts as watching topics so the agent can inspect context/vision first.
         # LIVE_TOP_CREATIONS_ENABLED is deprecated and intentionally not read.
         self.live_top_creations_enabled = False
-        # Unlike live_updates_enabled, daily_digest_enabled does NOT carry the
-        # `self.dev_mode or` prefix — the digest loop must be explicitly opted
-        # into via DAILY_DIGEST_ENABLED=true in both dev and prod.
-        self.daily_digest_enabled = _env_flag("DAILY_DIGEST_ENABLED", False)
+        # Daily digest is part of the live-update runtime; allow env to disable
+        # it only as an emergency off switch.
+        self.daily_digest_enabled = _env_flag("DAILY_DIGEST_ENABLED", True)
         self.live_pass_interval_minutes = _env_int("LIVE_PASS_INTERVAL_MINUTES", 60)
         dry_run_lookback_hours = _env_int("LIVE_UPDATE_DEV_LOOKBACK_HOURS", 6)
         self.live_update_editor = live_update_editor or self._build_live_update_editor(
@@ -102,7 +101,7 @@ class SummarizerCog(commands.Cog):
                 self.run_daily_digest.start()
             else:
                 logger.info(
-                    "Daily digest loop disabled; set DAILY_DIGEST_ENABLED=true to enable."
+                    "Daily digest loop disabled by DAILY_DIGEST_ENABLED=false."
                 )
 
     def cog_unload(self):
