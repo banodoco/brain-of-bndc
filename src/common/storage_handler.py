@@ -368,6 +368,76 @@ class StorageHandler:
             logger.error(f"Error getting summary for date: {e}", exc_info=True)
             return None
 
+    async def store_daily_digest(
+        self,
+        *,
+        channel_id: int,
+        full_summary: List[Dict[str, Any]],
+        short_summary: str,
+        date: str,
+        dev_mode: bool,
+        guild_id: int,
+    ) -> bool:
+        """Upsert a daily digest row into the ``daily_summaries`` table.
+
+        Mirrors the legacy column set and ``on_conflict`` key exactly so
+        existing readers (``get_summary_for_date``, admin-chat tools) see
+        the row as a legitimate daily summary.
+
+        Parameters
+        ----------
+        channel_id : int
+            Discord channel id the digest was posted to.
+        full_summary : list[dict]
+            Enriched legacy-shaped items (output of
+            ``topics_to_legacy_daily_summary_items`` + media enrichment).
+        short_summary : str
+            Cheap title-based short summary text.
+        date : str
+            ISO date string (``YYYY-MM-DD``).
+        dev_mode : bool
+            ``True`` for dev-environment rows.
+        guild_id : int
+            Discord guild id.
+
+        Returns
+        -------
+        bool
+            ``True`` on success, ``False`` on any failure.
+        """
+        if not self.supabase_client:
+            logger.error("Supabase client not initialized")
+            return False
+
+        try:
+            payload = self._clean_payload({
+                'date': date,
+                'channel_id': channel_id,
+                'full_summary': json.dumps(full_summary),
+                'short_summary': short_summary,
+                'created_at': datetime.utcnow().isoformat(),
+                'included_in_main_summary': False,
+                'dev_mode': dev_mode,
+                'guild_id': guild_id,
+            })
+
+            await asyncio.to_thread(
+                self.supabase_client.table('daily_summaries')
+                .upsert(payload, on_conflict='date,channel_id')
+                .execute
+            )
+            logger.info(
+                "Upserted daily digest row for date=%s channel=%s dev_mode=%s",
+                date, channel_id, dev_mode,
+            )
+            return True
+        except Exception as e:
+            logger.error(
+                "Error upserting daily digest for date=%s channel=%s: %s",
+                date, channel_id, e, exc_info=True,
+            )
+            return False
+
     async def update_summary_thread_to_supabase(self, channel_id: int, thread_id: Optional[int]) -> bool:
         """
         Update or delete a summary thread ID in Supabase.
