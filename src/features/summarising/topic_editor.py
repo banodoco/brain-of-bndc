@@ -26,6 +26,7 @@ import discord
 
 from src.features.summarising.live_update_prompts import DEFAULT_LIVE_UPDATE_MODEL
 from src.common.external_media import extract_external_urls  # T6: shared helper
+from src.common.urls import message_jump_url
 
 
 logger = logging.getLogger("DiscordBot")
@@ -5479,8 +5480,9 @@ def _message_jump_url(message: Dict[str, Any]) -> Optional[str]:
     guild_id = message.get("guild_id")
     channel_id = message.get("channel_id")
     message_id = message.get("message_id")
+    thread_id = message.get("thread_id")
     if guild_id and channel_id and message_id:
-        return f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
+        return message_jump_url(guild_id, channel_id, message_id, thread_id=thread_id)
     return None
 
 
@@ -5901,10 +5903,10 @@ def render_topic_publish_units(
             meta = meta_by_id.get(sid, {})
             guild_id = meta.get("guild_id") or topic.get("guild_id")
             channel_id = meta.get("channel_id")
+            thread_id = meta.get("thread_id")
             if guild_id and channel_id and sid:
-                idx_to_url[idx] = (
-                    f"https://discord.com/channels/{guild_id}/"
-                    f"{channel_id}/{sid}"
+                idx_to_url[idx] = message_jump_url(
+                    guild_id, channel_id, sid, thread_id=thread_id
                 )
             idx_to_sid[idx] = sid
 

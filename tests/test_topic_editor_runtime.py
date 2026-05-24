@@ -2794,6 +2794,48 @@ def test_post_topic_single_intro_block_with_media_accepted():
     assert units[1]["url"] == "https://cdn.example.com/image1.png"
 
 
+def test_render_topic_publish_units_links_forum_source_to_thread_post():
+    source_rows = [
+        {
+            "message_id": "1508139334186963014",
+            "guild_id": 1076117621407223829,
+            "channel_id": 1373291419434877078,
+            "thread_id": 1507556849652596868,
+            "author_id": "barley",
+            "content": "WanLooper details",
+            "created_at": "2026-05-24T16:07:17.144+00:00",
+            "attachments": [],
+            "embeds": [],
+        }
+    ]
+    topic = {
+        "guild_id": 1076117621407223829,
+        "headline": "BarleyFarmer Explains WanLooper Per-Segment LoRA Injection",
+        "summary": {
+            "blocks": [
+                {
+                    "type": "intro",
+                    "text": "BarleyFarmer laid out the architecture behind WanLooper [1].",
+                    "source_message_ids": ["1508139334186963014"],
+                    "media_refs": [],
+                }
+            ]
+        },
+    }
+
+    units = render_topic_publish_units(
+        topic,
+        source_metadata=_source_metadata_by_id(source_rows),
+    )
+
+    assert len(units) == 1
+    assert (
+        "[[1]](https://discord.com/channels/"
+        "1076117621407223829/1507556849652596868/1508139334186963014)"
+    ) in units[0]["content"]
+    assert "1373291419434877078/1508139334186963014" not in units[0]["content"]
+
+
 def test_post_topic_multi_block_accepted():
     db = FakeDB()
     db.source_message_rows = _sample_source_message_rows()
