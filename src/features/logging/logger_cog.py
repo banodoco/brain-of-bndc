@@ -4,6 +4,7 @@ from discord.ext import commands
 from src.common.db_handler import DatabaseHandler
 from src.common.discord_utils import emoji_to_str
 import discord
+import json
 import os
 
 
@@ -197,12 +198,55 @@ class LoggerCog(commands.Cog):
             message_data = await self._prepare_message_data(message)
             reaction_rows = message_data.pop('_reaction_rows', [])
             await self.db.store_messages([message_data])
+            self._store_message_author(message)
             if reaction_rows:
                 self.db.upsert_reactions_batch(message.id, reaction_rows,
                                                 guild_id=message_data.get('guild_id'))
 
         except Exception as e:
             self.logger.error(f"[LoggerCog] Error storing message {message.id}: {e}", exc_info=True)
+
+    def _store_message_author(self, message: discord.Message) -> None:
+        """Keep member/profile rows in step with real-time message logging."""
+        try:
+            if not hasattr(self.db, "create_or_update_member"):
+                return
+            author = message.author
+            member = None
+            if hasattr(message, "guild") and message.guild:
+                member = message.guild.get_member(author.id)
+            role_ids = (
+                json.dumps([role.id for role in member.roles])
+                if member and getattr(member, "roles", None)
+                else None
+            )
+            guild_join_date = (
+                member.joined_at.isoformat()
+                if member and getattr(member, "joined_at", None)
+                else None
+            )
+            display_name = (
+                getattr(member, "display_name", None)
+                or getattr(author, "display_name", None)
+            )
+            self.db.create_or_update_member(
+                author.id,
+                author.name,
+                display_name,
+                getattr(author, "global_name", None),
+                str(author.avatar.url) if getattr(author, "avatar", None) else None,
+                getattr(author, "discriminator", None),
+                getattr(author, "bot", False),
+                getattr(author, "system", False),
+                getattr(author, "accent_color", None),
+                str(author.banner.url) if getattr(author, "banner", None) else None,
+                author.created_at.isoformat() if hasattr(author, "created_at") else None,
+                guild_join_date,
+                role_ids,
+                guild_id=message.guild.id if getattr(message, "guild", None) else None,
+            )
+        except Exception as e:
+            self.logger.debug(f"[LoggerCog] Error storing author profile for message {message.id}: {e}")
 
     async def _prepare_message_data(self, message: discord.Message) -> dict:
         """Convert a discord message into a format suitable for database storage."""

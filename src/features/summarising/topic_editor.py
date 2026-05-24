@@ -4706,7 +4706,7 @@ class TopicEditor:
 
     def _author_name(self, message: Dict[str, Any]) -> str:
         snapshot = message.get("author_context_snapshot") or {}
-        return str(snapshot.get("server_nick") or snapshot.get("global_name") or snapshot.get("username") or message.get("author_name") or message.get("author_id") or "")
+        return str(snapshot.get("server_nick") or snapshot.get("global_name") or snapshot.get("username") or message.get("author_name") or "")
 
     def _summary_for_tool(self, tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         if tool_name == "post_topic":
@@ -5495,7 +5495,6 @@ def _evidence_author_name(message: Dict[str, Any]) -> Optional[str]:
         or snapshot.get("global_name")
         or snapshot.get("display_name")
         or snapshot.get("username")
-        or message.get("author_id")
     )
     return str(value) if value is not None and str(value) else None
 
