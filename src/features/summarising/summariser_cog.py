@@ -204,17 +204,20 @@ class SummarizerCog(commands.Cog):
         dev_mode = bool(getattr(self.bot, "dev_mode", False))
         environment = "dev" if dev_mode else "prod"
         guild_id, channel_id = self._resolve_digest_guild_channel()
+        llm_client, model = self._digest_llm()
         logger.info(
-            "Daily digest run starting: guild=%s env=%s channel=%s",
-            guild_id, environment, channel_id,
+            "Daily digest run starting: guild=%s env=%s channel=%s model=%s",
+            guild_id, environment, channel_id, model,
         )
         try:
             result = await daily_digest_run(
                 self.bot,
-                self.bot.db_handler,
+                self._digest_storage(),
                 guild_id=guild_id,
                 channel_id=channel_id,
                 environment=environment,
+                llm_client=llm_client,
+                model=model,
             )
             logger.info("Daily digest run finished: %s", result)
         except Exception as e:
@@ -223,6 +226,28 @@ class SummarizerCog(commands.Cog):
     @run_daily_digest.before_loop
     async def before_run_daily_digest(self):
         await self.bot.wait_until_ready()
+
+    def _digest_storage(self):
+        """The StorageHandler the digest needs.
+
+        ``daily_digest_run`` requires ``store_daily_digest`` /
+        ``upload_bytes_to_storage`` which live on StorageHandler, not on the
+        DatabaseHandler wrapper — so unwrap to ``db_handler.storage_handler``.
+        """
+        db = self.bot.db_handler
+        return getattr(db, "storage_handler", None) or db
+
+    def _digest_llm(self) -> tuple:
+        """Return (llm_client, model) for the daily digest editorial pass.
+
+        Reuses the active TopicEditor's client/model so the digest is written
+        by the same model as the hourly live updates, falling back to the bot's
+        default Claude client when the editor exposes none.
+        """
+        editor = self.live_update_editor
+        llm_client = getattr(editor, "llm_client", None) or getattr(self.bot, "claude_client", None)
+        model = getattr(editor, "model", None)
+        return llm_client, model
 
     def _resolve_digest_guild_channel(self) -> tuple:
         """Return (guild_id, channel_id) for the daily digest from env vars."""
@@ -242,15 +267,18 @@ class SummarizerCog(commands.Cog):
         dev_mode = bool(getattr(self.bot, "dev_mode", False))
         environment = "dev" if dev_mode else "prod"
         guild_id, channel_id = self._resolve_digest_guild_channel()
+        llm_client, model = self._digest_llm()
         logger.info("Manual daily digest triggered by %s", ctx.author.name)
         await ctx.send("Starting daily digest run...")
         try:
             result = await daily_digest_run(
                 self.bot,
-                self.bot.db_handler,
+                self._digest_storage(),
                 guild_id=guild_id,
                 channel_id=channel_id,
                 environment=environment,
+                llm_client=llm_client,
+                model=model,
             )
             status = result.get("status", "unknown") if isinstance(result, dict) else "unknown"
             await ctx.send(f"Daily digest complete: {status}.")

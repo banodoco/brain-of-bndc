@@ -10,10 +10,43 @@ import io
 import json as _json
 import logging
 import mimetypes
+import os
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
+
+# Default number of curated stories the daily digest condenses the day into.
+DEFAULT_DIGEST_MAX_STORIES = int(os.getenv("DAILY_DIGEST_MAX_STORIES", "5") or "5")
+
+# Token budget for the editorial call. Generous because the editor emits 5
+# multi-block stories with many inline citations AND a reasoning model spends
+# part of the budget thinking — too low truncates the JSON and forces the
+# (bounded) uncurated fallback.
+DEFAULT_DIGEST_MAX_TOKENS = int(os.getenv("DAILY_DIGEST_MAX_TOKENS", "32000") or "32000")
+
+# Max media files a single digest story may attach (across all its blocks), so
+# one busy story can't dump a dozen images/clips.
+DEFAULT_DIGEST_MAX_MEDIA_PER_STORY = int(os.getenv("DAILY_DIGEST_MAX_MEDIA_PER_STORY", "3") or "3")
+
+
+def _resolve_digest_model(model: Optional[str] = None) -> str:
+    """Resolve the editorial LLM model for the daily digest.
+
+    Falls back through the digest-specific env var, then the topic editor's
+    model, then the shared live-update default — so the digest tracks whatever
+    model the hourly live-update editor is already using in this environment.
+    """
+    if model:
+        return model
+    from src.features.summarising.live_update_prompts import DEFAULT_LIVE_UPDATE_MODEL  # noqa: PLC0415
+
+    return (
+        os.getenv("DAILY_DIGEST_MODEL")
+        or os.getenv("TOPIC_EDITOR_MODEL")
+        or DEFAULT_LIVE_UPDATE_MODEL
+    )
 
 
 def topics_to_legacy_daily_summary_items(
@@ -159,6 +192,511 @@ def topics_to_legacy_daily_summary_items(
         )
 
     return items
+
+
+# ---------------------------------------------------------------------------
+# LLM editorial layer — condense the day into <= N curated stories
+# ---------------------------------------------------------------------------
+
+# Stage 1 — selection/clustering. Tiny output (indices + a headline each), so it
+# never truncates regardless of how busy the day was.
+DIGEST_SELECT_PROMPT = (
+    "You are the daily editor for the Banodoco community — practitioners building with "
+    "generative video and image tooling. You are given every live-update topic the bot "
+    "posted in the last 24 hours, each with an `index`. Choose the AT MOST {max_stories} "
+    "most meaningful developments and group related topics into stories, most-important "
+    "first. Drop the trivial; fewer than {max_stories} is good on a quiet day — never pad.\n\n"
+    "Return ONLY valid JSON, no prose or fences:\n"
+    '{{"clusters": [{{"headline": "short working title", "candidate_indexes": [0, 3]}}]}}'
+)
+
+# Stage 2 — write ONE story from its cluster's topics. Bounded output (a single
+# story), so it never truncates either.
+DIGEST_WRITE_PROMPT = (
+    "You are the daily editor for the Banodoco community. Write ONE SHORT story for the "
+    "daily digest from the topics provided (grouped as one development). This is a recap, "
+    "not a reproduction — be tight and skimmable. Factual, plain insider voice, **bold** "
+    "key names/models/tools, no hype, no filler.\n\n"
+    "Return a story as BLOCKS:\n"
+    "- `title`: punchy, specific, no '#'.\n"
+    "- `blocks`: PREFER A SINGLE block (2-3 sentences total). Add a second block ONLY if a "
+    "genuinely distinct point needs its own supporting media. Never more than 2 blocks. Each:\n"
+    "    * `text`: at most 2 sentences.\n"
+    "    * `source_message_ids`: the REAL source ids this block draws from (from the provided "
+    "`source_message_ids`), ordered by relevance — at most 2-3.\n"
+    "    * `media_message_ids`: AT MOST ONE genuinely illustrative media for this block (from "
+    "the provided `media_message_ids`); usually zero. Pick the single best clip/image; do not "
+    "attach several.\n"
+    "- Cite inline: write `[1]`, `[2]`, … in `text` where the number is the 1-based position in "
+    "THAT block's `source_message_ids`. One citation per claim — don't over-cite.\n\n"
+    "Only use ids that appear in the provided topics. Return ONLY valid JSON, no fences:\n"
+    '{{"title": "...", "blocks": [{{"text": "... [1]", "source_message_ids": ["..."], '
+    '"media_message_ids": ["..."]}}]}}'
+)
+
+
+def _ordered_unique(values: List[Any]) -> List[str]:
+    seen: Set[str] = set()
+    out: List[str] = []
+    for value in values:
+        if value is None:
+            continue
+        s = str(value)
+        if s and s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
+
+
+def _topic_block_source_ids(topic: Dict[str, Any]) -> List[str]:
+    """Ordered-unique source_message_ids across all blocks of a topic."""
+    summary = topic.get("summary") or {}
+    if isinstance(summary, str):
+        try:
+            summary = _json.loads(summary)
+        except (ValueError, TypeError):
+            summary = {}
+    blocks = (summary or {}).get("blocks") or []
+    ids: List[str] = []
+    for blk in blocks:
+        if isinstance(blk, dict):
+            ids.extend(blk.get("source_message_ids") or [])
+    return _ordered_unique(ids)
+
+
+def build_digest_candidates(topics: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Build compact, LLM-ready candidates from posted topics.
+
+    Reuses :func:`topics_to_legacy_daily_summary_items` for the text + media so
+    the editor can only reference media that the downstream pipeline can resolve,
+    and additionally exposes each topic's real ``source_message_ids`` so the
+    editor can cite sources inline (``[N]``) exactly like a live update.
+    """
+    legacy_items = topics_to_legacy_daily_summary_items(topics)
+    candidates: List[Dict[str, Any]] = []
+    for index, (topic, item) in enumerate(zip(topics, legacy_items)):
+        media_ids: List[str] = []
+        if item.get("mainMediaMessageId"):
+            media_ids.append(str(item["mainMediaMessageId"]))
+        for sub in item.get("subTopics") or []:
+            media_ids.extend(str(m) for m in (sub.get("subTopicMediaMessageIds") or []) if m)
+
+        text_parts: List[str] = []
+        if item.get("mainText"):
+            text_parts.append(str(item["mainText"]))
+        for sub in item.get("subTopics") or []:
+            if sub.get("text"):
+                text_parts.append(str(sub["text"]))
+
+        candidates.append(
+            {
+                "index": index,
+                "headline": item.get("title") or "",
+                "text": "\n".join(text_parts),
+                "source_message_ids": _topic_block_source_ids(topic),
+                "media_message_ids": _ordered_unique(media_ids),
+                "authors": topic.get("source_authors") or [],
+                "last_published_at": topic.get("last_published_at"),
+            }
+        )
+    return candidates
+
+
+def _build_select_user_message(candidates: List[Dict[str, Any]]) -> str:
+    """Compact candidate list for stage 1 — index, headline, and a text snippet
+    (enough to judge importance, small enough to never bloat the call)."""
+    compact = [
+        {
+            "index": c["index"],
+            "headline": c["headline"],
+            "summary": (c["text"] or "")[:400],
+            "authors": c["authors"][:5],
+        }
+        for c in candidates
+    ]
+    return _json.dumps({"topics": compact}, ensure_ascii=False)
+
+
+def _build_write_user_message(cluster_candidates: List[Dict[str, Any]], headline_hint: str) -> str:
+    """Full material for stage 2 — only the cluster's topics, with their real
+    source/media ids so the model can cite and attach correctly."""
+    payload = {
+        "suggested_headline": headline_hint,
+        "topics": [
+            {
+                "headline": c["headline"],
+                "text": c["text"],
+                "source_message_ids": c["source_message_ids"],
+                "media_message_ids": c["media_message_ids"],
+            }
+            for c in cluster_candidates
+        ],
+    }
+    return _json.dumps(payload, ensure_ascii=False)
+
+
+def _to_int(value: Any) -> int:
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return -1
+
+
+def _parse_json_object(text: Any) -> Any:
+    """Defensively parse a JSON object/array from model output, tolerating
+    markdown fences and surrounding prose. Returns the parsed value or None."""
+    if not isinstance(text, str) or not text.strip():
+        return None
+    raw = text.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```", 2)[1] if raw.count("```") >= 2 else raw.strip("`")
+        if raw.lstrip().lower().startswith("json"):
+            raw = raw.lstrip()[4:]
+    raw = raw.strip().strip("`").strip()
+    try:
+        return _json.loads(raw)
+    except (ValueError, TypeError):
+        start, end = raw.find("{"), raw.rfind("}")
+        if start == -1 or end <= start:
+            return None
+        try:
+            return _json.loads(raw[start : end + 1])
+        except (ValueError, TypeError):
+            return None
+
+
+def _parse_digest_response(text: Any) -> List[Dict[str, Any]]:
+    """Parse a {"stories": [...]} (or bare list) response into a stories list."""
+    data = _parse_json_object(text)
+    if isinstance(data, dict):
+        stories = data.get("stories")
+    elif isinstance(data, list):
+        stories = data
+    else:
+        stories = None
+    return stories if isinstance(stories, list) else []
+
+
+def _story_blocks(story: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Normalize a story to a list of blocks, tolerating the old flat shape."""
+    blocks = story.get("blocks")
+    if isinstance(blocks, list) and blocks:
+        return [b for b in blocks if isinstance(b, dict)]
+    # backward-compat: a single-body story becomes one block
+    body = story.get("body") or story.get("mainText")
+    if body:
+        return [
+            {
+                "text": body,
+                "source_message_ids": story.get("source_message_ids") or [],
+                "media_message_ids": story.get("media_message_ids") or [],
+            }
+        ]
+    return []
+
+
+def _story_to_item(
+    story: Dict[str, Any],
+    valid_media_ids: Set[str],
+    valid_source_ids: Set[str],
+) -> Optional[Dict[str, Any]]:
+    """Map one curated story onto the legacy daily_summary item schema.
+
+    Blocks become the intro (``mainText`` + ``mainMediaMessageId``) and the
+    ``subTopics`` list, each carrying its source ``message_id``/``channel_id``
+    (legacy reference fields). A transient ``_source_ids`` list is attached to
+    every block for inline ``[N]`` citation rendering and stripped before the
+    row is stored.
+    """
+
+    # Story-level media budget + dedup: a given media id is used at most once
+    # across the whole story, and total media is capped so one busy story can't
+    # dump a dozen files.
+    used_media: Set[str] = set()
+    media_budget = [DEFAULT_DIGEST_MAX_MEDIA_PER_STORY]
+
+    def _clean(block: Dict[str, Any]) -> Tuple[str, List[str], List[str]]:
+        text = str(block.get("text") or "")
+        srcs = [s for s in _ordered_unique(block.get("source_message_ids") or []) if s in valid_source_ids]
+        meds: List[str] = []
+        for m in _ordered_unique(block.get("media_message_ids") or []):
+            if m in valid_media_ids and m not in used_media and media_budget[0] > 0:
+                used_media.add(m)
+                media_budget[0] -= 1
+                meds.append(m)
+        return text, srcs, meds
+
+    blocks = _story_blocks(story)
+    if not blocks:
+        return None
+
+    main_text, main_srcs, main_meds = _clean(blocks[0])
+    item: Dict[str, Any] = {
+        "title": story.get("title"),
+        "mainText": main_text,
+        "mainMediaMessageId": main_meds[0] if main_meds else None,
+        "message_id": main_srcs[0] if main_srcs else None,
+        "channel_id": None,  # resolved from source metadata before posting
+        "_source_ids": main_srcs,
+        "subTopics": [],
+    }
+    for block in blocks[1:]:
+        text, srcs, meds = _clean(block)
+        if not text and not meds:
+            continue
+        item["subTopics"].append(
+            {
+                "text": text,
+                "subTopicMediaMessageIds": meds,
+                "message_id": srcs[0] if srcs else None,
+                "channel_id": None,
+                "_source_ids": srcs,
+            }
+        )
+    return item
+
+
+def _uncurated_fallback(topics: List[Dict[str, Any]], max_stories: int) -> List[Dict[str, Any]]:
+    """Degraded path: legacy 1:1 mapping, BOUNDED to max_stories so a curation
+    failure never dumps the entire day as a wall of posts."""
+    return topics_to_legacy_daily_summary_items(topics)[:max_stories]
+
+
+async def _call_json(
+    llm_client: Any,
+    *,
+    model: str,
+    system_prompt: str,
+    user_message: str,
+    max_tokens: int,
+) -> Any:
+    """One LLM call returning parsed JSON (dict/list), with a single retry.
+
+    Returns the parsed object, or None if both attempts fail/parse-fail.
+    """
+    for attempt in range(2):
+        try:
+            text = await llm_client.generate_chat_completion(
+                model=model,
+                system_prompt=system_prompt,
+                messages=[{"role": "user", "content": user_message}],
+                max_tokens=max_tokens,
+                temperature=0.4,
+            )
+        except Exception:
+            logger.error("daily digest: LLM call failed (attempt %d)", attempt + 1, exc_info=True)
+            continue
+        obj = _parse_json_object(text)
+        if obj is not None:
+            return obj
+        logger.warning("daily digest: unparseable JSON (attempt %d)", attempt + 1)
+    return None
+
+
+async def curate_digest_stories(
+    topics: List[Dict[str, Any]],
+    llm_client: Any,
+    *,
+    model: Optional[str] = None,
+    max_stories: int = DEFAULT_DIGEST_MAX_STORIES,
+    max_tokens: int = DEFAULT_DIGEST_MAX_TOKENS,
+) -> List[Dict[str, Any]]:
+    """Condense the day's topics into <= N curated stories via TWO bounded LLM
+    stages, so no single call has to emit everything (the one-shot's failure mode):
+
+      1. SELECT: pick & cluster the topics into <= max_stories groups (tiny output).
+      2. WRITE: one bounded call PER cluster produces that story's blocks + inline
+         [N] citations (small output each).
+
+    Returns legacy-shaped items for the existing media/enrich/post pipeline. Falls
+    back to a BOUNDED uncurated mapping (<= max_stories) — never a wall — if there's
+    no client or both stages yield nothing usable.
+    """
+    candidates = build_digest_candidates(topics)
+    if not candidates:
+        return []
+    if llm_client is None:
+        logger.warning("daily digest: no LLM client; bounded uncurated fallback")
+        return _uncurated_fallback(topics, max_stories)
+
+    valid_media_ids: Set[str] = {m for c in candidates for m in c["media_message_ids"]}
+    valid_source_ids: Set[str] = {s for c in candidates for s in c["source_message_ids"]}
+    by_index = {c["index"]: c for c in candidates}
+    resolved_model = _resolve_digest_model(model)
+
+    # --- Stage 1: select & cluster ---
+    selection = await _call_json(
+        llm_client,
+        model=resolved_model,
+        system_prompt=DIGEST_SELECT_PROMPT.format(max_stories=max_stories),
+        user_message=_build_select_user_message(candidates),
+        max_tokens=4000,
+    )
+    clusters = (selection or {}).get("clusters") if isinstance(selection, dict) else None
+    if not isinstance(clusters, list) or not clusters:
+        logger.warning("daily digest: selection stage produced no clusters; bounded fallback")
+        return _uncurated_fallback(topics, max_stories)
+
+    # --- Stage 2: write one story per cluster (concurrently, order preserved) ---
+    async def _write(cluster: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        idxs = [i for i in (cluster.get("candidate_indexes") or []) if _to_int(i) in by_index]
+        cluster_cands = [by_index[_to_int(i)] for i in idxs]
+        if not cluster_cands:
+            return None
+        story = await _call_json(
+            llm_client,
+            model=resolved_model,
+            system_prompt=DIGEST_WRITE_PROMPT,
+            user_message=_build_write_user_message(cluster_cands, cluster.get("headline") or ""),
+            max_tokens=max_tokens,
+        )
+        if not isinstance(story, dict):
+            return None
+        item = _story_to_item(story, valid_media_ids, valid_source_ids)
+        if item and (item.get("title") or item.get("mainText")):
+            return item
+        return None
+
+    results = await asyncio.gather(
+        *[_write(c) for c in clusters[:max_stories] if isinstance(c, dict)],
+        return_exceptions=True,
+    )
+    items: List[Dict[str, Any]] = []
+    for r in results:
+        if isinstance(r, dict):
+            items.append(r)
+        elif isinstance(r, Exception):
+            logger.warning("daily digest: a story write failed: %s", r)
+
+    if not items:
+        logger.warning("daily digest: no stories written; bounded fallback")
+        return _uncurated_fallback(topics, max_stories)
+
+    logger.info(
+        "daily digest: %d topics -> %d clusters -> %d stories (model=%s)",
+        len(candidates), len(clusters), len(items), resolved_model,
+    )
+    return items
+
+
+# ---------------------------------------------------------------------------
+# Inline source citations ([N] -> jump link), like live updates
+# ---------------------------------------------------------------------------
+
+def _iter_item_blocks_with_sources(item: Dict[str, Any]):
+    """Yield (block_dict, source_ids) for the main block and each subTopic."""
+    yield item, item.get("_source_ids") or []
+    for sub in item.get("subTopics") or []:
+        if isinstance(sub, dict):
+            yield sub, sub.get("_source_ids") or []
+
+
+async def resolve_source_metadata(
+    items: List[Dict[str, Any]],
+    storage_handler: Any,
+    *,
+    guild_id: int,
+    environment: str = "prod",
+) -> Dict[str, Dict[str, Any]]:
+    """Fetch {source_id: {guild_id, channel_id, thread_id}} for every cited
+    source across all blocks, and fill each block's legacy ``channel_id`` field.
+    """
+    all_ids: List[str] = []
+    for _, src_ids in (pair for item in items for pair in _iter_item_blocks_with_sources(item)):
+        all_ids.extend(src_ids)
+    all_ids = _ordered_unique(all_ids)
+    if not all_ids:
+        return {}
+
+    meta_by_id: Dict[str, Dict[str, Any]] = {}
+    try:
+        rows = storage_handler.get_topic_editor_source_messages(
+            all_ids, guild_id=guild_id, environment=environment, limit=100
+        )
+        for row in rows or []:
+            mid = str(row.get("message_id"))
+            meta_by_id[mid] = {
+                "guild_id": row.get("guild_id"),
+                "channel_id": row.get("channel_id"),
+                "thread_id": row.get("thread_id"),
+            }
+    except Exception:
+        logger.warning("daily digest: source metadata lookup failed", exc_info=True)
+        return {}
+
+    # Fill legacy channel_id on each block from its primary source.
+    # Stored as a string to match the legacy daily_summaries schema exactly.
+    for item in items:
+        for block, src_ids in _iter_item_blocks_with_sources(item):
+            primary = src_ids[0] if src_ids else None
+            if primary and primary in meta_by_id:
+                channel_id = meta_by_id[primary].get("channel_id")
+                block["channel_id"] = str(channel_id) if channel_id is not None else None
+    return meta_by_id
+
+
+def _substitute_citations(
+    text: str,
+    ordered_source_ids: List[str],
+    meta_by_id: Dict[str, Dict[str, Any]],
+    guild_fallback: Optional[int],
+) -> str:
+    """Replace inline ``[N]`` markers with ``[[N]](jump_url)`` masked links.
+
+    Mirrors the live-update renderer: N is the 1-based index into this block's
+    source ids; unresolvable markers are left literal.
+    """
+    if not text or not ordered_source_ids:
+        return text
+    from src.common.urls import message_jump_url  # noqa: PLC0415
+
+    idx_to_url: Dict[int, str] = {}
+    for idx, sid in enumerate(ordered_source_ids, start=1):
+        meta = meta_by_id.get(sid, {})
+        guild_id = meta.get("guild_id") or guild_fallback
+        channel_id = meta.get("channel_id")
+        if guild_id and channel_id and sid:
+            idx_to_url[idx] = message_jump_url(
+                guild_id, channel_id, sid, thread_id=meta.get("thread_id")
+            )
+
+    def _sub(m: "re.Match") -> str:
+        n = int(m.group(1))
+        url = idx_to_url.get(n)
+        return f"[[{n}]]({url})" if url else m.group(0)
+
+    return re.sub(r"\[(\d{1,2})\](?!\()", _sub, text)
+
+
+def apply_citations(
+    items: List[Dict[str, Any]],
+    meta_by_id: Dict[str, Dict[str, Any]],
+    guild_id: Optional[int],
+) -> List[Dict[str, Any]]:
+    """Rewrite each block's text, turning ``[N]`` markers into jump links."""
+    for item in items:
+        item["mainText"] = _substitute_citations(
+            item.get("mainText") or "", item.get("_source_ids") or [], meta_by_id, guild_id
+        )
+        for sub in item.get("subTopics") or []:
+            if isinstance(sub, dict):
+                sub["text"] = _substitute_citations(
+                    sub.get("text") or "", sub.get("_source_ids") or [], meta_by_id, guild_id
+                )
+    return items
+
+
+def _finalize_for_storage(items: List[Dict[str, Any]]) -> None:
+    """Prepare items for the stored row: drop transient ``_source_ids`` and set
+    the legacy ``included_in_main`` flag the website filters on (every curated
+    digest story is meant to show), so the community section renders them."""
+    for item in items:
+        item.pop("_source_ids", None)
+        item["included_in_main"] = True
+        for sub in item.get("subTopics") or []:
+            if isinstance(sub, dict):
+                sub.pop("_source_ids", None)
+                sub["included_in_main"] = True
 
 
 # ---------------------------------------------------------------------------
@@ -554,12 +1092,58 @@ def _iter_media_entries(item: Dict[str, Any]) -> List[Dict[str, str]]:
     return entries
 
 
+def _item_send_blocks(item: Dict[str, Any]) -> List[Tuple[str, List[Dict[str, str]]]]:
+    """Break an item into ordered (text, media_entries) blocks for sending.
+
+    Mirrors the live-update structure: the intro block (title + mainText) and
+    its media, then each subTopic's text and its media — so each point's media
+    sits beside the point it supports rather than all media being dumped at the
+    end.
+    """
+    blocks: List[Tuple[str, List[Dict[str, str]]]] = []
+
+    intro_parts: List[str] = []
+    if item.get("title"):
+        intro_parts.append(f"## {item['title']}")
+    if item.get("mainText"):
+        intro_parts.append(str(item["mainText"]))
+    intro_media = [m for m in (item.get("mainMediaUrls") or []) if isinstance(m, dict) and m.get("url")]
+    blocks.append(("\n\n".join(intro_parts), intro_media))
+
+    for sub in item.get("subTopics") or []:
+        if not isinstance(sub, dict):
+            continue
+        sub_media: List[Dict[str, str]] = []
+        for per_msg in sub.get("subTopicMediaUrls") or []:
+            if isinstance(per_msg, list):
+                sub_media.extend(m for m in per_msg if isinstance(m, dict) and m.get("url"))
+        blocks.append((str(sub.get("text") or ""), sub_media))
+
+    return blocks
+
+
 async def _send_media_files(
     channel: Any,
     storage_handler: Any,
     media_entries: List[Dict[str, str]],
+    seen_urls: Optional[Set[str]] = None,
 ) -> List[int]:
-    """Send media as Discord files, falling back to URL text per item."""
+    """Send media as Discord files, falling back to URL text per item.
+
+    ``seen_urls`` (when provided) dedups across the whole digest — a URL already
+    posted in an earlier block/story is skipped, so the same media never repeats.
+    """
+    if seen_urls is None:
+        seen_urls = set()
+    # drop blanks, already-seen, and within-call duplicates while preserving order
+    deduped: List[Dict[str, str]] = []
+    for media in media_entries:
+        url = media.get("url")
+        if not url or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        deduped.append(media)
+    media_entries = deduped
     if not media_entries:
         return []
 
@@ -611,13 +1195,26 @@ def _filename_for_url(url: str, media_type: Optional[str]) -> str:
     return f"{stem}{ext}"
 
 
+def _format_digest_header(now: datetime) -> str:
+    """Render the dated digest header, e.g. '# Daily Update - Sunday, May 7'."""
+    return f"# Daily Update - {now.strftime('%A, %B')} {now.day}"
+
+
 async def post_digest(
     bot: Any,
     items: List[Dict[str, Any]],
     channel_id: int,
     storage_handler: Any = None,
-) -> Dict[int, List[int]]:
-    """Post one message/contiguous-chunk-group per item to channel_id.
+    *,
+    header: Optional[str] = None,
+    guild_id: Optional[int] = None,
+    footer_label: str = "**Click here to jump to the beginning of today's summary:**",
+) -> Dict[Any, List[int]]:
+    """Post the digest to channel_id.
+
+    Posts an optional dated ``header`` first, then one message/contiguous-chunk
+    -group per item, then (when the header was posted and ``guild_id`` is known)
+    a footer with a masked jump-link back to that header message.
 
     Each item's text is rendered as plain Discord text and chunked to
     Discord's 2000-char limit via the existing ``chunk_text_for_discord``
@@ -625,9 +1222,10 @@ async def post_digest(
 
     Returns
     -------
-    dict[int, list[int]]
-        ``{item_index: [sent_msg.id, ...]}``.  Items that produce no text
-        are omitted from the mapping.
+    dict
+        ``{item_index: [sent_msg.id, ...]}`` for each item, plus the special
+        keys ``"header"`` and ``"footer"`` carrying their message ids (when
+        posted). Entries that produce no text are omitted.
     """
     from src.features.summarising.topic_editor import chunk_text_for_discord  # noqa: PLC0415
 
@@ -635,21 +1233,38 @@ async def post_digest(
     if channel is None:
         channel = await bot.fetch_channel(channel_id)
 
-    result: Dict[int, List[int]] = {}
+    result: Dict[Any, List[int]] = {}
+
+    # --- Header (first message; becomes the jump-link anchor) ---
+    first_message_id: Optional[int] = None
+    if header and header.strip():
+        header_msg = await channel.send(header.strip())
+        first_message_id = header_msg.id
+        result["header"] = [header_msg.id]
+
+    # --- Stories: one message per block (intro + each subTopic), media beside it ---
+    seen_media_urls: Set[str] = set()  # digest-wide dedup so no media repeats
     for idx, item in enumerate(items):
-        text = _format_item_for_discord(item)
-        chunks = chunk_text_for_discord(text)
         sent_ids: List[int] = []
-        for chunk in chunks:
-            if not chunk.strip():
-                continue
-            msg = await channel.send(chunk)
-            sent_ids.append(msg.id)
-        sent_ids.extend(
-            await _send_media_files(channel, storage_handler, _iter_media_entries(item))
-        )
+        for block_text, block_media in _item_send_blocks(item):
+            for chunk in chunk_text_for_discord(block_text):
+                if not chunk.strip():
+                    continue
+                msg = await channel.send(chunk)
+                sent_ids.append(msg.id)
+            sent_ids.extend(
+                await _send_media_files(channel, storage_handler, block_media, seen_media_urls)
+            )
         if sent_ids:
             result[idx] = sent_ids
+
+    # --- Footer jump-link back to the header ---
+    if first_message_id is not None and guild_id is not None:
+        from src.common.urls import message_jump_url  # noqa: PLC0415
+
+        jump_url = message_jump_url(guild_id, channel_id, first_message_id)
+        footer_msg = await channel.send(f"---\n\n{footer_label} {jump_url}")
+        result["footer"] = [footer_msg.id]
 
     return result
 
@@ -666,8 +1281,11 @@ async def daily_digest_run(
     channel_id: int,
     environment: str = "prod",
     now: Optional[datetime] = None,
+    llm_client: Any = None,
+    model: Optional[str] = None,
+    max_stories: int = DEFAULT_DIGEST_MAX_STORIES,
 ) -> Dict[str, Any]:
-    """Orchestrate the daily digest: query → convert → enrich → post → upsert.
+    """Orchestrate the daily digest: query → curate (LLM) → enrich → post → upsert.
 
     Parameters
     ----------
@@ -736,8 +1354,16 @@ async def daily_digest_run(
         )
         return {"status": "skipped", "reason": "no_topics_in_window", "upserts": 0}
 
-    # 4. Convert to legacy items
-    items = topics_to_legacy_daily_summary_items(in_window)
+    # 4. Editorial pass: condense the day into <= max_stories curated stories.
+    #    Falls back to the uncurated 1:1 mapping internally if the LLM is
+    #    unavailable / errors / returns unparseable output, so the digest
+    #    always posts something.
+    items = await curate_digest_stories(
+        in_window,
+        llm_client,
+        model=model,
+        max_stories=max_stories,
+    )
 
     # 5. Resolve and enrich media (non-fatal)
     try:
@@ -756,13 +1382,42 @@ async def daily_digest_run(
         )
         items = enrich_items(items, {})
 
-    # 6. Post to Discord — one chunk-group per item
-    post_mapping = await post_digest(bot, items, channel_id, storage_handler)
+    # 5b. Resolve source-message metadata and render inline [N] citations as
+    #     jump-links (like live updates). Non-fatal — citations are best-effort.
+    try:
+        meta_by_id = await resolve_source_metadata(
+            items, storage_handler, guild_id=guild_id, environment=environment
+        )
+        apply_citations(items, meta_by_id, guild_id)
+    except Exception:
+        logger.warning(
+            "daily_digest_run: citation rendering failed; posting without inline links",
+            exc_info=True,
+        )
+
+    # 6. Post to Discord — dated header, one chunk-group per item, footer jump-link
+    post_mapping = await post_digest(
+        bot,
+        items,
+        channel_id,
+        storage_handler,
+        header=_format_digest_header(now),
+        guild_id=guild_id,
+    )
 
     # 7. Assign posted_message_ids from the post_digest mapping
-    #    These are IDs of the messages WE just posted, NOT topics.discord_message_ids
+    #    These are IDs of the messages WE just posted, NOT topics.discord_message_ids.
+    #    Header/footer ids ride on the first/last item so the stored row records
+    #    every message we created (clean deletion / regeneration later).
     for idx, item in enumerate(items):
-        item["posted_message_ids"] = post_mapping.get(idx, [])
+        item["posted_message_ids"] = list(post_mapping.get(idx, []))
+    if items:
+        items[0]["posted_message_ids"] = (
+            list(post_mapping.get("header", [])) + items[0]["posted_message_ids"]
+        )
+        items[-1]["posted_message_ids"] = (
+            items[-1]["posted_message_ids"] + list(post_mapping.get("footer", []))
+        )
 
     # 8. Cheap title-based short_summary
     titles = [item.get("title") or "" for item in items if item.get("title")]
@@ -770,7 +1425,9 @@ async def daily_digest_run(
     if len(items) > 5:
         short_summary += f" (+{len(items) - 5} more)"
 
-    # 9. Upsert one daily_summaries row
+    # 9. Upsert one daily_summaries row (legacy schema: drop transient fields,
+    #    set the included_in_main flag the website's community section filters on)
+    _finalize_for_storage(items)
     dev_mode = environment == "dev"
     stored = await storage_handler.store_daily_digest(
         channel_id=channel_id,

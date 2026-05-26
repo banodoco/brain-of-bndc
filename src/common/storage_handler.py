@@ -416,7 +416,9 @@ class StorageHandler:
                 'full_summary': json.dumps(full_summary),
                 'short_summary': short_summary,
                 'created_at': datetime.utcnow().isoformat(),
-                'included_in_main_summary': False,
+                # Daily digests are meant to surface on the website's community
+                # section, which only reads rows with this flag set.
+                'included_in_main_summary': True,
                 'dev_mode': dev_mode,
                 'guild_id': guild_id,
             })
