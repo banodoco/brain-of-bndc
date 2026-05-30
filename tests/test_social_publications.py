@@ -52,6 +52,10 @@ class FakeQuery:
         self.filters.append(lambda row, k=key, v=value: row.get(k) == v)
         return self
 
+    def neq(self, key, value):
+        self.filters.append(lambda row, k=key, v=value: row.get(k) != v)
+        return self
+
     def is_(self, key, value):
         if value == "null":
             self.filters.append(lambda row, k=key: row.get(k) is None)

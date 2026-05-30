@@ -8,6 +8,7 @@ Anthropic or Discord dependencies.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import hashlib
 import logging
@@ -27,6 +28,7 @@ import discord
 from src.features.summarising.live_update_prompts import DEFAULT_LIVE_UPDATE_MODEL
 from src.common.external_media import extract_external_urls  # T6: shared helper
 from src.common.urls import message_jump_url
+from src.features.sharing.live_update_social import LiveUpdateHandoffPayload
 
 
 logger = logging.getLogger("DiscordBot")
@@ -3153,6 +3155,7 @@ class TopicEditor:
             })
             return {"tool_call_id": call["id"], "tool": call["name"], "outcome": "tool_error", "action": "discard", "error": error}
         self.db.update_topic(args.get("topic_id"), {"state": "discarded", "guild_id": context["guild_id"]}, guild_id=context["guild_id"], environment=self.environment)
+        self._invalidate_social_drafts_for_topic(args.get('topic_id'), reason='topic_discarded')
         self._store_transition({
             "topic_id": args.get("topic_id"),
             "run_id": context["run_id"],
@@ -3495,6 +3498,82 @@ class TopicEditor:
             state["publish_result"] = {"topic_id": topic_id, "status": status}
             state["publish_diagnostics"] = diagnostics
             self._persist_draft_state(state, state, include_topic_id=True)
+
+    def _fire_social_handoff(
+        self,
+        topic: Dict[str, Any],
+        channel_id: Any,
+        status: str,
+        sent_ids: List[int],
+        source_message_ids: Any,
+        publish_diagnostics: Any,
+    ) -> None:
+        if status not in {'sent', 'partial'}:
+            return
+        if self.bot is None:
+            return
+        if getattr(self.bot, 'live_update_social_service', None) is None:
+            return
+        try:
+            topic_id = str(topic.get('topic_id'))
+            guild_id = int(topic.get('guild_id') or self._resolve_guild_id() or 0)
+            channel_id_int = int(channel_id or 0)
+            topic_summary_data: Dict[str, Any] = {
+                'title': topic.get('headline') or topic.get('proposed_key'),
+                # sent_ids[0] is first Discord message sent, not necessarily the consumer's documented topic root
+                'subTopics': [],
+            }
+            if sent_ids:
+                topic_summary_data['message_id'] = str(sent_ids[0])
+            if channel_id_int:
+                topic_summary_data['channel_id'] = str(channel_id_int)
+            # chain fields (vendor='codex', depth='high', with_feedback=True, deepseek_provider='direct') intentionally rely on dataclass defaults
+            payload = LiveUpdateHandoffPayload(
+                topic_id=topic_id,
+                guild_id=guild_id,
+                channel_id=channel_id_int,
+                platform='twitter',
+                action='post',
+                status=status,
+                source_metadata={
+                    'cog': 'topic_editor',
+                    'environment': self.environment,
+                    'source_message_ids': list(source_message_ids or []),
+                    'publish_diagnostics': publish_diagnostics or {},
+                },
+                topic_summary_data=topic_summary_data,
+            )
+            asyncio.create_task(
+                self.bot.live_update_social_service.handle_live_update_publish_results(payload)
+            )
+        except Exception:
+            logger.exception('social handoff scheduling failed', exc_info=True)
+
+    def _invalidate_social_drafts_for_topic(self, topic_id: str, reason: str) -> None:
+        """Expire every open (pending, not terminal) social draft for *topic_id*.
+
+        Designed to be called from state-change paths (discard, admin delete) so
+        downstream reviewers never see stale ``pending`` runs.  Callers are
+        responsible for supplying a clear *reason* string for audit logging.
+        """
+        try:
+            rows = self.db.list_open_social_runs(
+                environment=self.environment,
+                topic_id=topic_id,
+                limit=50,
+            )
+            for row in (rows or []):
+                self.db.update_live_update_social_run(
+                    run_id=row['run_id'],
+                    environment=self.environment,
+                    approval_state='expired',
+                )
+        except Exception:
+            logger.exception(
+                'social-draft invalidation failed: topic=%s reason=%s',
+                topic_id,
+                reason,
+            )
 
     def _format_trace_messages(
         self,
@@ -4076,6 +4155,7 @@ class TopicEditor:
                     ),
                     "model": self.model,
                 })
+            self._fire_social_handoff(topic, channel_id, status, sent_ids, all_source_ids, publish_diagnostics)
             return {
                 "topic_id": topic_id,
                 "status": status,
@@ -4130,6 +4210,7 @@ class TopicEditor:
             "last_published_at": datetime.now(timezone.utc).isoformat() if sent_ids else None,
         }
         self.db.update_topic(topic_id, updates, guild_id=guild_id, environment=self.environment)
+        self._fire_social_handoff(topic, channel_id, status, sent_ids, topic.get('source_message_ids') or [], None)
         return {"topic_id": topic_id, "status": status, "discord_message_ids": sent_ids, "error": error}
 
     async def _send_one_unit(

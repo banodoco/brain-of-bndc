@@ -270,6 +270,15 @@ class RunState:
     trace_entries: List[Dict[str, Any]] = field(default_factory=list)
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
+    review_message_id: Optional[int] = None
+    revision: int = 0
+    approval_state: str = "pending"
+    approved_revision: Optional[int] = None
+    approved_text: Optional[str] = None
+    approved_quote: Optional[str] = None
+    approved_at: Optional[str] = None
+    expires_at: Optional[str] = None
+    publish_revision: Optional[int] = None
 
     @classmethod
     def from_row(cls, row: dict) -> "RunState":
@@ -300,6 +309,15 @@ class RunState:
             trace_entries=row.get("trace_entries") or [],
             created_at=row.get("created_at"),
             updated_at=row.get("updated_at"),
+            review_message_id=row.get("review_message_id", None),
+            revision=row.get("revision", 0),
+            approval_state=row.get("approval_state", "pending"),
+            approved_revision=row.get("approved_revision", None),
+            approved_text=row.get("approved_text", None),
+            approved_quote=row.get("approved_quote", None),
+            approved_at=row.get("approved_at", None),
+            expires_at=row.get("expires_at", None),
+            publish_revision=row.get("publish_revision", None),
         )
 
     def add_trace(self, event: str, **kwargs) -> None:

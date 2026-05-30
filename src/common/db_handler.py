@@ -2767,6 +2767,18 @@ class DatabaseHandler:
         media_decisions: Optional[Dict[str, Any]] = None,
         trace_entries: Optional[List[Dict[str, Any]]] = None,
         publication_outcome: Optional[Dict[str, Any]] = None,
+        environment: str = 'prod',  # signature-parity only — table has no environment column
+        review_message_id: Optional[int] = None,
+        revision: Optional[int] = None,
+        approval_state: Optional[str] = None,
+        approved_revision: Optional[int] = None,
+        approved_text: Optional[str] = None,
+        approved_quote: Optional[str] = None,
+        approved_at: Optional[str] = None,
+        expires_at: Optional[str] = None,
+        publish_revision: Optional[int] = None,
+        *,
+        clear_approval: bool = False,
     ) -> bool:
         """Update terminal columns on a live_update_social_runs row.
 
@@ -2789,6 +2801,29 @@ class DatabaseHandler:
                 payload["trace_entries"] = trace_entries
             if publication_outcome is not None:
                 payload["publication_outcome"] = publication_outcome
+            if review_message_id is not None:
+                payload["review_message_id"] = review_message_id
+            if revision is not None:
+                payload["revision"] = revision
+            if approval_state is not None:
+                payload["approval_state"] = approval_state
+            if approved_revision is not None:
+                payload["approved_revision"] = approved_revision
+            if approved_text is not None:
+                payload["approved_text"] = approved_text
+            if approved_quote is not None:
+                payload["approved_quote"] = approved_quote
+            if approved_at is not None:
+                payload["approved_at"] = approved_at
+            if clear_approval:
+                payload["approved_revision"] = None
+                payload["approved_text"] = None
+                payload["approved_quote"] = None
+                payload["approved_at"] = None
+            if expires_at is not None:
+                payload["expires_at"] = expires_at
+            if publish_revision is not None:
+                payload["publish_revision"] = publish_revision
 
             (
                 self.supabase.table("live_update_social_runs")
@@ -2805,6 +2840,99 @@ class DatabaseHandler:
                 exc_info=True,
             )
             return False
+
+    def get_social_run_by_review_message_id(
+        self, review_message_id: int, environment: str = 'prod'
+    ) -> Optional[Dict]:
+        """Return a live_update_social_runs row by review_message_id."""
+        if not self.supabase:
+            return None
+        try:
+            result = (
+                self.supabase.table("live_update_social_runs")
+                .select("*")
+                .eq("review_message_id", int(review_message_id))
+                .limit(1)
+                .execute()
+            )
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error(
+                "Error fetching live_update_social_run by review_message_id %s: %s",
+                review_message_id,
+                e,
+                exc_info=True,
+            )
+            return None
+
+    def list_open_social_runs(
+        self,
+        environment: str = 'prod',
+        limit: int = 50,
+        topic_id: Optional[str] = None,
+    ) -> List[Dict]:
+        """Return pending, non-terminal live_update_social_runs rows."""
+        if not self.supabase:
+            return []
+        try:
+            query = (
+                self.supabase.table("live_update_social_runs")
+                .select("*")
+                .eq("approval_state", "pending")
+                .is_("terminal_status", "null")
+            )
+            if topic_id is not None:
+                query = query.eq("topic_id", str(topic_id))
+            result = (
+                query
+                .order("created_at", desc=True)
+                .limit(int(limit))
+                .execute()
+            )
+            return result.data if result.data else []
+        except Exception as e:
+            logger.error(
+                "Error listing open live_update_social_runs: %s",
+                e,
+                exc_info=True,
+            )
+            return []
+
+    def list_pending_review_social_runs(
+        self,
+        environment: Optional[str] = None,
+    ) -> List[Dict]:
+        """Return social runs that are in draft and awaiting admin review.
+
+        Filters terminal_status='draft' AND approval_state != 'expired',
+        ordered by created_at DESC, capped at 25 rows. Distinct from
+        ``list_open_social_runs`` which filters terminal_status IS NULL
+        and would therefore exclude drafts the agent has already
+        transitioned to terminal_status='draft'.
+
+        ``environment`` is accepted for signature parity; the table has no
+        environment column so it is ignored.
+        """
+        if not self.supabase:
+            return []
+        try:
+            result = (
+                self.supabase.table("live_update_social_runs")
+                .select("*")
+                .eq("terminal_status", "draft")
+                .neq("approval_state", "expired")
+                .order("created_at", desc=True)
+                .limit(25)
+                .execute()
+            )
+            return result.data if result.data else []
+        except Exception as e:
+            logger.error(
+                "Error listing pending review live_update_social_runs: %s",
+                e,
+                exc_info=True,
+            )
+            return []
 
     def check_live_update_social_duplicate_publication(
         self,

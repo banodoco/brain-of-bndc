@@ -18,6 +18,8 @@ from dotenv import load_dotenv
 from src.common.db_handler import WalletUpdateBlockedError
 from src.features.grants.solana_client import is_valid_solana_address
 from src.features.sharing.models import PublicationSourceContext, SocialPublishRequest
+from src.features.sharing.live_update_social.models import RunState
+from src.features.sharing.live_update_social.tools import _make_draft_handler, _make_publish_handler
 
 load_dotenv()
 
@@ -1194,6 +1196,113 @@ TOOLS = [
                 "run_id": {
                     "type": "string",
                     "description": "The run_id from a live_update_social_runs row."
+                }
+            },
+            "required": ["run_id"]
+        }
+    },
+    {
+        "name": "update_social_draft",
+        "description": "Update the draft text for a social draft run. Resets approval state to pending — the draft MUST be re-approved after any edit. If selected_media is omitted, the existing media_decisions.selected list is preserved unchanged. Provide new_text with the full revised draft content.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "run_id": {
+                    "type": "string",
+                    "description": "The run_id of the social draft to update."
+                },
+                "new_text": {
+                    "type": "string",
+                    "description": "The full revised draft text replacing the current draft."
+                },
+                "selected_media": {
+                    "type": "array",
+                    "items": {
+                        "type": "object"
+                    },
+                    "description": "Optional media identity list. If omitted, the existing media_decisions.selected is preserved. Provide an empty array [] to clear all selected media."
+                }
+            },
+            "required": ["run_id", "new_text"]
+        }
+    },
+    {
+        "name": "approve_social_draft",
+        "description": "Record admin approval for a social draft run. admin_approval_quote must be a verbatim phrase from the admin's DM — do NOT infer, paraphrase, or generate it. Approval and publish are ALWAYS separate turns. This tool only records approval; use publish_social_draft to post.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "run_id": {
+                    "type": "string",
+                    "description": "The run_id of the social draft to approve."
+                },
+                "admin_approval_quote": {
+                    "type": "string",
+                    "description": "Verbatim phrase from the admin's DM confirming approval. Copy exactly — do not paraphrase."
+                }
+            },
+            "required": ["run_id", "admin_approval_quote"]
+        }
+    },
+    {
+        "name": "publish_social_draft",
+        "description": "Publish an approved social draft to the configured social platform(s). ONLY works when a current-revision attested approval exists (approve_social_draft must have been called on this revision and not reset by a subsequent update_social_draft). Approval and publish are ALWAYS separate turns — never call this in the same turn as approve_social_draft.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "run_id": {
+                    "type": "string",
+                    "description": "The run_id of the approved social draft to publish."
+                }
+            },
+            "required": ["run_id"]
+        }
+    },
+    {
+        "name": "preview_social_draft",
+        "description": "Preview a social draft run's current state including draft text, media decisions, approval status, and revision number. Read-only — does not modify any state.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "run_id": {
+                    "type": "string",
+                    "description": "The run_id of the social draft to preview."
+                }
+            },
+            "required": ["run_id"]
+        }
+    },
+    {
+        "name": "list_pending_social_drafts",
+        "description": "List all pending social draft runs (terminal_status='draft', approval_state not 'expired'). Use this to discover active drafts — especially as a recovery path when an admin DM reply does not resolve to a known run (orphaned reply).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "environment": {
+                    "type": "string",
+                    "description": "Optional environment filter (e.g. 'prod', 'dev'). Defaults to prod."
+                }
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "discard_social_draft",
+        "description": "Discard a social draft run entirely. By default require_confirmation is true and you must pass a literal confirm token to proceed: confirm:'discard'. Set require_confirmation=false to bypass the token gate (use with caution).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "run_id": {
+                    "type": "string",
+                    "description": "The run_id of the social draft to discard."
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Optional reason for discarding the draft."
+                },
+                "require_confirmation": {
+                    "type": "boolean",
+                    "description": "Whether to require a literal confirm token (default: true). When true, you must pass confirm:'discard'."
                 }
             },
             "required": ["run_id"]
@@ -4802,6 +4911,383 @@ async def execute_log_live_update_feedback(
         return {"success": False, "error": str(e)}
 
 
+# ========== Social-draft review executors (Sprint 2) ==========
+
+
+def _canon(text: Optional[str]) -> str:
+    """Canonicalise draft text for stable equality checks.
+
+    Strips leading/trailing whitespace and collapses every internal whitespace
+    run to a single space. Used to compare approved_text vs the persisted
+    draft_text at publish time.
+    """
+    return re.sub(r"\s+", " ", (text or "").strip())
+
+
+async def execute_update_social_draft(
+    bot: discord.Client,
+    db_handler,
+    params: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Update the draft text on a pending social-review run.
+
+    Resets approval state to pending (any prior approval is cleared). Preserves
+    the existing media_decisions.selected list when selected_media is omitted
+    (a supplied empty list intentionally clears it).
+    """
+    run_id = (params.get("run_id") or "").strip()
+    new_text = params.get("new_text")
+    if not run_id:
+        return {"success": False, "code": "missing_run_id"}
+    if new_text is None:
+        return {"success": False, "code": "missing_new_text"}
+
+    try:
+        row = db_handler.get_live_update_social_run(run_id)
+        if not row or row.get("terminal_status") == "published":
+            return {"success": False, "code": "missing_or_published"}
+
+        run_state = RunState.from_row(row)
+
+        if "selected_media" in params:
+            selected_media = params.get("selected_media") or []
+        else:
+            selected_media = (row.get("media_decisions") or {}).get("selected", [])
+
+        handler = _make_draft_handler(db_handler)
+        await handler(run_state, {"draft_text": new_text, "selected_media": selected_media})
+
+        new_revision = int(row.get("revision", 0)) + 1
+        db_handler.update_live_update_social_run(
+            run_id,
+            revision=new_revision,
+            approval_state="pending",
+            clear_approval=True,
+            environment=row.get("environment", "prod"),
+        )
+
+        return {
+            "success": True,
+            "run_id": run_id,
+            "revision": new_revision,
+            "draft_text": new_text,
+            "approval_state": "pending",
+        }
+    except Exception as e:
+        logger.error("[AdminChat] update_social_draft failed for %s: %s", run_id, e, exc_info=True)
+        return {"success": False, "code": "exception", "detail": str(e)}
+
+
+async def execute_approve_social_draft(
+    bot: discord.Client,
+    db_handler,
+    params: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Record admin approval for a social draft, bound to the current revision.
+
+    Canonicalises the draft and stores it as approved_text so a later publish
+    can verify the text has not drifted. Performs a non-blocking check that the
+    admin's quote appears in recent DM history; attaches a warning if not.
+    """
+    run_id = (params.get("run_id") or "").strip()
+    quote = params.get("admin_approval_quote") or ""
+    if not run_id:
+        return {"success": False, "code": "missing_run_id"}
+    if not quote.strip():
+        return {"success": False, "code": "missing_quote"}
+
+    try:
+        row = db_handler.get_live_update_social_run(run_id)
+        if not row:
+            return {"success": False, "code": "missing_or_published"}
+        if row.get("terminal_status") == "published":
+            return {"success": False, "code": "missing_or_published"}
+        if row.get("approval_state") == "expired":
+            return {"success": False, "code": "expired"}
+
+        draft_text = row.get("draft_text") or ""
+        if not draft_text.strip():
+            return {"success": False, "code": "empty_draft"}
+
+        approved_text_canon = _canon(draft_text)
+        now_iso = datetime.now(timezone.utc).isoformat()
+        revision = int(row.get("revision", 0))
+
+        # Non-blocking DM quote check — attaches a warning when not found.
+        warning: Optional[str] = None
+        try:
+            admin_user_id = os.getenv("ADMIN_USER_ID")
+            if admin_user_id:
+                user = await bot.fetch_user(int(admin_user_id))
+                dm_channel = getattr(user, "dm_channel", None)
+                if dm_channel is None:
+                    dm_channel = await user.create_dm()
+                needle = _canon(quote).lower()
+                haystack_found = False
+                if needle:
+                    async for past_msg in dm_channel.history(limit=20):
+                        hay = _canon(getattr(past_msg, "content", "") or "").lower()
+                        if needle in hay:
+                            haystack_found = True
+                            break
+                if not haystack_found:
+                    warning = "quote_not_found_in_recent_dm"
+        except Exception as e:
+            logger.warning(
+                "[AdminChat] approve_social_draft quote check failed (non-blocking) for %s: %s",
+                run_id, e,
+            )
+            warning = "quote_not_found_in_recent_dm"
+
+        ok = db_handler.update_live_update_social_run(
+            run_id,
+            approval_state="approved",
+            approved_revision=revision,
+            approved_text=approved_text_canon,
+            approved_quote=quote,
+            approved_at=now_iso,
+            environment=row.get("environment", "prod"),
+        )
+        if not ok:
+            return {"success": False, "code": "persist_failed"}
+
+        result: Dict[str, Any] = {
+            "success": True,
+            "run_id": run_id,
+            "approved_revision": revision,
+            "approval_state": "approved",
+        }
+        if warning:
+            result["warning"] = warning
+        return result
+    except Exception as e:
+        logger.error("[AdminChat] approve_social_draft failed for %s: %s", run_id, e, exc_info=True)
+        return {"success": False, "code": "exception", "detail": str(e)}
+
+
+async def execute_publish_social_draft(
+    bot: discord.Client,
+    db_handler,
+    params: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Publish a previously-approved social draft.
+
+    Early-returns a refusal code for each precondition. Uses a publish_revision
+    TOCTOU stamp + re-fetch to detect concurrent updates between the
+    pre-check and the actual publish call. Delegates the external post to
+    ``_make_publish_handler(force_publish=True)``.
+    """
+    run_id = (params.get("run_id") or "").strip()
+    if not run_id:
+        return {"success": False, "code": "missing_run_id"}
+
+    social_publish_service = getattr(bot, "social_publish_service", None)
+    if social_publish_service is None:
+        return {"success": False, "code": "service_unavailable"}
+
+    try:
+        row = db_handler.get_live_update_social_run(run_id)
+        if not row:
+            return {"success": False, "code": "missing_or_published"}
+        if row.get("terminal_status") == "published":
+            return {"success": False, "code": "already_published"}
+        if row.get("approval_state") != "approved" or row.get("approved_revision") is None:
+            return {"success": False, "code": "no_approval"}
+        revision = int(row.get("revision", 0))
+        if int(row.get("approved_revision")) != revision:
+            return {"success": False, "code": "stale_revision"}
+        if _canon(row.get("approved_text")) != _canon(row.get("draft_text")):
+            return {"success": False, "code": "text_changed"}
+
+        # TOCTOU stamp: claim this revision for publish, then re-fetch and re-verify.
+        db_handler.update_live_update_social_run(
+            run_id,
+            publish_revision=revision,
+            environment=row.get("environment", "prod"),
+        )
+        row2 = db_handler.get_live_update_social_run(run_id)
+        if not row2:
+            return {"success": False, "code": "missing_or_published"}
+        if row2.get("terminal_status") == "published":
+            return {"success": False, "code": "already_published"}
+        revision2 = int(row2.get("revision", 0))
+        if (
+            row2.get("approved_revision") is None
+            or int(row2.get("approved_revision")) != revision2
+        ):
+            return {"success": False, "code": "stale_revision"}
+        if int(row2.get("publish_revision") or -1) != revision2:
+            return {"success": False, "code": "stale_revision"}
+        if _canon(row2.get("approved_text")) != _canon(row2.get("draft_text")):
+            return {"success": False, "code": "text_changed"}
+
+        run_state = RunState.from_row(row2)
+        handler_params = {
+            "draft_text": row2["draft_text"],
+            "selected_media": (row2.get("media_decisions") or {}).get("selected", []),
+            "skip_media_understanding": True,
+        }
+        publish_handler = _make_publish_handler(
+            db_handler=db_handler,
+            bot=bot,
+            social_publish_service=social_publish_service,
+            force_publish=True,
+        )
+        result = await publish_handler(run_state, handler_params)
+
+        if not result.get("ok"):
+            return {
+                "success": False,
+                "code": "publish_failed",
+                "detail": result.get("error") or str(result),
+            }
+
+        tweet_url = result.get("provider_url") or (result.get("provider_refs") or [None])[0]
+        return {
+            "success": True,
+            "run_id": run_id,
+            "tweet_url": tweet_url,
+            "provider_ref": result.get("provider_ref"),
+            "final_text": row2["draft_text"],
+        }
+    except Exception as e:
+        logger.error("[AdminChat] publish_social_draft failed for %s: %s", run_id, e, exc_info=True)
+        return {"success": False, "code": "exception", "detail": str(e)}
+
+
+async def execute_preview_social_draft(
+    bot: discord.Client,
+    db_handler,
+    params: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Read-only preview of a social draft's current state."""
+    run_id = (params.get("run_id") or "").strip()
+    if not run_id:
+        return {"success": False, "code": "missing_run_id"}
+
+    try:
+        row = db_handler.get_live_update_social_run(run_id)
+        if not row:
+            return {"success": False, "code": "missing_or_published"}
+
+        selected = (row.get("media_decisions") or {}).get("selected", []) or []
+        first = selected[0] if selected else None
+        first_url_or_title = None
+        if isinstance(first, dict):
+            first_url_or_title = first.get("url") or first.get("title")
+        elif first is not None:
+            first_url_or_title = str(first)
+
+        topic_title = (row.get("topic_summary_data") or {}).get("title")
+
+        return {
+            "success": True,
+            "run_id": run_id,
+            "draft_text": row.get("draft_text"),
+            "revision": row.get("revision", 0),
+            "approval_state": row.get("approval_state"),
+            "approved_revision": row.get("approved_revision"),
+            "expires_at": row.get("expires_at"),
+            "topic_title": topic_title,
+            "media": {
+                "count": len(selected),
+                "first_url_or_title": first_url_or_title,
+            },
+        }
+    except Exception as e:
+        logger.error("[AdminChat] preview_social_draft failed for %s: %s", run_id, e, exc_info=True)
+        return {"success": False, "code": "exception", "detail": str(e)}
+
+
+async def execute_list_pending_social_drafts(
+    bot: discord.Client,
+    db_handler,
+    params: Dict[str, Any],
+) -> Dict[str, Any]:
+    """List pending review drafts. Uses list_pending_review_social_runs
+    (NOT list_open_social_runs, which filters terminal_status IS NULL and would
+    exclude rows that have already been transitioned to terminal_status='draft').
+    """
+    environment = params.get("environment")
+    try:
+        rows = db_handler.list_pending_review_social_runs(environment=environment)
+        now = datetime.now(timezone.utc)
+        summary = []
+        for r in rows:
+            created_at = r.get("created_at")
+            age_seconds: Optional[int] = None
+            if created_at:
+                try:
+                    ts = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                    age_seconds = int((now - ts).total_seconds())
+                except Exception:
+                    age_seconds = None
+            summary.append({
+                "run_id": r.get("run_id"),
+                "topic_title": (r.get("topic_summary_data") or {}).get("title"),
+                "revision": r.get("revision", 0),
+                "approval_state": r.get("approval_state"),
+                "age_seconds": age_seconds,
+                "expires_at": r.get("expires_at"),
+            })
+        return {"success": True, "count": len(summary), "drafts": summary}
+    except Exception as e:
+        logger.error("[AdminChat] list_pending_social_drafts failed: %s", e, exc_info=True)
+        return {"success": False, "code": "exception", "detail": str(e)}
+
+
+async def execute_discard_social_draft(
+    bot: discord.Client,
+    db_handler,
+    params: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Discard a social draft run: set approval_state='expired' + terminal_status='skip'.
+
+    Defaults to requiring a literal confirm token ("discard"). Passing
+    ``require_confirmation=False`` bypasses the gate.
+    """
+    run_id = (params.get("run_id") or "").strip()
+    if not run_id:
+        return {"success": False, "code": "missing_run_id"}
+
+    require_confirmation = params.get("require_confirmation", True)
+    if require_confirmation:
+        if params.get("confirm") != "discard":
+            return {"success": False, "code": "confirmation_required"}
+
+    try:
+        row = db_handler.get_live_update_social_run(run_id)
+        if not row:
+            return {"success": False, "code": "missing_or_published"}
+        if row.get("terminal_status") == "published":
+            return {"success": False, "code": "already_published"}
+
+        reason = params.get("reason")
+        trace_entries = list(row.get("trace_entries") or [])
+        trace_entries.append({
+            "event": "tool",
+            "tool": "discard_social_draft",
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "discard_reason": reason,
+        })
+
+        ok = db_handler.update_live_update_social_run(
+            run_id,
+            approval_state="expired",
+            terminal_status="skip",
+            trace_entries=trace_entries,
+            environment=row.get("environment", "prod"),
+        )
+        if not ok:
+            return {"success": False, "code": "persist_failed"}
+        return {"success": True, "run_id": run_id}
+    except Exception as e:
+        logger.error("[AdminChat] discard_social_draft failed for %s: %s", run_id, e, exc_info=True)
+        return {"success": False, "code": "exception", "detail": str(e)}
+
+
 # ========== Tool Executor Dispatcher ==========
 
 async def execute_tool(
@@ -4961,5 +5447,17 @@ async def execute_tool(
         return await execute_inspect_social_runs(db_handler, trusted_tool_input)
     elif tool_name == "inspect_social_publication":
         return await execute_inspect_social_publication(db_handler, trusted_tool_input)
+    elif tool_name == "update_social_draft":
+        return await execute_update_social_draft(bot, db_handler, trusted_tool_input)
+    elif tool_name == "approve_social_draft":
+        return await execute_approve_social_draft(bot, db_handler, trusted_tool_input)
+    elif tool_name == "publish_social_draft":
+        return await execute_publish_social_draft(bot, db_handler, trusted_tool_input)
+    elif tool_name == "preview_social_draft":
+        return await execute_preview_social_draft(bot, db_handler, trusted_tool_input)
+    elif tool_name == "list_pending_social_drafts":
+        return await execute_list_pending_social_drafts(bot, db_handler, trusted_tool_input)
+    elif tool_name == "discard_social_draft":
+        return await execute_discard_social_draft(bot, db_handler, trusted_tool_input)
     else:
         return {"success": False, "error": f"Unknown tool: {tool_name}"}

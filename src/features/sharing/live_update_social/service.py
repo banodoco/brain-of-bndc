@@ -8,12 +8,15 @@ handoff.  It is instantiated by SharingCog and exposed on
 from __future__ import annotations
 
 import logging
+import os
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Optional
+
+import discord
 
 from .contracts import LiveUpdateHandoffPayload
 
 if TYPE_CHECKING:
-    import discord
     from src.common.db_handler import DatabaseHandler
 
 logger = logging.getLogger("DiscordBot")
@@ -109,6 +112,34 @@ class LiveUpdateSocialService:
                     terminal,
                     run_id,
                 )
+                # ── DM the admin when agent produced a draft ───────────
+                if terminal == "draft" and run_id:
+                    # Re-fetch the run row to read the persisted draft_text
+                    row = self.db_handler.get_live_update_social_run(run_id)
+                    if row:
+                        draft_text = row.get("draft_text")
+                        media_decisions = row.get("media_decisions") or {}
+                        topic_summary_data = row.get("topic_summary_data") or {}
+                        source_metadata = row.get("source_metadata") or {}
+                        topic_title = topic_summary_data.get("title", "")
+                        source_link = (
+                            source_metadata.get("source_link")
+                            or source_metadata.get("message_link")
+                            or ""
+                        )
+                        await self._dm_admin_with_draft(
+                            run_id=run_id,
+                            draft_text=draft_text,
+                            media_decisions=media_decisions,
+                            topic_title=topic_title,
+                            source_link=source_link,
+                        )
+                    else:
+                        self._log.warning(
+                            "LiveUpdateSocialService: could not re-fetch run %s "
+                            "after agent returned draft",
+                            run_id,
+                        )
             else:
                 self._log.warning(
                     "LiveUpdateSocialService: no bot available — cannot invoke "
@@ -164,3 +195,94 @@ class LiveUpdateSocialService:
                 payload.action,
             )
             return None
+
+    async def _dm_admin_with_draft(
+        self,
+        run_id: str,
+        draft_text: Optional[str],
+        media_decisions: dict,
+        topic_title: str,
+        source_link: str,
+    ) -> None:
+        """DM the admin with a draft embed and persist the review_message_id.
+
+        If *draft_text* is ``None`` or whitespace-only, logs a warning and
+        skips both the DM send and the DB write entirely.  The entire body
+        is wrapped in try/except so neither DM nor DB failure ever raises.
+        """
+        try:
+            if not draft_text or not draft_text.strip():
+                self._log.warning(
+                    "LiveUpdateSocialService: _dm_admin_with_draft skipped — "
+                    "draft_text is empty for run %s",
+                    run_id,
+                )
+                return
+
+            # ── resolve admin user ────────────────────────────────────
+            admin_id = os.getenv("ADMIN_USER_ID")
+            if not admin_id:
+                self._log.warning(
+                    "LiveUpdateSocialService: ADMIN_USER_ID not set — "
+                    "cannot DM admin for run %s",
+                    run_id,
+                )
+                return
+
+            user = await self._bot.fetch_user(int(admin_id))
+
+            # ── build embed ───────────────────────────────────────────
+            embed = discord.Embed(
+                title=topic_title or "(untitled)",
+                description=draft_text,
+                color=0x3498DB,
+            )
+
+            # Thumbnail: first media URL in media_decisions.selected
+            selected = media_decisions.get("selected", [])
+            if selected:
+                first_media = selected[0]
+                if isinstance(first_media, dict):
+                    thumb_url = (
+                        first_media.get("url")
+                        or first_media.get("proxy_url")
+                        or first_media.get("cdn_url")
+                    )
+                else:
+                    thumb_url = None
+                if thumb_url:
+                    embed.set_thumbnail(url=str(thumb_url))
+
+            # Footer with run_id + source topic link
+            footer_text = f"run_id={run_id}"
+            if source_link:
+                footer_text += f" | {source_link}"
+            embed.set_footer(text=footer_text)
+
+            # ── send DM ───────────────────────────────────────────────
+            msg = await user.send(embed=embed)
+
+            # ── persist review_message_id ─────────────────────────────
+            env = os.getenv("ENVIRONMENT", "prod")
+            expires_at = (
+                datetime.now(timezone.utc) + timedelta(hours=24)
+            ).isoformat()
+            ok = self.db_handler.update_live_update_social_run(
+                run_id=run_id,
+                review_message_id=msg.id,
+                expires_at=expires_at,
+                environment=env,
+            )
+            if not ok:
+                self._log.error(
+                    "LiveUpdateSocialService: DM sent successfully (msg.id=%s) "
+                    "but DB write of review_message_id FAILED for run %s",
+                    msg.id,
+                    run_id,
+                )
+
+        except Exception:
+            self._log.exception(
+                "LiveUpdateSocialService: _dm_admin_with_draft failed for run %s",
+                run_id,
+            )

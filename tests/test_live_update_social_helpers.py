@@ -30,7 +30,7 @@ from src.features.sharing.live_update_social.helpers import (
     list_social_routes,
     resolve_social_route,
 )
-from src.features.sharing.live_update_social.models import MediaRefIdentity
+from src.features.sharing.live_update_social.models import MediaRefIdentity, RunState
 
 pytestmark = pytest.mark.anyio
 
@@ -593,3 +593,56 @@ async def test_preview_publish_readiness_does_not_mutate_any_state(social_signin
 
     assert len(db.rows) == 0
     assert db.shared_posts == []
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  RunState.from_row — 9 review fields round-trip (T2)
+# ═══════════════════════════════════════════════════════════════════════
+
+def test_run_state_from_row_all_9_review_fields():
+    """from_row populates all 9 review fields from a complete row."""
+    row = {
+        "run_id": "run-abc",
+        "topic_id": "topic-xyz",
+        "platform": "twitter",
+        "review_message_id": 123456789012345,
+        "revision": 3,
+        "approval_state": "approved",
+        "approved_revision": 2,
+        "approved_text": "The approved draft text",
+        "approved_quote": "verbatim quote",
+        "approved_at": "2026-05-30T12:00:00+00:00",
+        "expires_at": "2026-05-31T12:00:00+00:00",
+        "publish_revision": 1,
+    }
+    state = RunState.from_row(row)
+
+    assert state.review_message_id == 123456789012345
+    assert state.revision == 3
+    assert state.approval_state == "approved"
+    assert state.approved_revision == 2
+    assert state.approved_text == "The approved draft text"
+    assert state.approved_quote == "verbatim quote"
+    assert state.approved_at == "2026-05-30T12:00:00+00:00"
+    assert state.expires_at == "2026-05-31T12:00:00+00:00"
+    assert state.publish_revision == 1
+
+
+def test_run_state_from_row_defaults_when_keys_absent():
+    """from_row uses safe defaults for all 9 review fields when keys are absent."""
+    row = {
+        "run_id": "run-def",
+        "topic_id": "topic-def",
+        "platform": "twitter",
+    }
+    state = RunState.from_row(row)
+
+    assert state.review_message_id is None
+    assert state.revision == 0
+    assert state.approval_state == "pending"
+    assert state.approved_revision is None
+    assert state.approved_text is None
+    assert state.approved_quote is None
+    assert state.approved_at is None
+    assert state.expires_at is None
+    assert state.publish_revision is None

@@ -107,7 +107,7 @@ def test_default_runtime_backend_constructs_topic_editor(monkeypatch):
     constructed = {}
 
     class FakeTopicEditor:
-        def __init__(self, *, bot, db_handler, environment):
+        def __init__(self, *, bot, db_handler, environment, llm_client=None):
             constructed["bot"] = bot
             constructed["db_handler"] = db_handler
             constructed["environment"] = environment

@@ -321,6 +321,19 @@ class AdminChatAgent:
                 for line in recent:
                     ctx_parts.append(f"\n  {line}")
 
+            # ── Social draft review context (per-turn only, never persisted) ──
+            social_draft_run = channel_context.get('social_draft_run')
+            if social_draft_run:
+                ctx_parts.append(
+                    f"\n\n[Social Draft Review — "
+                    f"run_id={social_draft_run.get('run_id')}, "
+                    f"revision={social_draft_run.get('revision')}, "
+                    f"approval_state={social_draft_run.get('approval_state')}, "
+                    f"topic={social_draft_run.get('topic_title')}]\n"
+                    f"Draft text:\n---\n"
+                    f"{social_draft_run.get('draft_text', '')}\n---\n"
+                )
+
             full_message = "".join(ctx_parts) + "\n\n" + user_message
         persisted_user_msg: Dict[str, Any] = {"role": "user", "content": user_message}
         request_user_msg: Dict[str, Any] = {"role": "user", "content": full_message}

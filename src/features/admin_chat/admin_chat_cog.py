@@ -115,6 +115,27 @@ a bot-posted live-update message, you are handling that feedback turn.
   and then **removed** from the channel to keep it clean. This turn is a
   silent action — do not send a separate confirmation reply."""
 
+SOCIAL_DRAFT_REVIEW_GUIDANCE = """\
+## Social Draft Review Channel
+
+This channel is for admin review of social-media draft posts. When an admin
+replies to a bot-posted draft, you are handling that review turn.
+
+- The draft run is injected into context (run_id, draft_text, media decisions).
+  Research it further with your available tools as needed.
+- **Available tools:** `update_social_draft`, `approve_social_draft`,
+  `publish_social_draft`, `preview_social_draft`, `discard_social_draft`.
+- **Approval** requires `admin_approval_quote` — a verbatim phrase from the
+  admin's message. Do not infer or paraphrase; copy exactly.
+- **Approval and publish are always separate turns.** Approve first, then wait
+  for a distinct publish instruction. Never combine them in one action.
+- **Any edit resets approval.** After calling `update_social_draft`, the run
+  returns to pending; re-approval is required before publishing.
+- **Never auto-post.** Only call `publish_social_draft` when the admin has
+  explicitly requested it after approving.
+- If this reply has no matching draft context (orphaned reply), call
+  `list_pending_social_drafts` to surface the correct run for the admin."""
+
 
 class AdminChatCog(commands.Cog):
     """Cog that handles admin chat plus approved member requests."""
@@ -1504,6 +1525,33 @@ class AdminChatCog(commands.Cog):
                 )
                 channel_context["channel_guidance"] = override or LIVE_UPDATE_FEEDBACK_GUIDANCE
 
+            # ── Social-draft DM binding (T7) ──────────────────────────
+            # Only runs on DM replies to a bot message that might be a draft embed.
+            # Per-turn only — never persisted into _conversations.
+            if is_dm and message.reference is not None:
+                parent_id = int(message.reference.message_id)
+                row = self.db_handler.get_social_run_by_review_message_id(
+                    parent_id, environment=self._live_environment()
+                )
+                if row is not None and row.get("terminal_status") != "published":
+                    topic_title = (
+                        row.get("topic_summary_data") or {}
+                    ).get("title", "")
+                    channel_context["social_draft_run"] = {
+                        "run_id": row.get("run_id"),
+                        "draft_text": row.get("draft_text"),
+                        "revision": row.get("revision", 0),
+                        "approval_state": row.get("approval_state", "pending"),
+                        "approved_revision": row.get("approved_revision"),
+                        "topic_title": topic_title,
+                        "expires_at": row.get("expires_at"),
+                    }
+                    # Social-draft guidance overrides any other channel guidance
+                    # inside DMs (wins over feedback guidance when hypothetically both match).
+                    channel_context["channel_guidance"] = SOCIAL_DRAFT_REVIEW_GUIDANCE
+                # Orphan-reply fallback: parent does not resolve → do NOT inject
+                # social_draft_run. The agent will see no draft context.
+
             self._busy[user_id] = True
             try:
                 result = await self.agent.chat(
@@ -1668,6 +1716,12 @@ class AdminChatCog(commands.Cog):
                                 self.db_handler.update_topic,
                                 topic_id, {'state': 'deleted'}, guild_id, environment,
                             )
+                            try:
+                                open_runs = await asyncio.to_thread(self.db_handler.list_open_social_runs, environment, 50, topic_id)
+                                for run_row in (open_runs or []):
+                                    await asyncio.to_thread(lambda r=run_row: self.db_handler.update_live_update_social_run(r['run_id'], environment, approval_state='expired'))
+                            except Exception:
+                                logger.exception('social-draft invalidation failed: topic=%s reason=admin_delete', topic_id)
                             audit_row = await asyncio.to_thread(
                                 self.db_handler.get_live_update_feedback_for,
                                 replied_to_message_id, environment, 'deleted',
