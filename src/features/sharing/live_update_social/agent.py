@@ -569,20 +569,16 @@ class LiveUpdateSocialAgent:
             {"role": "user", "content": user_message},
         ]
 
-        # Determine client name based on chain fields
-        vendor = payload.vendor or "codex"
-        # Map chain vendor to LLM client name
-        client_map: Dict[str, str] = {
-            "codex": "claude",
-            "claude": "claude",
-            "openai": "openai",
-            "gemini": "gemini",
-        }
-        client_name = client_map.get(vendor.lower(), "claude")
+        # Live-update social drafting runs on DeepSeek by default, decoupled from
+        # the (Anthropic-billed) chain vendor. Overridable via env if needed.
+        client_name = (os.getenv("LIVE_UPDATE_SOCIAL_LLM_CLIENT") or "deepseek").strip().lower()
 
         # Determine model based on client + depth
         depth = payload.depth or "high"
-        model = self._select_model(client_name, depth, payload)
+        model = (
+            (os.getenv("LIVE_UPDATE_SOCIAL_LLM_MODEL") or "").strip()
+            or self._select_model(client_name, depth, payload)
+        )
 
         logger.info(
             "LiveUpdateSocialAgent: calling %s model=%s depth=%s",
@@ -607,6 +603,9 @@ class LiveUpdateSocialAgent:
     @staticmethod
     def _select_model(client_name: str, depth: str, payload: LiveUpdateHandoffPayload) -> str:
         """Select the appropriate model based on chain fields."""
+        if client_name == "deepseek":
+            # Valid models on this DeepSeek endpoint: deepseek-v4-pro / -flash.
+            return "deepseek-v4-pro"
         if client_name == "claude":
             if depth == "high":
                 return "claude-opus-4-6"
@@ -616,7 +615,7 @@ class LiveUpdateSocialAgent:
         elif client_name == "gemini":
             return "gemini-2.5-pro"
         # Default fallback
-        return "claude-sonnet-4-20250514"
+        return "deepseek-v4-pro"
 
     # ── tool call parsing ────────────────────────────────────────────
 
