@@ -587,18 +587,77 @@ def _make_mock_db_handler(*, update_returns=True):
     return db
 
 
+class _FakeMediaResponse:
+    """Minimal async context manager for mocked aiohttp media responses."""
+
+    def __init__(self, *, status=200, headers=None, body=b""):
+        self.status = status
+        self.headers = headers or {}
+        self._body = body
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def read(self):
+        return self._body
+
+
+class _FakeMediaSession:
+    """Minimal fake aiohttp session keyed by (method, url)."""
+
+    def __init__(self, responses):
+        self.responses = responses
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    def head(self, url, **_kwargs):
+        response = self.responses[("HEAD", url)]
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    def get(self, url, **_kwargs):
+        response = self.responses[("GET", url)]
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
 @pytest.mark.asyncio
 async def test_dm_admin_with_draft_happy_path():
     """Happy path: DM sent, review_message_id+expires_at persisted, embed correct."""
     bot = _make_mock_bot()
     db = _make_mock_db_handler()
     svc = LiveUpdateSocialService(db_handler=db, bot=bot)
+    media_url = "https://example.com/thumb.png"
+    fake_session = _FakeMediaSession({
+        ("HEAD", media_url): _FakeMediaResponse(
+            headers={"Content-Length": "5", "Content-Type": "image/png"},
+        ),
+        ("GET", media_url): _FakeMediaResponse(
+            headers={"Content-Type": "image/png"},
+            body=b"image",
+        ),
+    })
 
-    with patch.dict(_os.environ, {"ADMIN_USER_ID": "999"}):
+    with (
+        patch.dict(_os.environ, {"ADMIN_USER_ID": "999"}),
+        patch(
+            "src.features.sharing.live_update_social.service.aiohttp.ClientSession",
+            return_value=fake_session,
+        ),
+    ):
         await svc._dm_admin_with_draft(
             run_id="run-1",
             draft_text="Hello world draft text",
-            media_decisions={"selected": [{"url": "https://example.com/thumb.png"}]},
+            media_decisions={"selected": [{"url": media_url}]},
             topic_title="My Topic Title",
             source_link="https://discord.com/channels/1/2",
         )
@@ -621,7 +680,13 @@ async def test_dm_admin_with_draft_happy_path():
     assert "Hello world draft text" in embed.description
     assert "run_id=run-1" not in embed.footer.text
     assert embed.footer.text == "Source: https://discord.com/channels/1/2"
-    assert embed.thumbnail.url == "https://example.com/thumb.png"
+    assert embed.thumbnail.url == media_url
+    assert _call_kwargs["content"].startswith("Reply to this message to edit")
+    assert '"post it"' in _call_kwargs["content"]
+    assert '"skip"' in _call_kwargs["content"]
+    assert '"list drafts"' in _call_kwargs["content"]
+    assert media_url in _call_kwargs["content"]
+    assert len(_call_kwargs["files"]) == 1
 
     # Assert DB write with review_message_id and non-null expires_at
     db.update_live_update_social_run.assert_called_once()
@@ -647,23 +712,37 @@ async def test_dm_admin_with_draft_resolves_discord_attachment_thumbnail():
     bot = _make_mock_bot()
     db = _make_mock_db_handler()
     svc = LiveUpdateSocialService(db_handler=db, bot=bot)
+    media_url = "https://cdn.discordapp.com/preview.png"
 
     inspected = {
         "attachments": [
             {
                 "filename": "preview.png",
-                "url": "https://cdn.discordapp.com/preview.png",
+                "url": media_url,
                 "content_type": "image/png",
             },
         ],
         "embeds_media": [],
     }
+    fake_session = _FakeMediaSession({
+        ("HEAD", media_url): _FakeMediaResponse(
+            headers={"Content-Length": "5", "Content-Type": "image/png"},
+        ),
+        ("GET", media_url): _FakeMediaResponse(
+            headers={"Content-Type": "image/png"},
+            body=b"image",
+        ),
+    })
     with (
         patch.dict(_os.environ, {"ADMIN_USER_ID": "999"}),
         patch(
             "src.features.sharing.live_update_social.service.inspect_discord_message",
             AsyncMock(return_value=inspected),
         ) as inspect_mock,
+        patch(
+            "src.features.sharing.live_update_social.service.aiohttp.ClientSession",
+            return_value=fake_session,
+        ),
     ):
         await svc._dm_admin_with_draft(
             run_id="run-attachment",
@@ -683,9 +762,180 @@ async def test_dm_admin_with_draft_resolves_discord_attachment_thumbnail():
         )
 
     inspect_mock.assert_awaited_once_with(bot, 111, 222)
-    embed = bot.fetch_user.return_value.send.call_args.kwargs["embed"]
-    assert embed.thumbnail.url == "https://cdn.discordapp.com/preview.png"
+    send_kwargs = bot.fetch_user.return_value.send.call_args.kwargs
+    embed = send_kwargs["embed"]
+    assert embed.thumbnail.url == media_url
     assert embed.footer.text is None
+    assert media_url in send_kwargs["content"]
+    assert len(send_kwargs["files"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_dm_admin_with_draft_surfaces_image_and_video_links():
+    """Every selected media ref is surfaced as a link; small files are attached."""
+    bot = _make_mock_bot()
+    db = _make_mock_db_handler()
+    svc = LiveUpdateSocialService(db_handler=db, bot=bot)
+    image_url = "https://cdn.discordapp.com/preview.png"
+    video_url = "https://cdn.discordapp.com/clip.mp4"
+
+    inspected = {
+        "attachments": [
+            {
+                "filename": "preview.png",
+                "url": image_url,
+                "content_type": "image/png",
+            },
+        ],
+        "embeds_media": [
+            {
+                "slot": "video",
+                "url": video_url,
+                "content_type": "video/mp4",
+                "filename": "clip.mp4",
+            },
+        ],
+    }
+    fake_session = _FakeMediaSession({
+        ("HEAD", image_url): _FakeMediaResponse(
+            headers={"Content-Length": "5", "Content-Type": "image/png"},
+        ),
+        ("GET", image_url): _FakeMediaResponse(
+            headers={"Content-Type": "image/png"},
+            body=b"image",
+        ),
+        ("HEAD", video_url): _FakeMediaResponse(
+            headers={"Content-Length": "5", "Content-Type": "video/mp4"},
+        ),
+        ("GET", video_url): _FakeMediaResponse(
+            headers={"Content-Type": "video/mp4"},
+            body=b"video",
+        ),
+    })
+
+    with (
+        patch.dict(_os.environ, {"ADMIN_USER_ID": "999"}),
+        patch(
+            "src.features.sharing.live_update_social.service.inspect_discord_message",
+            AsyncMock(return_value=inspected),
+        ),
+        patch(
+            "src.features.sharing.live_update_social.service.aiohttp.ClientSession",
+            return_value=fake_session,
+        ),
+    ):
+        await svc._dm_admin_with_draft(
+            run_id="run-media",
+            draft_text="Draft with media",
+            media_decisions={
+                "selected": [
+                    {
+                        "source": "discord_attachment",
+                        "channel_id": 111,
+                        "message_id": 222,
+                        "attachment_index": 0,
+                    },
+                    {
+                        "source": "discord_embed",
+                        "channel_id": 111,
+                        "message_id": 222,
+                        "embed_slot": "video",
+                    },
+                ],
+            },
+            topic_title="My Topic Title",
+            source_link="",
+        )
+
+    send_kwargs = bot.fetch_user.return_value.send.call_args.kwargs
+    assert image_url in send_kwargs["content"]
+    assert video_url in send_kwargs["content"]
+    assert "image/png" in send_kwargs["content"]
+    assert "video/mp4" in send_kwargs["content"]
+    assert send_kwargs["embed"].thumbnail.url == image_url
+    assert len(send_kwargs["files"]) == 2
+    assert [file.filename for file in send_kwargs["files"]] == ["preview.png", "clip.mp4"]
+
+
+@pytest.mark.asyncio
+async def test_dm_admin_with_draft_oversized_download_falls_back_to_link():
+    """Oversized or failed media is not attached, but its link remains visible."""
+    bot = _make_mock_bot()
+    db = _make_mock_db_handler()
+    svc = LiveUpdateSocialService(db_handler=db, bot=bot)
+    media_url = "https://cdn.discordapp.com/large.mp4"
+    failed_url = "https://cdn.discordapp.com/failed.png"
+    fake_session = _FakeMediaSession({
+        ("HEAD", media_url): _FakeMediaResponse(
+            headers={
+                "Content-Length": str(9 * 1024 * 1024),
+                "Content-Type": "video/mp4",
+            },
+        ),
+        ("HEAD", failed_url): _FakeMediaResponse(
+            headers={"Content-Length": "5", "Content-Type": "image/png"},
+        ),
+        ("GET", failed_url): RuntimeError("download failed"),
+    })
+
+    with (
+        patch.dict(_os.environ, {"ADMIN_USER_ID": "999"}),
+        patch(
+            "src.features.sharing.live_update_social.service.aiohttp.ClientSession",
+            return_value=fake_session,
+        ),
+    ):
+        await svc._dm_admin_with_draft(
+            run_id="run-large-media",
+            draft_text="Draft with large media",
+            media_decisions={
+                "selected": [
+                    {
+                        "source": "url",
+                        "url": media_url,
+                        "content_type": "video/mp4",
+                        "filename": "large.mp4",
+                    },
+                    {
+                        "source": "url",
+                        "url": failed_url,
+                        "content_type": "image/png",
+                        "filename": "failed.png",
+                    },
+                ],
+            },
+            topic_title="My Topic Title",
+            source_link="",
+        )
+
+    send_kwargs = bot.fetch_user.return_value.send.call_args.kwargs
+    assert media_url in send_kwargs["content"]
+    assert failed_url in send_kwargs["content"]
+    assert "files" not in send_kwargs
+
+
+@pytest.mark.asyncio
+async def test_dm_admin_with_draft_no_media_still_sends_how_to():
+    """No media still sends the review embed and text instructions."""
+    bot = _make_mock_bot()
+    db = _make_mock_db_handler()
+    svc = LiveUpdateSocialService(db_handler=db, bot=bot)
+
+    with patch.dict(_os.environ, {"ADMIN_USER_ID": "999"}):
+        await svc._dm_admin_with_draft(
+            run_id="run-no-media",
+            draft_text="Draft without media",
+            media_decisions={},
+            topic_title="No Media Topic",
+            source_link="",
+        )
+
+    send_kwargs = bot.fetch_user.return_value.send.call_args.kwargs
+    assert send_kwargs["embed"].title == "No Media Topic"
+    assert "Reply to this message to edit" in send_kwargs["content"]
+    assert "Media:" not in send_kwargs["content"]
+    assert "files" not in send_kwargs
+    db.update_live_update_social_run.assert_called_once()
 
 
 @pytest.mark.asyncio
