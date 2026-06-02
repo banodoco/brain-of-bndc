@@ -8,6 +8,7 @@ handoff.  It is instantiated by SharingCog and exposed on
 from __future__ import annotations
 
 import logging
+import mimetypes
 import os
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Optional
@@ -15,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Optional
 import discord
 
 from .contracts import LiveUpdateHandoffPayload
+from .helpers import inspect_discord_message
 
 if TYPE_CHECKING:
     from src.common.db_handler import DatabaseHandler
@@ -121,7 +123,7 @@ class LiveUpdateSocialService:
                         media_decisions = row.get("media_decisions") or {}
                         topic_summary_data = row.get("topic_summary_data") or {}
                         source_metadata = row.get("source_metadata") or {}
-                        topic_title = topic_summary_data.get("title", "")
+                        topic_title = self._resolve_topic_title(topic_summary_data)
                         source_link = (
                             source_metadata.get("source_link")
                             or source_metadata.get("message_link")
@@ -196,6 +198,113 @@ class LiveUpdateSocialService:
             )
             return None
 
+    def _resolve_topic_title(self, topic_summary_data: dict) -> str:
+        """Return a cleaned human-facing topic title, if one is available."""
+        if not isinstance(topic_summary_data, dict):
+            return ""
+
+        for key in ("title", "headline", "name", "subject"):
+            value = topic_summary_data.get(key)
+            if value is None:
+                continue
+            title = str(value).strip()
+            if title:
+                return title
+        return ""
+
+    @staticmethod
+    def _is_image_media(url: Optional[str], content_type: Optional[str] = None) -> bool:
+        """Best-effort image detection from content-type or filename."""
+        if content_type:
+            return content_type.lower().split(";", 1)[0].strip().startswith("image/")
+
+        if not url:
+            return False
+
+        guessed_type, _ = mimetypes.guess_type(url.split("?", 1)[0])
+        return bool(guessed_type and guessed_type.startswith("image/"))
+
+    async def _resolve_thumbnail_url(self, media_decisions: dict) -> Optional[str]:
+        """Resolve the first selected image media ref to a thumbnail URL."""
+        if not isinstance(media_decisions, dict):
+            return None
+
+        selected = media_decisions.get("selected", [])
+        if not isinstance(selected, list):
+            return None
+
+        for media in selected:
+            if not isinstance(media, dict):
+                continue
+
+            source = media.get("source")
+            if source == "url":
+                thumb_url = media.get("url")
+                if thumb_url:
+                    return str(thumb_url)
+                continue
+
+            if source not in {"discord_attachment", "discord_embed"}:
+                thumb_url = (
+                    media.get("url")
+                    or media.get("proxy_url")
+                    or media.get("cdn_url")
+                )
+                if thumb_url:
+                    return str(thumb_url)
+                continue
+
+            if self._bot is None:
+                continue
+
+            try:
+                channel_id = media.get("channel_id")
+                message_id = media.get("message_id")
+                if channel_id is None or message_id is None:
+                    continue
+
+                inspected = await inspect_discord_message(
+                    self._bot,
+                    int(channel_id),
+                    int(message_id),
+                )
+                if inspected.get("error"):
+                    continue
+
+                if source == "discord_attachment":
+                    raw_index = media.get("attachment_index")
+                    if raw_index is None:
+                        raw_index = media.get("index")
+                    if raw_index is None:
+                        continue
+                    attachments = inspected.get("attachments", [])
+                    try:
+                        attachment = attachments[int(raw_index)]
+                    except (IndexError, TypeError, ValueError):
+                        continue
+
+                    url = attachment.get("url")
+                    if self._is_image_media(url, attachment.get("content_type")):
+                        return str(url)
+
+                if source == "discord_embed":
+                    embed_slot = media.get("embed_slot")
+                    if not embed_slot or embed_slot == "video":
+                        continue
+                    for embed_media in inspected.get("embeds_media", []):
+                        url = embed_media.get("url")
+                        slot = embed_media.get("slot")
+                        if slot != embed_slot:
+                            continue
+                        if slot in {"image", "thumbnail", "author_icon", "footer_icon"}:
+                            return str(url)
+                        if self._is_image_media(url):
+                            return str(url)
+            except Exception:
+                continue
+
+        return None
+
     async def _dm_admin_with_draft(
         self,
         run_id: str,
@@ -238,26 +347,13 @@ class LiveUpdateSocialService:
                 color=0x3498DB,
             )
 
-            # Thumbnail: first media URL in media_decisions.selected
-            selected = media_decisions.get("selected", [])
-            if selected:
-                first_media = selected[0]
-                if isinstance(first_media, dict):
-                    thumb_url = (
-                        first_media.get("url")
-                        or first_media.get("proxy_url")
-                        or first_media.get("cdn_url")
-                    )
-                else:
-                    thumb_url = None
-                if thumb_url:
-                    embed.set_thumbnail(url=str(thumb_url))
+            # Thumbnail: first resolvable image in media_decisions.selected.
+            thumb_url = await self._resolve_thumbnail_url(media_decisions)
+            if thumb_url:
+                embed.set_thumbnail(url=str(thumb_url))
 
-            # Footer with run_id + source topic link
-            footer_text = f"run_id={run_id}"
             if source_link:
-                footer_text += f" | {source_link}"
-            embed.set_footer(text=footer_text)
+                embed.set_footer(text=f"Source: {source_link}")
 
             # ── send DM ───────────────────────────────────────────────
             msg = await user.send(embed=embed)

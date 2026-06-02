@@ -619,8 +619,8 @@ async def test_dm_admin_with_draft_happy_path():
     assert embed is not None, "send should be called with an embed"
     assert embed.title == "My Topic Title"
     assert "Hello world draft text" in embed.description
-    assert "run_id=run-1" in embed.footer.text
-    assert "https://discord.com/channels/1/2" in embed.footer.text
+    assert "run_id=run-1" not in embed.footer.text
+    assert embed.footer.text == "Source: https://discord.com/channels/1/2"
     assert embed.thumbnail.url == "https://example.com/thumb.png"
 
     # Assert DB write with review_message_id and non-null expires_at
@@ -629,6 +629,63 @@ async def test_dm_admin_with_draft_happy_path():
     assert db_call_kwargs["run_id"] == "run-1"
     assert db_call_kwargs["review_message_id"] == 12345
     assert db_call_kwargs["expires_at"] is not None
+
+
+def test_resolve_topic_title_falls_back_to_headline():
+    """Topic title prefers cleaned title, then headline/name/subject."""
+    svc = LiveUpdateSocialService(db_handler=MagicMock(), bot=None)
+
+    assert svc._resolve_topic_title({"title": "  Explicit title  "}) == "Explicit title"
+    assert svc._resolve_topic_title({"title": " ", "headline": "Real headline"}) == "Real headline"
+    assert svc._resolve_topic_title({"name": "Named topic"}) == "Named topic"
+    assert svc._resolve_topic_title({}) == ""
+
+
+@pytest.mark.asyncio
+async def test_dm_admin_with_draft_resolves_discord_attachment_thumbnail():
+    """Discord attachment media refs resolve to image CDN URLs for the embed thumbnail."""
+    bot = _make_mock_bot()
+    db = _make_mock_db_handler()
+    svc = LiveUpdateSocialService(db_handler=db, bot=bot)
+
+    inspected = {
+        "attachments": [
+            {
+                "filename": "preview.png",
+                "url": "https://cdn.discordapp.com/preview.png",
+                "content_type": "image/png",
+            },
+        ],
+        "embeds_media": [],
+    }
+    with (
+        patch.dict(_os.environ, {"ADMIN_USER_ID": "999"}),
+        patch(
+            "src.features.sharing.live_update_social.service.inspect_discord_message",
+            AsyncMock(return_value=inspected),
+        ) as inspect_mock,
+    ):
+        await svc._dm_admin_with_draft(
+            run_id="run-attachment",
+            draft_text="Hello world draft text",
+            media_decisions={
+                "selected": [
+                    {
+                        "source": "discord_attachment",
+                        "channel_id": 111,
+                        "message_id": 222,
+                        "attachment_index": 0,
+                    },
+                ],
+            },
+            topic_title="My Topic Title",
+            source_link="",
+        )
+
+    inspect_mock.assert_awaited_once_with(bot, 111, 222)
+    embed = bot.fetch_user.return_value.send.call_args.kwargs["embed"]
+    assert embed.thumbnail.url == "https://cdn.discordapp.com/preview.png"
+    assert embed.footer.text is None
 
 
 @pytest.mark.asyncio
