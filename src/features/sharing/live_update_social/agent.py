@@ -648,25 +648,62 @@ class LiveUpdateSocialAgent:
         except (json.JSONDecodeError, TypeError):
             pass
 
-        # Heuristic: check for tool name mentions
-        response_lower = llm_response.lower()
-        for ts in ALL_TOOL_SPECS:
-            if ts.name in response_lower:
-                # Try to extract parameters
-                params: Dict[str, Any] = {}
-                if ts.name == "draft_social_post":
-                    params["draft_text"] = llm_response.strip()
-                elif ts.name == "skip_social_post":
-                    params["reason"] = "Content not suitable for social posting"
-                elif ts.name == "request_social_review":
-                    params["reason"] = "LLM indicated review needed"
-                elif ts.name == "publish_social_post":
-                    params["draft_text"] = llm_response.strip()
-                elif ts.name == "find_existing_social_posts":
-                    params["draft_text"] = llm_response.strip()
-                elif ts.name == "get_social_run_status":
-                    pass  # no params needed
-                return ts.name, params
+        import re
+
+        valid_names = {ts.name for ts in ALL_TOOL_SPECS}
+
+        # Strip markdown code fences the model may wrap the call in.
+        cleaned = llm_response.strip()
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```[a-zA-Z0-9]*\n?", "", cleaned)
+            cleaned = re.sub(r"\n?```\s*$", "", cleaned).strip()
+
+        # Function-call form, e.g. DeepSeek: `draft_social_post({"draft_text": "..."})`.
+        # Extract the JSON argument object and use ITS fields — never the raw wrapper.
+        m = re.search(
+            r"(" + "|".join(re.escape(n) for n in valid_names) + r")\s*\(\s*(\{.*\})\s*\)",
+            cleaned,
+            re.DOTALL,
+        )
+        if m:
+            try:
+                parsed = json.loads(m.group(2))
+                if isinstance(parsed, dict):
+                    return m.group(1), parsed
+            except json.JSONDecodeError:
+                pass
+
+        # Bare JSON object embedded in prose.
+        brace = re.search(r"\{.*\}", cleaned, re.DOTALL)
+        if brace:
+            try:
+                obj = json.loads(brace.group(0))
+                if isinstance(obj, dict):
+                    name = obj.get("tool") or obj.get("name") or obj.get("tool_name")
+                    inner = obj.get("params") or obj.get("parameters") or obj.get("input")
+                    if name in valid_names:
+                        return name, inner if isinstance(inner, dict) else {
+                            k: v for k, v in obj.items()
+                            if k not in ("tool", "name", "tool_name")
+                        }
+                    if isinstance(obj.get("draft_text"), str):
+                        return "draft_social_post", obj
+            except json.JSONDecodeError:
+                pass
+
+        # Last resort: a tool name is mentioned but we could not extract a clean
+        # argument. Pick a safe terminal — but NEVER store the raw response as a
+        # draft (that leaks the tool-call wrapper into the tweet/DM).
+        response_lower = cleaned.lower()
+        if "skip_social_post" in response_lower:
+            return "skip_social_post", {"reason": "Content not suitable for social posting"}
+        if "get_social_run_status" in response_lower:
+            return "get_social_run_status", {}
+        if any(n in response_lower for n in ("draft_social_post", "publish_social_post",
+                                             "request_social_review", "find_existing_social_posts")):
+            return "request_social_review", {
+                "reason": "Could not parse a clean draft from the model response.",
+            }
 
         return None, {}
 
