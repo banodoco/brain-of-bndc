@@ -3187,7 +3187,29 @@ async def execute_cancel_payment(db_handler, params: Dict[str, Any]) -> Dict[str
         if not success:
             return {"success": False, "error": "Payment could not be cancelled from its current state"}
         row = db_handler.get_payment_request(payment_id, guild_id=guild_id)
-        return {"success": True, "payment": _redact_payment_row(row or {"payment_id": payment_id})}
+        linked_intent = None
+        if row and str(row.get('producer') or '').strip().lower() == 'admin_chat':
+            finder = getattr(db_handler, 'find_admin_chat_intent_by_payment_id', None)
+            updater = getattr(db_handler, 'update_admin_payment_intent', None)
+            if callable(finder) and callable(updater):
+                linked_intent = finder(payment_id)
+                linked_status = str((linked_intent or {}).get('status') or '').strip().lower()
+                if linked_intent and linked_status not in {'completed', 'failed', 'cancelled'}:
+                    linked_intent = updater(
+                        linked_intent['intent_id'],
+                        {'status': 'cancelled'},
+                        int(linked_intent['guild_id']),
+                    ) or linked_intent
+        response = {"success": True, "payment": _redact_payment_row(row or {"payment_id": payment_id})}
+        if linked_intent:
+            response["intent"] = {
+                "intent_id": linked_intent.get("intent_id"),
+                "status": linked_intent.get("status"),
+                "recipient_user_id": linked_intent.get("recipient_user_id"),
+                "final_payment_id": linked_intent.get("final_payment_id"),
+                "test_payment_id": linked_intent.get("test_payment_id"),
+            }
+        return response
     except Exception as e:
         logger.error(f"[AdminChat] Error in cancel_payment: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
@@ -3829,12 +3851,18 @@ async def execute_resolve_admin_intent(bot: discord.Client, db_handler, params: 
                 continue
 
             payment_status = str(payment_row.get('status') or '').strip().lower()
+            is_test_payment = payment_field == 'test_payment_id'
+            if is_test_payment and payment_status == 'confirmed':
+                linked_payments.append(_redact_payment_row(payment_row))
+                continue
+
             if payment_status in {'submitted', 'confirmed', 'manual_hold'}:
                 return {
                     "success": False,
                     "error": (
                         f"Linked payment {payment_id} is {payment_status}. "
-                        "Use /payment-resolve for submitted, confirmed, or manual_hold payments."
+                        "Use /payment-resolve for submitted or manual_hold payments, "
+                        "or inspect confirmed final payouts before cancelling the intent."
                     ),
                 }
 

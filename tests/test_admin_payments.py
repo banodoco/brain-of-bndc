@@ -487,6 +487,12 @@ class FakeIntentDB:
             return None
         return dict(intent)
 
+    def find_admin_chat_intent_by_payment_id(self, payment_id):
+        for intent in self.intents.values():
+            if intent.get("final_payment_id") == payment_id or intent.get("test_payment_id") == payment_id:
+                return dict(intent)
+        return None
+
     def list_active_intents(self, guild_id):
         return [
             dict(intent)
@@ -1732,6 +1738,148 @@ async def test_handle_test_receipt_positive_marks_wallet_verified_and_queues_adm
     assert len(channel.sent_messages) == 1
     assert len(status_message.edits) == 1
     assert status_message.content == "Confirmation received. Awaiting admin approval for the final payout."
+
+
+@pytest.mark.anyio
+async def test_resolve_admin_intent_allows_confirmed_test_payment_and_cancels_pending_final(monkeypatch):
+    monkeypatch.setenv("ADMIN_USER_ID", "999")
+    guild = SimpleNamespace(id=1)
+    channel = FakeChannel(guild=guild)
+    db = FakeIntentDB()
+    db.payments["payment-test"] = {
+        "payment_id": "payment-test",
+        "guild_id": 1,
+        "status": "confirmed",
+        "producer": "admin_chat",
+        "is_test": True,
+    }
+    db.payments["payment-final"] = {
+        "payment_id": "payment-final",
+        "guild_id": 1,
+        "status": "pending_confirmation",
+        "producer": "admin_chat",
+        "is_test": False,
+    }
+    intent = db.create_admin_payment_intent(
+        {
+            "channel_id": 55,
+            "admin_user_id": 999,
+            "recipient_user_id": 42,
+            "requested_amount_sol": 1.2,
+            "producer_ref": "1_42_123",
+            "test_payment_id": "payment-test",
+            "final_payment_id": "payment-final",
+            "status": "awaiting_admin_approval",
+        },
+        guild_id=1,
+    )
+    bot = FakeBot(channel)
+
+    result = await admin_tools.execute_resolve_admin_intent(
+        bot,
+        db,
+        {
+            "guild_id": 1,
+            "admin_user_id": 999,
+            "intent_id": intent["intent_id"],
+            "note": "Replacing with corrected amount",
+        },
+    )
+
+    assert result["success"] is True
+    assert db.intents[intent["intent_id"]]["status"] == "cancelled"
+    assert db.payments["payment-test"]["status"] == "confirmed"
+    assert db.payments["payment-final"]["status"] == "cancelled"
+    assert db.cancel_payment_calls == [
+        ("payment-final", 1, "Replacing with corrected amount"),
+    ]
+    assert len(result["payments"]) == 2
+    assert bot.fetched_users[999].sent_messages[-1].content.startswith("admin payment intent")
+
+
+@pytest.mark.anyio
+async def test_resolve_admin_intent_still_blocks_confirmed_final_payment(monkeypatch):
+    monkeypatch.setenv("ADMIN_USER_ID", "999")
+    guild = SimpleNamespace(id=1)
+    channel = FakeChannel(guild=guild)
+    db = FakeIntentDB()
+    db.payments["payment-final"] = {
+        "payment_id": "payment-final",
+        "guild_id": 1,
+        "status": "confirmed",
+        "producer": "admin_chat",
+        "is_test": False,
+    }
+    intent = db.create_admin_payment_intent(
+        {
+            "channel_id": 55,
+            "admin_user_id": 999,
+            "recipient_user_id": 42,
+            "requested_amount_sol": 1.2,
+            "producer_ref": "1_42_123",
+            "final_payment_id": "payment-final",
+            "status": "awaiting_admin_approval",
+        },
+        guild_id=1,
+    )
+    bot = FakeBot(channel)
+
+    result = await admin_tools.execute_resolve_admin_intent(
+        bot,
+        db,
+        {
+            "guild_id": 1,
+            "admin_user_id": 999,
+            "intent_id": intent["intent_id"],
+            "note": "Replacing with corrected amount",
+        },
+    )
+
+    assert result["success"] is False
+    assert "confirmed" in result["error"]
+    assert db.intents[intent["intent_id"]]["status"] == "awaiting_admin_approval"
+    assert db.cancel_payment_calls == []
+
+
+@pytest.mark.anyio
+async def test_cancel_payment_cancels_linked_admin_chat_intent(monkeypatch):
+    monkeypatch.setenv("ADMIN_USER_ID", "999")
+    db = FakeIntentDB()
+    db.payments["payment-final"] = {
+        "payment_id": "payment-final",
+        "guild_id": 1,
+        "status": "pending_confirmation",
+        "producer": "admin_chat",
+        "is_test": False,
+    }
+    intent = db.create_admin_payment_intent(
+        {
+            "channel_id": 55,
+            "admin_user_id": 999,
+            "recipient_user_id": 42,
+            "requested_amount_sol": 1.2,
+            "producer_ref": "1_42_123",
+            "final_payment_id": "payment-final",
+            "status": "awaiting_admin_approval",
+        },
+        guild_id=1,
+    )
+
+    result = await admin_tools.execute_cancel_payment(
+        db,
+        {
+            "guild_id": 1,
+            "admin_user_id": 999,
+            "payment_id": "payment-final",
+            "reason": "Recipient requested higher amount",
+        },
+    )
+
+    assert result["success"] is True
+    assert db.payments["payment-final"]["status"] == "cancelled"
+    assert db.intents[intent["intent_id"]]["status"] == "cancelled"
+    assert result["intent"]["intent_id"] == intent["intent_id"]
+    assert result["intent"]["status"] == "cancelled"
 
 
 @pytest.mark.anyio
