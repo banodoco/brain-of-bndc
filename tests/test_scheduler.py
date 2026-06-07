@@ -104,6 +104,9 @@ class FakePaymentDB:
         self.claimed = claimed or []
         self.claim_limits = []
         self.payments = {}
+        self.intents = {}
+        self.cancel_payment_calls = []
+        self.updated_intents = []
 
     def claim_due_payment_requests(self, limit):
         self.claim_limits.append(limit)
@@ -121,6 +124,37 @@ class FakePaymentDB:
             return False
         payment["status"] = "manual_hold"
         payment["last_error"] = reason
+        return True
+
+    def get_admin_payment_intent(self, intent_id, guild_id):
+        intent = self.intents.get(intent_id)
+        if intent and guild_id is not None and intent.get("guild_id") != guild_id:
+            return None
+        return intent
+
+    def list_active_intents(self, guild_id):
+        return [
+            intent
+            for intent in self.intents.values()
+            if (guild_id is None or intent.get("guild_id") == guild_id)
+            and intent.get("status") not in {"completed", "failed", "cancelled"}
+        ]
+
+    def update_admin_payment_intent(self, intent_id, payload, guild_id):
+        intent = self.get_admin_payment_intent(intent_id, guild_id=guild_id)
+        if not intent:
+            return None
+        intent.update(payload)
+        self.updated_intents.append((intent_id, dict(payload), guild_id))
+        return intent
+
+    def cancel_payment(self, payment_id, guild_id=None, reason=None):
+        payment = self.get_payment_request(payment_id, guild_id=guild_id)
+        if not payment:
+            return False
+        payment["status"] = "cancelled"
+        payment["cancel_reason"] = reason
+        self.cancel_payment_calls.append((payment_id, guild_id, reason))
         return True
 
 
@@ -634,6 +668,84 @@ async def test_payment_resolve_reports_reconcile_decisions(
     assert f"reason: {reason}" in content
     assert f"status: {updated_status or initial_status}" in content
     assert "tx_signature: ABCD...5678" in content
+
+
+async def test_payment_resolve_intent_target_clears_stuck_admin_intent(monkeypatch):
+    monkeypatch.setenv("ADMIN_USER_ID", "999")
+    intent_id = "481ee130-cf28-4cc2-bfc9-f8e5fceedb84"
+    db_handler = FakePaymentDB()
+    db_handler.payments["payment-test"] = {
+        "payment_id": "payment-test",
+        "guild_id": 1,
+        "status": "confirmed",
+        "tx_signature": "TESTSIG12345678",
+    }
+    db_handler.payments["payment-final"] = {
+        "payment_id": "payment-final",
+        "guild_id": 1,
+        "status": "pending_confirmation",
+        "tx_signature": None,
+    }
+    db_handler.intents[intent_id] = {
+        "intent_id": intent_id,
+        "guild_id": 1,
+        "status": "awaiting_admin_approval",
+        "test_payment_id": "payment-test",
+        "final_payment_id": "payment-final",
+    }
+    payment_service = FakePaymentService(db_handler=db_handler)
+    bot = FakePaymentBot(payment_service)
+    cog = payment_ui_cog_module.PaymentUICog(bot, db_handler, payment_service=payment_service)
+    interaction = FakeInteraction(user_id=999)
+
+    await cog.payment_resolve.callback(cog, interaction, "intent:481ee130")
+
+    assert payment_service.reconcile_calls == []
+    assert db_handler.intents[intent_id]["status"] == "cancelled"
+    assert db_handler.payments["payment-test"]["status"] == "confirmed"
+    assert db_handler.payments["payment-final"]["status"] == "cancelled"
+    assert db_handler.cancel_payment_calls == [
+        ("payment-final", 1, f"Admin cancelled payment intent {intent_id}"),
+    ]
+    content, ephemeral = interaction.response.messages[0]
+    assert ephemeral is True
+    assert "decision: intent_cancelled" in content
+    assert "status: cancelled" in content
+    assert "payment-test:confirmed" in content
+    assert "payment-final:cancelled" in content
+
+
+async def test_payment_resolve_intent_target_blocks_submitted_linked_payment(monkeypatch):
+    monkeypatch.setenv("ADMIN_USER_ID", "999")
+    intent_id = "481ee130-cf28-4cc2-bfc9-f8e5fceedb84"
+    db_handler = FakePaymentDB()
+    db_handler.payments["payment-final"] = {
+        "payment_id": "payment-final",
+        "guild_id": 1,
+        "status": "submitted",
+        "tx_signature": "FINALSIG12345678",
+    }
+    db_handler.intents[intent_id] = {
+        "intent_id": intent_id,
+        "guild_id": 1,
+        "status": "awaiting_admin_approval",
+        "final_payment_id": "payment-final",
+    }
+    payment_service = FakePaymentService(db_handler=db_handler)
+    bot = FakePaymentBot(payment_service)
+    cog = payment_ui_cog_module.PaymentUICog(bot, db_handler, payment_service=payment_service)
+    interaction = FakeInteraction(user_id=999)
+
+    await cog.payment_resolve.callback(cog, interaction, "intent:481ee130")
+
+    assert db_handler.intents[intent_id]["status"] == "awaiting_admin_approval"
+    assert db_handler.payments["payment-final"]["status"] == "submitted"
+    assert db_handler.cancel_payment_calls == []
+    content, ephemeral = interaction.response.messages[0]
+    assert ephemeral is True
+    assert "decision: keep_in_hold" in content
+    assert "linked payment payment-final is submitted" in content
+    assert "tx_signature: FINA...5678" in content
 
 
 async def test_grants_wallet_submission_and_test_confirmation_queue_final_payment():

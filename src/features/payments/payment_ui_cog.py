@@ -4,6 +4,7 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
+from uuid import UUID
 
 import discord
 from discord import app_commands
@@ -410,9 +411,9 @@ class PaymentUICog(commands.Cog):
 
     @app_commands.command(
         name="payment-resolve",
-        description="Reconcile one payment against on-chain truth.",
+        description="Reconcile one payment, or cancel a stuck admin intent with intent:<id>.",
     )
-    @app_commands.describe(payment_id="The payment request ID to reconcile")
+    @app_commands.describe(payment_id="Payment request ID, or intent:<admin intent ID> to clear a stuck admin intent")
     async def payment_resolve(self, interaction: discord.Interaction, payment_id: str):
         admin_user_id = os.getenv("ADMIN_USER_ID")
         if str(interaction.user.id) != str(admin_user_id):
@@ -423,11 +424,16 @@ class PaymentUICog(commands.Cog):
             await interaction.response.send_message("payment_service unavailable", ephemeral=True)
             return
 
+        target = str(payment_id or '').strip()
+        if target.lower().startswith('intent:'):
+            await self._resolve_admin_intent_target(interaction, target.split(':', 1)[1].strip())
+            return
+
         decision = await self.payment_service.reconcile_with_chain(
-            payment_id,
+            target,
             guild_id=interaction.guild_id,
         )
-        payment = self.db_handler.get_payment_request(payment_id, guild_id=interaction.guild_id) or {}
+        payment = self.db_handler.get_payment_request(target, guild_id=interaction.guild_id) or {}
         status = payment.get('status') or 'unknown'
         tx_signature = _redact_wallet(decision.tx_signature or payment.get('tx_signature'))
 
@@ -440,6 +446,166 @@ class PaymentUICog(commands.Cog):
             "```",
             ephemeral=True,
         )
+
+    async def _resolve_admin_intent_target(self, interaction: discord.Interaction, intent_id: str):
+        if not intent_id:
+            await interaction.response.send_message(
+                "```text\n"
+                "decision: not_applicable\n"
+                "reason: intent id is required\n"
+                "status: unknown\n"
+                "tx_signature: unknown\n"
+                "```",
+                ephemeral=True,
+            )
+            return
+
+        guild_id = interaction.guild_id
+        intent, lookup_error = self._find_admin_intent_for_resolve(intent_id, guild_id)
+        if lookup_error:
+            await interaction.response.send_message(
+                "```text\n"
+                "decision: not_applicable\n"
+                f"reason: {lookup_error}\n"
+                "status: unknown\n"
+                "tx_signature: unknown\n"
+                "```",
+                ephemeral=True,
+            )
+            return
+        if not intent:
+            await interaction.response.send_message(
+                "```text\n"
+                "decision: not_applicable\n"
+                "reason: admin intent not found\n"
+                "status: unknown\n"
+                "tx_signature: unknown\n"
+                "```",
+                ephemeral=True,
+            )
+            return
+
+        intent_status = str(intent.get('status') or '').strip().lower()
+        if intent_status in {'completed', 'failed', 'cancelled'}:
+            await interaction.response.send_message(
+                "```text\n"
+                "decision: not_applicable\n"
+                f"reason: intent already terminal ({intent_status})\n"
+                f"status: {intent_status or 'unknown'}\n"
+                "tx_signature: unknown\n"
+                "```",
+                ephemeral=True,
+            )
+            return
+
+        resolved_intent_id = str(intent.get('intent_id') or intent_id)
+        linked_statuses: List[str] = []
+        for payment_field in ('test_payment_id', 'final_payment_id'):
+            linked_payment_id = intent.get(payment_field)
+            if not linked_payment_id:
+                continue
+
+            payment = self.db_handler.get_payment_request(linked_payment_id, guild_id=guild_id)
+            if not payment:
+                continue
+
+            payment_status = str(payment.get('status') or '').strip().lower()
+            if payment_field == 'test_payment_id' and payment_status == 'confirmed':
+                linked_statuses.append(f"{linked_payment_id}:confirmed")
+                continue
+
+            if payment_status in {'submitted', 'confirmed', 'manual_hold'}:
+                await interaction.response.send_message(
+                    "```text\n"
+                    "decision: keep_in_hold\n"
+                    f"reason: linked payment {linked_payment_id} is {payment_status}; run /payment-resolve {linked_payment_id}\n"
+                    f"status: {intent_status or 'unknown'}\n"
+                    f"tx_signature: {_redact_wallet(payment.get('tx_signature'))}\n"
+                    "```",
+                    ephemeral=True,
+                )
+                return
+
+            if payment_status != 'cancelled':
+                cancelled = self.db_handler.cancel_payment(
+                    linked_payment_id,
+                    guild_id=guild_id,
+                    reason=f"Admin cancelled payment intent {resolved_intent_id}",
+                )
+                if not cancelled:
+                    await interaction.response.send_message(
+                        "```text\n"
+                        "decision: keep_in_hold\n"
+                        f"reason: linked payment {linked_payment_id} could not be cancelled from status {payment_status}\n"
+                        f"status: {intent_status or 'unknown'}\n"
+                        f"tx_signature: {_redact_wallet(payment.get('tx_signature'))}\n"
+                        "```",
+                        ephemeral=True,
+                    )
+                    return
+                payment_status = 'cancelled'
+
+            linked_statuses.append(f"{linked_payment_id}:{payment_status}")
+
+        updated_intent = self.db_handler.update_admin_payment_intent(
+            resolved_intent_id,
+            {'status': 'cancelled'},
+            guild_id,
+        )
+        if not updated_intent:
+            await interaction.response.send_message(
+                "```text\n"
+                "decision: keep_in_hold\n"
+                "reason: failed to cancel admin intent\n"
+                f"status: {intent_status or 'unknown'}\n"
+                "tx_signature: unknown\n"
+                "```",
+                ephemeral=True,
+            )
+            return
+
+        status_detail = ', '.join(linked_statuses) if linked_statuses else 'no linked payments'
+        await interaction.response.send_message(
+            "```text\n"
+            "decision: intent_cancelled\n"
+            f"reason: cleared admin intent; {status_detail}\n"
+            "status: cancelled\n"
+            "tx_signature: unknown\n"
+            "```",
+            ephemeral=True,
+        )
+
+    def _find_admin_intent_for_resolve(
+        self,
+        intent_id: str,
+        guild_id: Optional[int],
+    ) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+        is_full_uuid = False
+        try:
+            is_full_uuid = str(UUID(intent_id)) == intent_id.lower()
+        except (TypeError, ValueError):
+            is_full_uuid = False
+
+        if not is_full_uuid:
+            list_active_intents = getattr(self.db_handler, 'list_active_intents', None)
+            if not callable(list_active_intents):
+                return None, None
+            matches = [
+                intent
+                for intent in (list_active_intents(guild_id) or [])
+                if str(intent.get('intent_id') or '').startswith(intent_id)
+            ]
+            if len(matches) > 1:
+                return None, f"intent prefix {intent_id} matched multiple active intents"
+            if matches:
+                return matches[0], None
+            return None, None
+
+        try:
+            return self.db_handler.get_admin_payment_intent(intent_id, guild_id), None
+        except Exception as exc:
+            logger.warning("[PaymentUICog] Failed to fetch admin intent %s: %s", intent_id, exc)
+            return None, None
 
     async def _resolve_destination(
         self,
