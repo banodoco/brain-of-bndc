@@ -1359,6 +1359,89 @@ async def test_concurrent_admin_payment_producer_ref_collision(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_admin_chat_microgrants_thread_uses_grants_provider(monkeypatch):
+    guild = SimpleNamespace(id=1)
+    grant_thread = FakeChannel(channel_id=1001, guild=guild, parent_id=55)
+    db = FakeIntentDB()
+    db.wallets[(1, 42, "solana")] = {
+        "wallet_id": "wallet-verified",
+        "guild_id": 1,
+        "discord_user_id": 42,
+        "chain": "solana",
+        "wallet_address": VALID_SOL_ADDRESS,
+        "verified_at": "2026-04-10T00:00:00Z",
+    }
+    payment_service = PaymentService(
+        db_handler=db,
+        providers={"solana_grants": FakeProvider(), "solana_payouts": FakeProvider()},
+        test_payment_amount=0.01,
+    )
+    bot = FakeBot(grant_thread, payment_service=payment_service)
+    cog = AdminChatCog(bot, db, sharer=object())
+    cog.payment_service = payment_service
+    bot._admin_chat_cog = cog
+    monkeypatch.setattr("src.features.admin_chat.tools.time.time", lambda: 1_700_000_000.001)
+
+    result = await execute_initiate_payment(
+        bot,
+        db,
+        {
+            "guild_id": 1,
+            "source_channel_id": 1001,
+            "recipient_user_id": "42",
+            "amount_sol": 2.4,
+            "admin_user_id": 999,
+        },
+    )
+
+    assert result["success"] is True
+    payment = next(iter(db.payments.values()))
+    assert payment["provider"] == "solana_grants"
+    assert payment["notify_thread_id"] == 1001
+
+
+@pytest.mark.anyio
+async def test_admin_chat_non_microgrants_thread_uses_payouts_provider(monkeypatch):
+    guild = SimpleNamespace(id=1)
+    channel = FakeChannel(channel_id=77, guild=guild)
+    db = FakeIntentDB()
+    db.wallets[(1, 42, "solana")] = {
+        "wallet_id": "wallet-verified",
+        "guild_id": 1,
+        "discord_user_id": 42,
+        "chain": "solana",
+        "wallet_address": VALID_SOL_ADDRESS,
+        "verified_at": "2026-04-10T00:00:00Z",
+    }
+    payment_service = PaymentService(
+        db_handler=db,
+        providers={"solana_grants": FakeProvider(), "solana_payouts": FakeProvider()},
+        test_payment_amount=0.01,
+    )
+    bot = FakeBot(channel, payment_service=payment_service)
+    cog = AdminChatCog(bot, db, sharer=object())
+    cog.payment_service = payment_service
+    bot._admin_chat_cog = cog
+    monkeypatch.setattr("src.features.admin_chat.tools.time.time", lambda: 1_700_000_000.001)
+
+    result = await execute_initiate_payment(
+        bot,
+        db,
+        {
+            "guild_id": 1,
+            "source_channel_id": 77,
+            "recipient_user_id": "42",
+            "amount_sol": 2.4,
+            "admin_user_id": 999,
+        },
+    )
+
+    assert result["success"] is True
+    payment = next(iter(db.payments.values()))
+    assert payment["provider"] == "solana_payouts"
+
+
+@pytest.mark.anyio
 async def test_wallet_reply_valid():
     guild = SimpleNamespace(id=1)
     channel = FakeChannel(guild=guild)

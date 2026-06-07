@@ -410,6 +410,33 @@ class AdminChatCog(commands.Cog):
             'notify_thread_id': channel.id if parent_id else None,
         }
 
+    def _resolve_admin_payment_provider(self, channel) -> str:
+        """Choose the funding provider for admin-triggered payments from channel context."""
+        server_config = getattr(self.db_handler, 'server_config', None) if self.db_handler else None
+        if not server_config:
+            return 'solana_payouts'
+
+        try:
+            server = server_config.get_first_server_with_field('grants_channel_id', require_write=True)
+        except Exception as exc:
+            logger.warning("[AdminChat] Failed to resolve grants channel for payment provider: %s", exc)
+            return 'solana_payouts'
+
+        grants_channel_id = server.get('grants_channel_id') if server else None
+        if not grants_channel_id:
+            return 'solana_payouts'
+
+        try:
+            grants_channel_id = int(grants_channel_id)
+        except (TypeError, ValueError):
+            logger.warning("[AdminChat] Invalid grants_channel_id in server config: %r", grants_channel_id)
+            return 'solana_payouts'
+
+        parent_id = getattr(channel, 'parent_id', None)
+        if parent_id == grants_channel_id:
+            return 'solana_grants'
+        return 'solana_payouts'
+
     def _get_payment_ui_cog(self):
         return (
             getattr(self.bot, 'payment_ui_cog', None)
@@ -562,13 +589,14 @@ class AdminChatCog(commands.Cog):
             return
 
         destinations = self._resolve_payment_destinations(channel)
+        provider = self._resolve_admin_payment_provider(channel)
         test_payment = await self.payment_service.request_payment(
             producer='admin_chat',
             producer_ref=str(intent['producer_ref']),
             guild_id=int(intent['guild_id']),
             recipient_wallet=wallet_record['wallet_address'],
             chain='solana',
-            provider='solana_payouts',
+            provider=provider,
             is_test=True,
             confirm_channel_id=destinations['confirm_channel_id'],
             confirm_thread_id=destinations['confirm_thread_id'],
@@ -613,13 +641,14 @@ class AdminChatCog(commands.Cog):
             return None
 
         destinations = self._resolve_payment_destinations(channel)
+        provider = self._resolve_admin_payment_provider(channel)
         payment = await self.payment_service.request_payment(
             producer='admin_chat',
             producer_ref=str(intent['producer_ref']),
             guild_id=int(intent['guild_id']),
             recipient_wallet=wallet_record['wallet_address'],
             chain='solana',
-            provider='solana_payouts',
+            provider=provider,
             is_test=False,
             amount_token=float(amount_sol),
             confirm_channel_id=destinations['confirm_channel_id'],
@@ -688,13 +717,14 @@ class AdminChatCog(commands.Cog):
 
         intent_id = str(uuid4())
         destinations = self._resolve_payment_destinations(channel)
+        provider = self._resolve_admin_payment_provider(channel)
         payment = await self.payment_service.request_payment(
             producer='admin_chat',
             producer_ref=str(producer_ref),
             guild_id=int(guild_id),
             recipient_wallet=wallet_record['wallet_address'],
             chain='solana',
-            provider='solana_payouts',
+            provider=provider,
             is_test=False,
             amount_token=float(amount_sol),
             confirm_channel_id=destinations['confirm_channel_id'],
