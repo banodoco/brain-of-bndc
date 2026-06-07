@@ -3187,6 +3187,26 @@ async def execute_retry_payment(bot, db_handler, params: Dict[str, Any]) -> Dict
                 "payment": _redact_payment_row(row or {"payment_id": payment_id}),
             }
 
+        source_channel_id = params.get('source_channel_id')
+        admin_chat_cog = bot.get_cog('AdminChatCog') if hasattr(bot, 'get_cog') else None
+        if source_channel_id and admin_chat_cog and hasattr(admin_chat_cog, '_resolve_admin_payment_provider'):
+            try:
+                channel = bot.get_channel(int(source_channel_id))
+                if not channel:
+                    channel = await bot.fetch_channel(int(source_channel_id))
+                target_provider = admin_chat_cog._resolve_admin_payment_provider(channel)
+                row = db_handler.get_payment_request(payment_id, guild_id=guild_id)
+                if row and target_provider and row.get('provider') != target_provider:
+                    updater = getattr(db_handler, '_update_payment_request_record', None)
+                    if callable(updater):
+                        updater(payment_id, {'provider': target_provider}, guild_id=guild_id)
+            except Exception as exc:
+                logger.warning(
+                    "[AdminChat] Could not repair provider before retrying payment %s: %s",
+                    payment_id,
+                    exc,
+                )
+
         success = db_handler.requeue_payment(payment_id, guild_id=guild_id)
         if not success:
             return {"success": False, "error": "Payment is not in a retryable failed state"}

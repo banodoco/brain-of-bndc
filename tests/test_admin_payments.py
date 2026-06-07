@@ -399,6 +399,7 @@ class FakeIntentDB:
         self.supabase = FakeIntentSupabase(self)
         self.server_config = SimpleNamespace(
             get_enabled_servers=lambda require_write=False: [{"guild_id": 1, "enabled": True, "write_enabled": True}],
+            resolve_guild_id=lambda explicit=None, require_write=False: int(explicit) if explicit is not None else 1,
             resolve_payment_destinations=lambda guild_id, channel_id, producer: None,
             is_guild_enabled=lambda guild_id: True,
             get_first_server_with_field=lambda field, require_write=False: {"guild_id": 1, "grants_channel_id": 55},
@@ -449,6 +450,33 @@ class FakeIntentDB:
         if payment and guild_id is not None and payment.get("guild_id") != guild_id:
             return None
         return dict(payment) if payment else None
+
+    def _update_payment_request_record(self, payment_id, payload, guild_id=None, allowed_statuses=None):
+        payment = self.payments.get(payment_id)
+        if not payment:
+            return False
+        if guild_id is not None and payment.get("guild_id") != guild_id:
+            return False
+        if allowed_statuses and payment.get("status") not in allowed_statuses:
+            return False
+        payment.update(dict(payload))
+        return True
+
+    def requeue_payment(self, payment_id, retry_after=None, guild_id=None):
+        return self._update_payment_request_record(
+            payment_id,
+            {
+                "status": "queued",
+                "tx_signature": None,
+                "send_phase": None,
+                "submitted_at": None,
+                "completed_at": None,
+                "retry_after": retry_after,
+                "last_error": None,
+            },
+            guild_id=guild_id,
+            allowed_statuses=["failed"],
+        )
 
     def has_active_payment_or_intent(self, guild_id, user_id):
         return (int(guild_id), int(user_id)) in self.active_payment_or_intent_users
@@ -1439,6 +1467,51 @@ async def test_admin_chat_non_microgrants_thread_uses_payouts_provider(monkeypat
     assert result["success"] is True
     payment = next(iter(db.payments.values()))
     assert payment["provider"] == "solana_payouts"
+
+
+@pytest.mark.anyio
+async def test_retry_payment_repairs_microgrants_provider_before_requeue(monkeypatch):
+    monkeypatch.setenv("ADMIN_USER_ID", "999")
+    monkeypatch.setattr(admin_tools, "_resolve_guild_id", lambda params=None: 1)
+    guild = SimpleNamespace(id=1)
+    grant_thread = FakeChannel(channel_id=1001, guild=guild, parent_id=55)
+    db = FakeIntentDB()
+    db.payments["payment-final"] = {
+        "payment_id": "payment-final",
+        "guild_id": 1,
+        "producer": "admin_chat",
+        "provider": "solana_payouts",
+        "status": "failed",
+        "tx_signature": None,
+        "is_test": False,
+    }
+    payment_service = FakeAdminPaymentService()
+    payment_service.reconcile_with_chain = AsyncMock(
+        return_value=SimpleNamespace(
+            decision="allow_requeue",
+            reason="no prior signature",
+            tx_signature=None,
+        )
+    )
+    bot = FakeBot(grant_thread, payment_service=payment_service)
+    cog = AdminChatCog(bot, db, sharer=object())
+    bot._admin_chat_cog = cog
+
+    result = await admin_tools.execute_retry_payment(
+        bot,
+        db,
+        {
+            "guild_id": 1,
+            "source_channel_id": 1001,
+            "payment_id": "payment-final",
+            "admin_user_id": 999,
+        },
+    )
+
+    assert result["success"] is True
+    assert db.payments["payment-final"]["status"] == "queued"
+    assert db.payments["payment-final"]["provider"] == "solana_grants"
+    assert result["payment"]["provider"] == "solana_grants"
 
 
 @pytest.mark.anyio
