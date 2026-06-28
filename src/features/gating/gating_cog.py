@@ -298,10 +298,18 @@ class GatingCog(commands.Cog):
     # ═══════════════════════════════════════════════════════════════
 
     async def _recover_untracked_intro(self, payload: discord.RawReactionActionEvent) -> int | None:
-        """Recover an intro that wasn't in `_pending_messages` (e.g. bot was offline
-        when it was posted). Returns the author's member_id if the message looks like
-        a legitimate pending intro, else None. Persists the recovery so future reactions
-        on the same message are tracked normally.
+        """Resolve a reaction on a message that wasn't in `_pending_messages`.
+
+        If the author already has an open pending intro, the reaction is resolved to it
+        so the member can be admitted from ANY of their messages in the intro channel
+        (replies and follow-ups included), not just the originally-tracked intro. This
+        matters because approvers frequently react to a member's later message or reply
+        rather than to the exact tracked intro.
+
+        Otherwise, a pending intro is created on the fly for the reacted message — replies
+        included — so an approver reacting to ANY of the member's messages in the intro
+        channel admits them. Returns the author's member_id, else None. Persists the result
+        so future reactions on the same message are tracked normally.
         """
         cfg = self._get_gating_config(payload.guild_id)
         if not cfg:
@@ -325,12 +333,6 @@ class GatingCog(commands.Cog):
         if message.author.bot:
             return None
 
-        # Skip replies to other people (conversations, not intros) — same rule as on_message.
-        if (message.reference and message.reference.resolved
-                and getattr(message.reference.resolved, 'author', None)
-                and message.reference.resolved.author.id != message.author.id):
-            return None
-
         author_member = guild.get_member(message.author.id)
         if not author_member:
             try:
@@ -346,14 +348,20 @@ class GatingCog(commands.Cog):
 
         existing = self.db.get_pending_intro_by_member(member_id, guild_id=payload.guild_id)
         if existing:
-            # Pending intro exists in DB but this specific message wasn't tracked in memory.
+            # The member already has an open pending intro, but the approver reacted to a
+            # different message of theirs in the intro channel (often a reply or a later
+            # message). Resolve the reaction to their pending intro so they can be admitted
+            # from ANY of their messages — not just the originally-tracked intro.
             self._pending_messages[payload.message_id] = member_id
             logger.info(
-                f"GatingCog: recovered untracked message {payload.message_id} "
-                f"for existing pending intro of {member_id}"
+                f"GatingCog: resolved reaction on message {payload.message_id} "
+                f"to existing pending intro of {member_id}"
             )
             return member_id
 
+        # No existing pending intro. Any of the member's messages in the intro channel
+        # (including replies) can seed one on the fly, so an approver reacting to any of
+        # their messages admits them.
         try:
             self.db.create_pending_intro(
                 member_id, payload.message_id, payload.channel_id, guild_id=payload.guild_id
