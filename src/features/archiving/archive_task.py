@@ -800,7 +800,17 @@ class ArchiveTask:
                 if isinstance(actual_channel, discord.ForumChannel):
                     ch_type = "forum"
                 elif isinstance(actual_channel, discord.TextChannel):
-                    ch_type = "text"
+                    # discord.py has no NewsChannel class — news channels ARE
+                    # TextChannel instances with is_news() True.
+                    ch_type = "news" if actual_channel.is_news() else "text"
+                elif isinstance(actual_channel, discord.Thread):
+                    # A forum-post thread IS a forum post (label it 'forum' so the
+                    # forum is detectable); a reply-thread inside a text channel is
+                    # 'thread'. Previously left NULL, which made newer forums
+                    # undetectable from channel_type (bug 2026-08-05). Defensive —
+                    # normally the code resolves to message.channel.parent first.
+                    parent = getattr(actual_channel, "parent", None)
+                    ch_type = "forum" if isinstance(parent, discord.ForumChannel) else "thread"
                 elif isinstance(actual_channel, discord.VoiceChannel):
                     ch_type = "voice"
                 elif isinstance(actual_channel, discord.StageChannel):
