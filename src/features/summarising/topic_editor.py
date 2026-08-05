@@ -1123,24 +1123,35 @@ class TopicEditor:
             raise
 
     async def _invoke_anthropic(self, messages_arg: Sequence[Dict[str, Any]]) -> Any:
-        """One-shot LLM call. The agent loop in `run_once` drives multi-turn behavior."""
-        system_prompt = self._system_prompt()
-        client = getattr(self.llm_client, "client", self.llm_client)
-        if hasattr(client, "messages") and hasattr(client.messages, "create"):
-            return await client.messages.create(
+        """One-shot LLM call. The agent loop in `run_once` drives multi-turn behavior.
+
+        A per-call timeout prevents a hung provider request (which has happened in
+        prod with a slow/stalled LLM call) from bricking the run forever. On timeout
+        the exception propagates to `run_once`, which marks the run failed and
+        releases the single-run lease so the next hourly pass can retry.
+        """
+        timeout_seconds = self._env_float("TOPIC_EDITOR_LLM_TIMEOUT_SECONDS", 600.0)
+
+        async def _call() -> Any:
+            system_prompt = self._system_prompt()
+            client = getattr(self.llm_client, "client", self.llm_client)
+            if hasattr(client, "messages") and hasattr(client.messages, "create"):
+                return await client.messages.create(
+                    model=self.model,
+                    max_tokens=4096,
+                    system=system_prompt,
+                    messages=list(messages_arg),
+                    tools=self._agent_tools(),
+                )
+            return await self.llm_client.generate_chat_completion(
                 model=self.model,
-                max_tokens=4096,
-                system=system_prompt,
+                system_prompt=system_prompt,
                 messages=list(messages_arg),
+                max_tokens=4096,
                 tools=self._agent_tools(),
             )
-        return await self.llm_client.generate_chat_completion(
-            model=self.model,
-            system_prompt=system_prompt,
-            messages=list(messages_arg),
-            max_tokens=4096,
-            tools=self._agent_tools(),
-        )
+
+        return await asyncio.wait_for(_call(), timeout=timeout_seconds)
 
     def _system_prompt(self) -> str:
         if not self.actor_brief:

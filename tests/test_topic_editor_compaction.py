@@ -769,3 +769,29 @@ def test_compaction_recap_includes_active_topics_rejections_and_created_sources(
     assert "--- Topics created this run ---" in recap
     assert "canonical_key=alpha topic_id=topic-9" in recap
     assert "sources=100,101" in recap
+
+
+def test_invoke_anthropic_times_out_on_hanging_provider(monkeypatch):
+    """A hung provider call must raise TimeoutError so run_once can fail the run."""
+    import asyncio as _asyncio
+    from types import SimpleNamespace as _NS
+    from src.features.summarising.topic_editor import TopicEditor
+
+    class _HangingClient:
+        async def generate_chat_completion(self, *a, **k):
+            await _asyncio.sleep(60)
+
+    class _FakeDB:
+        server_config = _NS(bndc_guild_id=1, get_server_field=lambda *a, **k: None,
+                            get_server=lambda *a, **k: None,
+                            get_first_server_with_field=lambda *a, **k: None,
+                            resolve_guild_id=lambda *a, **k: 1)
+        def get_topics(self, *a, **k): return []
+        def get_topic_aliases(self, *a, **k): return []
+        def get_archived_messages_after_checkpoint(self, *a, **k): return []
+        def __getattr__(self, name): return lambda *a, **k: []
+
+    monkeypatch.setenv("TOPIC_EDITOR_LLM_TIMEOUT_SECONDS", "0.2")
+    editor = TopicEditor(db_handler=_FakeDB(), llm_client=_HangingClient(), guild_id=1, live_channel_id=2, environment="prod")
+    with pytest.raises(_asyncio.TimeoutError):
+        _asyncio.run(editor._invoke_anthropic([{"role": "user", "content": "hi"}]))
