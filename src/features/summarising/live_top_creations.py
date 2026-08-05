@@ -73,6 +73,13 @@ class LiveTopCreations:
     async def run_once(self, trigger: str = "scheduled") -> Dict[str, Any]:
         guild_id = self._resolve_guild_id()
         live_channel_id = self._resolve_top_channel_id(guild_id)
+        # Prod must not fail open: without a configured top-gens channel we skip
+        # rather than silently repost to the summary channel.
+        if live_channel_id is None and self.environment == "prod":
+            self.logger.error(
+                "[LiveTopCreations] prod: no valid top-gens channel (TOP_GEN_CHANNEL/TOP_GENS_ID); skipping"
+            )
+            return {"status": "skipped", "reason": "no_top_gens_channel"}
         art_channel_id = self._resolve_art_channel_id(guild_id)
         checkpoint_key = self._checkpoint_key(guild_id, live_channel_id)
 
@@ -93,16 +100,28 @@ class LiveTopCreations:
             if not checkpoint.get("last_message_created_at") and checkpoint.get("last_source_created_at"):
                 checkpoint["last_message_created_at"] = checkpoint["last_source_created_at"]
 
-        # Dev: synthesize an initial checkpoint if none exists
-        if checkpoint is None and self.environment == "dev":
-            lookback = max(1, int(self.dry_run_lookback_hours or 6))
+        # Synthesize an initial checkpoint if none exists (dev AND prod). In prod a
+        # missing checkpoint would otherwise make get_archived_messages_after_checkpoint
+        # fetch the OLDEST archived messages and post a first-deploy burst of stale
+        # items; anchor it at now - lookback so we start from recent history.
+        if checkpoint is None:
+            if self.environment == "dev":
+                lookback = max(1, int(self.dry_run_lookback_hours or 6))
+            else:
+                lookback = max(1, self._env_int("LIVE_TOP_CREATIONS_COLD_START_LOOKBACK_HOURS", 48))
+            cold_start_created_at = (
+                datetime.now(timezone.utc) - timedelta(hours=lookback)
+            ).isoformat()
             checkpoint = {
-                "last_message_created_at": (
-                    datetime.now(timezone.utc) - timedelta(hours=lookback)
-                ).isoformat()
+                "last_message_created_at": cold_start_created_at,
+                "last_source_created_at": cold_start_created_at,
+                "last_message_id": None,
+                "last_source_message_id": None,
             }
+            env_label = "dev" if self.environment == "dev" else "prod"
             self.logger.info(
-                "[LiveTopCreations] dev: synthesized initial checkpoint with %sh lookback",
+                "[LiveTopCreations] %s: synthesized initial checkpoint with %sh lookback",
+                env_label,
                 lookback,
             )
 
@@ -188,7 +207,9 @@ class LiveTopCreations:
             channel = await self._resolve_channel(live_channel_id)
             posts: List[Dict[str, Any]] = []
             db_skip_count = 0
+            processed_candidates: List[Dict[str, Any]] = []
             for candidate in pending[: LiveTopCreations.MAX_POSTS_SAFETY_BELT]:
+                processed_candidates.append(candidate)
                 post = await self._publish_candidate(channel, candidate, run_id, guild_id, live_channel_id)
                 if post.get("status") == "skipped_duplicate":
                     db_skip_count += 1
@@ -196,12 +217,31 @@ class LiveTopCreations:
                 posts.append(post)
                 posted_keys.add(candidate["duplicate_key"])
 
+            # Advance the cursor only to the newest message that is NOT an
+            # unprocessed overflow candidate. When more candidates were pending
+            # than the safety belt allows, the overflow (pending[50:]) must remain
+            # eligible next run regardless of age/reaction ordering — anchoring on
+            # the whole batch's newest message would skip it forever, and anchoring
+            # on only the processed subset would drop an older, lower-reaction
+            # overflow candidate that falls behind the processed cursor.
+            checkpoint_messages = messages
+            if len(pending) > LiveTopCreations.MAX_POSTS_SAFETY_BELT:
+                overflow_ids = {
+                    pending[index]["source_message_id"]
+                    for index in range(LiveTopCreations.MAX_POSTS_SAFETY_BELT, len(pending))
+                    if pending[index].get("source_message_id") is not None
+                }
+                checkpoint_messages = [
+                    message for message in messages
+                    if message.get("message_id") not in overflow_ids
+                ]
+
             checkpoint_after = await self._write_checkpoint(
                 checkpoint_key,
                 guild_id,
                 live_channel_id,
                 run_id,
-                messages,
+                checkpoint_messages,
                 posted_keys,
                 "completed",
                 skipped_count=skipped_count,
@@ -386,15 +426,25 @@ class LiveTopCreations:
         skipped_count: int,
     ) -> Optional[Dict[str, Any]]:
         newest = self._newest_message(messages)
+        if newest is None:
+            # Never overwrite a valid checkpoint with a null/empty cursor: a
+            # quiet hour (empty batch) or a failed read must leave the previous
+            # cursor untouched so the next pass does not cold-start again.
+            self.logger.info(
+                "[LiveTopCreations] not writing checkpoint for run_id=%s status=%s: no source messages to derive a cursor from",
+                run_id,
+                status,
+            )
+            return None
         return await self._call_db(
             self.db.upsert_live_top_creation_checkpoint,
             {
                 "checkpoint_key": checkpoint_key,
                 "guild_id": guild_id,
                 "channel_id": live_channel_id,
-                "last_source_id": str(newest.get("message_id")) if newest else None,
-                "last_source_message_id": newest.get("message_id") if newest else None,
-                "last_source_created_at": newest.get("created_at") if newest else None,
+                "last_source_id": str(newest.get("message_id")),
+                "last_source_message_id": newest.get("message_id"),
+                "last_source_created_at": newest.get("created_at"),
                 "last_run_id": run_id,
                 "state": {
                     "last_status": status,
@@ -405,6 +455,16 @@ class LiveTopCreations:
             environment=self.environment,
         )
 
+    @staticmethod
+    def _env_int(name: str, default: int) -> int:
+        value = os.getenv(name)
+        if value:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                pass
+        return default
+
     def _resolve_guild_id(self) -> Optional[int]:
         if self.guild_id is not None:
             return self.guild_id
@@ -414,11 +474,26 @@ class LiveTopCreations:
         return None
 
     def _resolve_top_channel_id(self, guild_id: Optional[int]) -> Optional[int]:
-        """Resolve the channel ID for top-creations posts (summary channel only)."""
+        """Resolve the channel ID for top-creations posts: #top-gens via TOP_GEN_CHANNEL/TOP_GENS_ID,
+        with dev variants. In prod we fail closed: no summary-channel fallback, so a bare
+        deployment cannot silently repost to the wrong channel."""
         if self.environment == "dev":
-            env_value = os.getenv("DEV_SUMMARY_CHANNEL_ID") or os.getenv("DEV_LIVE_UPDATE_CHANNEL_ID")
+            env_names = ("DEV_TOP_GENS_ID", "DEV_TOP_GEN_CHANNEL", "DEV_SUMMARY_CHANNEL_ID", "DEV_LIVE_UPDATE_CHANNEL_ID")
+        else:
+            env_names = ("TOP_GEN_CHANNEL", "TOP_GENS_ID")
+        for name in env_names:
+            env_value = os.getenv(name)
             if env_value:
-                return int(env_value)
+                try:
+                    parsed = int(env_value)
+                    if parsed > 0:
+                        return parsed
+                except (TypeError, ValueError):
+                    continue
+        # Prod fails closed: missing/malformed config → None, caller skips.
+        if self.environment != "dev":
+            return None
+        # Dev-only fallback to the summary channel.
         server_config = getattr(self.db, "server_config", None)
         if server_config and guild_id is not None:
             if hasattr(server_config, "get_server_field"):

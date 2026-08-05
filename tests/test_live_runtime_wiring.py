@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from types import SimpleNamespace
 
 from src.features.summarising.summariser_cog import SummarizerCog
@@ -252,7 +253,34 @@ def test_production_live_pass_can_be_disabled_without_disabling_digest(monkeypat
     # LIVE_UPDATES_ENABLED can disable the hourly editor pass without disabling
     # the daily digest, which is on by default.
     monkeypatch.setenv("LIVE_UPDATES_ENABLED", "false")
-    monkeypatch.delenv("LIVE_TOP_CREATIONS_ENABLED", raising=False)
+    monkeypatch.setenv("LIVE_TOP_CREATIONS_ENABLED", "false")
+    monkeypatch.delenv("DAILY_DIGEST_ENABLED", raising=False)
+    bot = FakeBot(summary_now=False, dev_mode=False)
+    cog = SummarizerCog(
+        bot,
+        live_update_editor=FakeLiveEditor(),
+        live_top_creations=FakeTopCreations(),
+        start_loops=False,
+    )
+    cog.run_live_pass = FakeLoop()
+    cog.run_daily_digest = FakeLoop()
+    cog.__init__(
+        bot,
+        live_update_editor=FakeLiveEditor(),
+        live_top_creations=FakeTopCreations(),
+        start_loops=True,
+    )
+
+    assert cog.live_updates_enabled is False
+    assert cog.live_top_creations_enabled is False
+    assert cog.daily_digest_enabled is True
+    assert cog.run_live_pass.started is False
+    assert cog.run_daily_digest.started is True
+
+
+def test_production_live_loops_disabled_when_explicitly_off(monkeypatch):
+    monkeypatch.setenv("LIVE_UPDATES_ENABLED", "false")
+    monkeypatch.setenv("LIVE_TOP_CREATIONS_ENABLED", "false")
     monkeypatch.delenv("DAILY_DIGEST_ENABLED", raising=False)
     bot = FakeBot(summary_now=False, dev_mode=False)
     cog = SummarizerCog(
@@ -320,8 +348,88 @@ def test_dev_live_loops_run_hourly_without_env(monkeypatch):
     )
 
     assert cog.live_updates_enabled is True
-    assert cog.live_top_creations_enabled is False
+    assert cog.live_top_creations_enabled is True
     assert cog.daily_digest_enabled is True
     assert cog.run_live_pass.started is True
     assert cog.run_live_pass.interval_minutes == 60
     assert cog.run_daily_digest.started is True
+
+
+def test_live_top_creations_enabled_by_default(monkeypatch):
+    monkeypatch.delenv("LIVE_TOP_CREATIONS_ENABLED", raising=False)
+    bot = FakeBot(summary_now=False, dev_mode=False)
+    cog = make_cog(bot)
+
+    assert cog.live_top_creations_enabled is True
+
+
+def test_run_live_pass_invokes_top_creations_when_enabled():
+    async def run():
+        bot = FakeBot(summary_now=False, dev_mode=False)
+        live_editor = FakeLiveEditor()
+        top_creations = FakeTopCreations()
+        cog = SummarizerCog(
+            bot,
+            live_update_editor=live_editor,
+            live_top_creations=top_creations,
+            start_loops=False,
+        )
+        cog.live_updates_enabled = True
+        cog.live_top_creations_enabled = True
+        cog._last_top_creations_ts = None
+        cog.live_top_creations_interval_hours = 0
+
+        await cog.run_live_pass()
+
+        assert top_creations.triggers == ["scheduled"]
+        assert live_editor.triggers == ["scheduled"]
+
+    asyncio.run(run())
+
+
+def test_run_live_pass_respects_top_creations_interval():
+    async def run():
+        bot = FakeBot(summary_now=False, dev_mode=False)
+        live_editor = FakeLiveEditor()
+        top_creations = FakeTopCreations()
+        cog = SummarizerCog(
+            bot,
+            live_update_editor=live_editor,
+            live_top_creations=top_creations,
+            start_loops=False,
+        )
+        cog.live_updates_enabled = True
+        cog.live_top_creations_enabled = True
+        cog._last_top_creations_ts = time.monotonic()
+        cog.live_top_creations_interval_hours = 6
+
+        await cog.run_live_pass()
+
+        assert top_creations.triggers == []
+        assert live_editor.triggers == ["scheduled"]
+
+    asyncio.run(run())
+
+
+def test_constructor_builds_live_top_creations_when_not_injected(monkeypatch):
+    import src.features.summarising.summariser_cog as summariser_cog_module
+
+    constructed = {}
+
+    class FakeLiveTopCreations:
+        def __init__(self, db_handler, *, bot=None, environment=None, **kwargs):
+            constructed["db_handler"] = db_handler
+            constructed["bot"] = bot
+            constructed["environment"] = environment
+
+    monkeypatch.setattr(summariser_cog_module, "LiveTopCreations", FakeLiveTopCreations)
+    bot = FakeBot(summary_now=False, dev_mode=False)
+    cog = SummarizerCog(
+        bot,
+        live_update_editor=FakeLiveEditor(),
+        start_loops=False,
+    )
+
+    assert constructed["db_handler"] is bot.db_handler
+    assert constructed["bot"] is bot
+    assert constructed["environment"] == "prod"

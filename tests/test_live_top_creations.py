@@ -1,5 +1,6 @@
 import asyncio
 import json
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from src.features.summarising.live_top_creations import LiveTopCreations
@@ -113,7 +114,8 @@ def _message(message_id, *, channel_id=10, filename="clip.mp4", reactions=5, con
     }
 
 
-def test_live_top_creations_posts_and_persists_ordered_message_ids_without_daily_summary():
+def test_live_top_creations_posts_and_persists_ordered_message_ids_without_daily_summary(monkeypatch):
+    monkeypatch.setenv("TOP_GEN_CHANNEL", "2")
     channel = FakeChannel()
     db = FakeDB(messages=[
         _message(101, filename="clip.mp4", reactions=7),
@@ -135,7 +137,8 @@ def test_live_top_creations_posts_and_persists_ordered_message_ids_without_daily
     assert not hasattr(service, "generate_summary")
 
 
-def test_live_top_creations_disables_mentions_and_sanitizes_tags():
+def test_live_top_creations_disables_mentions_and_sanitizes_tags(monkeypatch):
+    monkeypatch.setenv("TOP_GEN_CHANNEL", "2")
     channel = FakeChannel()
     db = FakeDB(messages=[
         _message(
@@ -156,13 +159,14 @@ def test_live_top_creations_disables_mentions_and_sanitizes_tags():
     assert channel.send_kwargs[0].get("allowed_mentions") is not None
 
 
-def test_live_top_creations_suppresses_repeated_posts_from_checkpoint_and_db_dedupe():
+def test_live_top_creations_suppresses_repeated_posts_from_checkpoint_and_db_dedupe(monkeypatch):
     """Checkpoint dedupe + DB-level dedupe survive checkpoint reset.
 
     Run 1: message 201 gets posted, checkpoint records duplicate_keys.
     Run 2: same message should be suppressed by checkpoint (no new messages).
     Even if checkpoint resets, the DB dedupe lookup blocks re-posting.
     """
+    monkeypatch.setenv("TOP_GEN_CHANNEL", "2")
     channel = FakeChannel()
     checkpoint = {
         "state": {
@@ -192,7 +196,8 @@ def test_live_top_creations_suppresses_repeated_posts_from_checkpoint_and_db_ded
     assert db.runs[-1]["status"] == "skipped"
 
 
-def test_live_top_creations_splits_overlong_posts_and_preserves_id_order():
+def test_live_top_creations_splits_overlong_posts_and_preserves_id_order(monkeypatch):
+    monkeypatch.setenv("TOP_GEN_CHANNEL", "2")
     channel = FakeChannel()
     long_media_message = _message(301, filename="clip.mp4", reactions=8)
     long_media_message["attachments"] = json.dumps([{
@@ -216,6 +221,8 @@ def test_live_top_creations_splits_overlong_posts_and_preserves_id_order():
 
 def test_live_top_creations_dev_env_posts_and_persists_state(monkeypatch):
     """Dev env publishes to Discord AND persists state (was dry_run which skipped DB)."""
+    monkeypatch.delenv("DEV_TOP_GENS_ID", raising=False)
+    monkeypatch.delenv("DEV_TOP_GEN_CHANNEL", raising=False)
     monkeypatch.delenv("DEV_SUMMARY_CHANNEL_ID", raising=False)
     monkeypatch.delenv("DEV_LIVE_UPDATE_CHANNEL_ID", raising=False)
     monkeypatch.delenv("DEV_ART_CHANNEL_ID", raising=False)
@@ -243,6 +250,8 @@ def test_live_top_creations_dev_env_posts_and_persists_state(monkeypatch):
 
 def test_live_top_creations_dev_env_resolves_summary_channel(monkeypatch):
     """Dev env resolves DEV_SUMMARY_CHANNEL_ID (not a separate top-gens channel)."""
+    monkeypatch.delenv("DEV_TOP_GENS_ID", raising=False)
+    monkeypatch.delenv("DEV_TOP_GEN_CHANNEL", raising=False)
     monkeypatch.setenv("DEV_SUMMARY_CHANNEL_ID", "555")
     channel = FakeChannel()
     bot = FakeBot(channel)
@@ -266,10 +275,11 @@ def test_live_top_creations_dev_env_resolves_summary_channel(monkeypatch):
     assert service._resolve_top_channel_id(1) == 555
 
 
-def test_live_top_creations_dedupe_exactly_one_send_and_one_db_row():
+def test_live_top_creations_dedupe_exactly_one_send_and_one_db_row(monkeypatch):
     """Run twice over same archived message (reactions ≥ 5) → exactly one DB row and one Discord send.
 
     Second pass short-circuits via get_live_top_creation_post_by_duplicate_key."""
+    monkeypatch.setenv("TOP_GEN_CHANNEL", "2")
     # --- Pass 1 ---
     channel = FakeChannel()
     db = FakeDB(messages=[_message(601, filename="clip.mp4", reactions=7)])
@@ -306,3 +316,178 @@ def test_live_top_creations_dedupe_exactly_one_send_and_one_db_row():
     env_map = db2._posted_by_dup_key.get("prod", {})
     assert "top_generation:1:601" in env_map
     assert env_map["top_generation:1:601"]["duplicate_key"] == "top_generation:1:601"
+
+
+def test_resolve_top_channel_id_prod_uses_top_gen_channel(monkeypatch):
+    monkeypatch.setenv("TOP_GEN_CHANNEL", "111")
+    monkeypatch.delenv("TOP_GENS_ID", raising=False)
+    service = LiveTopCreations(FakeDB())
+
+    assert service._resolve_top_channel_id(1) == 111
+
+
+def test_resolve_top_channel_id_prod_uses_top_gens_id(monkeypatch):
+    monkeypatch.delenv("TOP_GEN_CHANNEL", raising=False)
+    monkeypatch.setenv("TOP_GENS_ID", "222")
+    service = LiveTopCreations(FakeDB())
+
+    assert service._resolve_top_channel_id(1) == 222
+
+
+def test_resolve_top_channel_id_dev_uses_dev_top_gens_id(monkeypatch):
+    monkeypatch.setenv("DEV_TOP_GENS_ID", "333")
+    monkeypatch.delenv("DEV_TOP_GEN_CHANNEL", raising=False)
+    monkeypatch.delenv("DEV_SUMMARY_CHANNEL_ID", raising=False)
+    monkeypatch.delenv("DEV_LIVE_UPDATE_CHANNEL_ID", raising=False)
+    service = LiveTopCreations(FakeDB(), environment="dev")
+
+    assert service._resolve_top_channel_id(1) == 333
+
+
+def test_resolve_top_channel_id_prod_fails_closed_without_env(monkeypatch):
+    monkeypatch.delenv("TOP_GEN_CHANNEL", raising=False)
+    monkeypatch.delenv("TOP_GENS_ID", raising=False)
+    service = LiveTopCreations(FakeDB())
+
+    # Prod must NOT fall back to the summary channel (2 via FakeConfig); a bare
+    # deployment should fail closed (None) so run_once skips instead of
+    # reposting to the wrong channel.
+    assert service._resolve_top_channel_id(1) is None
+
+
+def test_resolve_top_channel_id_dev_falls_back_to_summary_config(monkeypatch):
+    monkeypatch.delenv("DEV_TOP_GENS_ID", raising=False)
+    monkeypatch.delenv("DEV_TOP_GEN_CHANNEL", raising=False)
+    monkeypatch.delenv("DEV_SUMMARY_CHANNEL_ID", raising=False)
+    monkeypatch.delenv("DEV_LIVE_UPDATE_CHANNEL_ID", raising=False)
+    service = LiveTopCreations(FakeDB(), environment="dev")
+
+    # Dev keeps the summary-channel fallback (2 via FakeConfig).
+    assert service._resolve_top_channel_id(1) == 2
+
+
+def test_live_top_creations_prod_cold_start_synthesizes_checkpoint(monkeypatch):
+    """BLOCKER 1: prod cold start (None checkpoint) synthesizes a recent-history
+    checkpoint anchored ~48h back instead of fetching the oldest archived messages."""
+    monkeypatch.setenv("TOP_GEN_CHANNEL", "2")
+    monkeypatch.setenv("LIVE_TOP_CREATIONS_COLD_START_LOOKBACK_HOURS", "48")
+    channel = FakeChannel()
+    db = FakeDB(messages=[_message(1, filename="clip.mp4", reactions=7)])
+    service = LiveTopCreations(db, bot=FakeBot(channel), min_reactions=3)
+
+    result = asyncio.run(service.run_once("test"))
+
+    assert result["status"] == "completed"
+    checkpoint_before = db.runs[0]["checkpoint_before"]
+    assert checkpoint_before.get("last_message_created_at") is not None
+    ts = datetime.fromisoformat(checkpoint_before["last_message_created_at"].replace("Z", "+00:00"))
+    now = datetime.now(timezone.utc)
+    assert now - timedelta(hours=49) <= ts <= now - timedelta(hours=47)
+    # Mirrored source keys are present for the query filter.
+    assert checkpoint_before.get("last_source_created_at") == checkpoint_before["last_message_created_at"]
+
+
+def test_live_top_creations_prod_no_channel_skips(monkeypatch):
+    """BLOCKER 2: prod without TOP_GEN_CHANNEL/TOP_GENS_ID fails closed — no send, no run."""
+    monkeypatch.delenv("TOP_GEN_CHANNEL", raising=False)
+    monkeypatch.delenv("TOP_GENS_ID", raising=False)
+    channel = FakeChannel()
+    db = FakeDB(messages=[_message(1, filename="clip.mp4", reactions=7)])
+    service = LiveTopCreations(db, bot=FakeBot(channel), min_reactions=3)
+
+    assert service._resolve_top_channel_id(1) is None
+    result = asyncio.run(service.run_once("test"))
+
+    assert result == {"status": "skipped", "reason": "no_top_gens_channel"}
+    assert channel.sent == []
+    assert db.runs == []
+
+
+def test_live_top_creations_empty_batch_preserves_checkpoint(monkeypatch):
+    """BLOCKER 3: an empty batch / failed read must not clobber a valid checkpoint."""
+    monkeypatch.setenv("TOP_GEN_CHANNEL", "2")
+    channel = FakeChannel()
+    checkpoint = {
+        "last_message_created_at": "2026-05-08T09:00:00Z",
+        "last_source_message_id": 200,
+        "last_source_created_at": "2026-05-08T09:00:00Z",
+        "state": {"last_status": "completed", "posted_duplicate_keys": []},
+    }
+    db = FakeDB(checkpoint=checkpoint, messages=[])
+    service = LiveTopCreations(db, bot=FakeBot(channel), min_reactions=3)
+
+    result = asyncio.run(service.run_once("test"))
+
+    assert result["status"] == "skipped"
+    # Checkpoint row untouched: prior cursor preserved, no upsert written.
+    assert db.checkpoint["last_source_message_id"] == 200
+    assert db.checkpoint["last_source_created_at"] == "2026-05-08T09:00:00Z"
+    assert db.checkpoints == []
+
+
+def test_live_top_creations_overflow_keeps_overflow_eligible(monkeypatch):
+    """BLOCKER 4: with >50 pending candidates, the cursor advances only to the
+    newest PROCESSED candidate (not the newest batch message) so the overflow
+    stays eligible for the next run."""
+    monkeypatch.setenv("TOP_GEN_CHANNEL", "2")
+    channel = FakeChannel()
+    messages = [_message(i, filename="clip.mp4", reactions=10) for i in range(1, 51)]
+    messages += [_message(i, filename="clip.mp4", reactions=5) for i in range(51, 61)]
+    # Make the overflow candidates (ids 51-60) NEWER than the processed ones (1-50).
+    for i in range(51, 61):
+        messages[i - 1]["created_at"] = f"2026-05-08T11:{i - 50:02d}:00Z"
+    db = FakeDB(messages=messages)
+    service = LiveTopCreations(db, bot=FakeBot(channel), min_reactions=3)
+
+    result = asyncio.run(service.run_once("test"))
+
+    assert result["status"] == "completed"
+    assert result["posted_count"] == LiveTopCreations.MAX_POSTS_SAFETY_BELT
+    assert len(channel.sent) == LiveTopCreations.MAX_POSTS_SAFETY_BELT
+    # Cursor points at the newest message that is NOT an unprocessed overflow
+    # candidate (the newest processed candidate, id 50), not the newest batch
+    # message (id 60), so overflow candidates remain eligible next run.
+    assert db.checkpoint["last_source_message_id"] == 50
+
+
+def test_live_top_creations_overflow_older_low_reaction_candidate_preserved(monkeypatch):
+    """BLOCKER: an older, lower-reaction candidate left in the overflow must not
+    be skipped. The cursor is the newest message that is NOT an unprocessed
+    overflow candidate, so ALL overflow remains eligible next run regardless of
+    age/reaction ordering."""
+    monkeypatch.setenv("TOP_GEN_CHANNEL", "2")
+    channel = FakeChannel()
+    # 50 high-reaction processed candidates.
+    messages = [_message(i, filename="clip.mp4", reactions=10) for i in range(1, 51)]
+    # Overflow candidates: lower-reaction AND all NEWER than every processed /
+    # non-candidate message, so the cursor (newest non-overflow) stays before them.
+    messages += [_message(i, filename="clip.mp4", reactions=5) for i in range(51, 61)]
+    # Message 51 is the OLDEST overflow candidate, with the LOWEST reactions; it
+    # must still be preserved next run (the cursor must stay before it).
+    messages[50]["reaction_count"] = 4
+    for i in range(51, 61):
+        messages[i - 1]["created_at"] = f"2026-05-08T12:{i - 50:02d}:00Z"
+    # A non-candidate message NEWER than the processed candidates but OLDER than
+    # the overflow: the cursor advances to it (newest non-overflow) and stays
+    # strictly before every overflow candidate.
+    messages.append({
+        "message_id": 61,
+        "channel_id": 10,
+        "thread_id": None,
+        "content": "no attachment",
+        "created_at": "2026-05-08T11:30:00Z",
+        "reaction_count": 0,
+        "attachments": "[]",
+    })
+    db = FakeDB(messages=messages)
+    service = LiveTopCreations(db, bot=FakeBot(channel), min_reactions=3)
+
+    result = asyncio.run(service.run_once("test"))
+
+    assert result["status"] == "completed"
+    assert result["posted_count"] == LiveTopCreations.MAX_POSTS_SAFETY_BELT
+    assert len(channel.sent) == LiveTopCreations.MAX_POSTS_SAFETY_BELT
+    # Cursor = newest message that is NOT an unprocessed overflow candidate (the
+    # non-candidate message 61), which is BEFORE all overflow (51-60) — so the
+    # older, lower-reaction overflow candidate is NOT skipped.
+    assert db.checkpoint["last_source_message_id"] == 61
