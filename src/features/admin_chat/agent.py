@@ -39,6 +39,16 @@ _ADMIN_IDENTITY_INJECTED_TOOLS = frozenset({
     "unmute_speaker",
     "log_live_update_feedback",
 })
+
+# Message-browse tools. In a DM there's no single "current guild", so these
+# must search across ALL guilds by default rather than being pinned to the
+# DM-resolved default guild (which may be a small/unrelated server).
+_DM_ALL_GUILD_BROWSE_TOOLS = frozenset({
+    "find_messages",
+    "inspect_message",
+    "get_active_channels",
+    "get_daily_summaries",
+})
 from src.common.soul import BOT_VOICE
 
 logger = logging.getLogger('DiscordBot')
@@ -121,6 +131,8 @@ END EVERY TURN with either reply or end_turn.
 **Reading further back in DMs.** When messaged via DM, you see [Sent via DM (dm_channel_id: ...)] and the last 10 messages of context. If the user references something earlier ("that link from yesterday", "the post you replied to before"), call find_messages(channel_id=<dm_channel_id>, live=true, limit=N) to read further back in this DM via the live Discord API. The DM history isn't in the database — you must use live=true.
 
 **Know your search scope.** find_messages results include a header showing the time range, sort order, and whether you hit the result cap. Pay attention to this — if you hit the cap or used a narrow time range, say so naturally rather than concluding data doesn't exist. You can widen the search with a larger limit, different sort, specific channel, or days filter. Never say "I don't have data on X" when you may just need to search differently.
+
+**DMs search all guilds.** When messaged via DM there is no single "current guild" — find_messages, inspect_message, get_active_channels, and get_daily_summaries search across ALL guilds the bot indexes. A member who posts in one server is findable from a DM regardless of which guild got resolved as the DM default. If the admin names a specific server or channel, use channel_id / guild_id filters to narrow.
 
 **Be resourceful.** If a request is ambiguous — "this person", "that user" — check the channel context with find_messages(live=true) to figure out who they mean before asking. Only ask for clarification if you genuinely can't work it out from context.
 
@@ -448,8 +460,13 @@ class AdminChatAgent:
                     logger.info(f"[AdminChat] Tool call: {tool_name}")
 
                     if channel_context and channel_context.get('guild_id') and 'guild_id' not in tool_input:
-                        tool_input = dict(tool_input)
-                        tool_input['guild_id'] = int(channel_context['guild_id'])
+                        # In DMs the resolved guild is a guess (the member's default
+                        # server), not a real "current channel" context. Message-browse
+                        # tools must search all guilds there, so don't pin them to it.
+                        is_dm = channel_context.get('source') == 'dm'
+                        if not (is_dm and tool_name in _DM_ALL_GUILD_BROWSE_TOOLS):
+                            tool_input = dict(tool_input)
+                            tool_input['guild_id'] = int(channel_context['guild_id'])
                     if channel_context and channel_context.get('channel_id') and 'source_channel_id' not in tool_input:
                         if tool_input is tool_use.input:
                             tool_input = dict(tool_input)

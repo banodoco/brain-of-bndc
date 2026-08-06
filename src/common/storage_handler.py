@@ -10,7 +10,7 @@ import os
 import mimetypes
 import uuid
 from datetime import datetime, timedelta
-from typing import Any, List, Dict, Optional
+from typing import Any, List, Dict, Optional, Sequence
 from pathlib import Path
 import sys
 
@@ -1132,6 +1132,27 @@ class StorageHandler:
             payload['discord_message_ids'] = [int(mid) for mid in self._as_json_array(payload['discord_message_ids']) if str(mid).isdigit()]
         return await self._update_live_row('topics', 'topic_id', topic_id, payload)
 
+    async def get_topic(
+        self,
+        topic_id: str,
+        environment: str = 'prod',
+    ) -> Optional[Dict[str, Any]]:
+        if not self.supabase_client:
+            return None
+        try:
+            result = await asyncio.to_thread(
+                self.supabase_client.table('topics')
+                .select('*')
+                .eq('topic_id', topic_id)
+                .eq('environment', environment)
+                .limit(1)
+                .execute
+            )
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error(f"Error fetching topic {topic_id}: {e}", exc_info=True)
+            return None
+
     async def get_topics(
         self,
         guild_id: Optional[int] = None,
@@ -1596,6 +1617,8 @@ class StorageHandler:
             'revision_attempts',
             'latest_valid_preview_hash',
             'submitted_at',
+            'needs_review_reason',
+            'recovery_count',
         }
         payload = {
             key: draft.get(key)
@@ -1643,7 +1666,9 @@ class StorageHandler:
         environment: str = 'prod',
         limit: int = 20,
         status: Optional[str] = None,
+        statuses: Optional[Sequence[str]] = None,
         run_id: Optional[str] = None,
+        ascending: bool = False,
     ) -> List[Dict[str, Any]]:
         if not self.supabase_client:
             return []
@@ -1653,13 +1678,15 @@ class StorageHandler:
                 self.supabase_client.table('topic_editor_drafts')
                 .select('*')
                 .eq('environment', environment)
-                .order('updated_at', desc=True)
+                .order('updated_at', ascending=ascending)
                 .limit(safe_limit)
             )
             if guild_id is not None:
                 query = query.eq('guild_id', guild_id)
             if status:
                 query = query.eq('status', status)
+            elif statuses:
+                query = query.in_('status', list(statuses))
             if run_id:
                 query = query.eq('run_id', run_id)
             result = await asyncio.to_thread(query.execute)
@@ -1667,6 +1694,187 @@ class StorageHandler:
         except Exception as e:
             logger.error(f"Error fetching topic_editor_drafts: {e}", exc_info=True)
             return []
+
+    async def insert_topic_publish_outbox(
+        self,
+        topic_id: str,
+        units: List[Dict[str, Any]],
+        environment: str = 'prod',
+        run_id: Optional[str] = None,
+        preserve_sent: Optional[Dict[int, int]] = None,
+    ) -> int:
+        """Bulk-insert outbox rows for a topic's send units.
+
+        ``preserve_sent`` maps unit_index -> discord_message_id for units that were
+        already sent in a prior attempt; those rows are written as ``sent`` so a
+        retry does not resend them (reconcile-before-resend). All other units start
+        as ``pending``.
+        """
+        if not self.supabase_client:
+            return 0
+        try:
+            preserve_sent = preserve_sent or {}
+            rows = []
+            for idx, unit in enumerate(units):
+                sent_mid = preserve_sent.get(idx)
+                rows.append({
+                    'topic_id': topic_id,
+                    'unit_index': idx,
+                    'unit': unit,
+                    'send_kind': unit.get('send_kind') or 'text',
+                    'status': 'sent' if sent_mid is not None else 'pending',
+                    'discord_message_id': sent_mid,
+                    'environment': environment,
+                    'run_id': run_id,
+                })
+            if not rows:
+                return 0
+            # Upsert (not delete+insert) so a partial failure never wipes the prior
+            # outbox and its already-sent rows — otherwise a retry would resend
+            # everything (duplicate messages).
+            inserted = 0
+            for batch_start in range(0, len(rows), 50):
+                batch = rows[batch_start:batch_start + 50]
+                result = await asyncio.to_thread(
+                    self.supabase_client.table('topic_publish_outbox')
+                    .upsert(batch, on_conflict='topic_id,unit_index')
+                    .execute
+                )
+                inserted += len(result.data or [])
+            return inserted
+        except Exception as e:
+            logger.error(f"Error inserting topic_publish_outbox topic_id={topic_id}: {e}", exc_info=True)
+            return 0
+
+    async def update_topic_publish_outbox(
+        self,
+        topic_id: str,
+        unit_index: int,
+        updates: Dict[str, Any],
+        environment: str = 'prod',
+    ) -> Optional[Dict[str, Any]]:
+        if not self.supabase_client:
+            return None
+        try:
+            payload = {k: v for k, v in (updates or {}).items() if k in {
+                'status', 'discord_message_id', 'error', 'send_kind', 'unit',
+            }}
+            if not payload:
+                return None
+            result = await asyncio.to_thread(
+                self.supabase_client.table('topic_publish_outbox')
+                .update(payload)
+                .eq('topic_id', topic_id)
+                .eq('unit_index', unit_index)
+                .eq('environment', environment)
+                .execute
+            )
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error(f"Error updating topic_publish_outbox topic_id={topic_id} unit={unit_index}: {e}", exc_info=True)
+            return None
+
+    async def get_topic_publish_outbox(
+        self,
+        topic_id: str,
+        environment: str = 'prod',
+    ) -> List[Dict[str, Any]]:
+        if not self.supabase_client:
+            return []
+        try:
+            result = await asyncio.to_thread(
+                self.supabase_client.table('topic_publish_outbox')
+                .select('*')
+                .eq('topic_id', topic_id)
+                .eq('environment', environment)
+                .order('unit_index')
+                .execute
+            )
+            return result.data or []
+        except Exception as e:
+            logger.error(f"Error reading topic_publish_outbox topic_id={topic_id}: {e}", exc_info=True)
+            return []
+
+    async def get_pending_topic_publish_outbox_topics(
+        self,
+        environment: str = 'prod',
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """Distinct topics that have pending/failed outbox rows (candidates for retry)."""
+        if not self.supabase_client:
+            return []
+        try:
+            result = await asyncio.to_thread(
+                self.supabase_client.table('topic_publish_outbox')
+                .select('topic_id')
+                .eq('environment', environment)
+                .in_('status', ['pending', 'failed'])
+                .limit(max(1, min(int(limit or 20), 100)))
+                .execute
+            )
+            return result.data or []
+        except Exception as e:
+            logger.error(f"Error reading pending topic_publish_outbox topics: {e}", exc_info=True)
+            return []
+
+    async def get_topic_editor_needs_review(
+        self,
+        guild_id: Optional[int] = None,
+        environment: str = 'prod',
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        if not self.supabase_client:
+            return []
+        try:
+            query = (
+                self.supabase_client.table('topic_editor_drafts')
+                .select('*')
+                .eq('environment', environment)
+                .eq('status', 'needs_review')
+                .order('updated_at', desc=True)
+                .limit(max(1, min(int(limit or 100), 200)))
+            )
+            if guild_id is not None:
+                query = query.eq('guild_id', guild_id)
+            result = await asyncio.to_thread(query.execute)
+            return result.data or []
+        except Exception as e:
+            logger.error(f"Error fetching needs_review drafts: {e}", exc_info=True)
+            return []
+
+    async def claim_topic_editor_draft(
+        self,
+        draft_id: str,
+        claimant_run_id: str,
+        statuses: Sequence[str],
+        environment: str = 'prod',
+    ) -> Optional[Dict[str, Any]]:
+        """Atomically claim a draft for cross-run recovery.
+
+        Delegates to the ``claim_topic_editor_draft`` RPC, which conditionally
+        updates the draft (status must still be recoverable), increments
+        recovery_count, and stamps recovery_claimed_by_run_id/recovery_claimed_at
+        in a single statement — so two runs cannot both claim the same draft and
+        the exhaustion counter is durable.
+        """
+        if not self.supabase_client:
+            return None
+        try:
+            result = await asyncio.to_thread(
+                self.supabase_client.rpc(
+                    'claim_topic_editor_draft',
+                    {
+                        'p_draft_id': draft_id,
+                        'p_claimant_run_id': claimant_run_id,
+                        'p_statuses': list(statuses),
+                        'p_environment': environment,
+                    },
+                ).execute
+            )
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error(f"Error claiming topic_editor_drafts.draft_id={draft_id}: {e}", exc_info=True)
+            return None
 
     async def get_topic_editor_checkpoint(self, checkpoint_key: str, environment: str = 'prod') -> Optional[Dict[str, Any]]:
         if not self.supabase_client:

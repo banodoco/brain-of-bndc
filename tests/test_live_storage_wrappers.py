@@ -276,8 +276,8 @@ def test_db_handler_topic_editor_wrappers_are_reachable_through_storage_handler(
             calls.append(("draft-update", draft_id, updates, environment))
             return {"draft_id": draft_id, **updates}
 
-        async def get_recent_topic_editor_drafts(self, guild_id=None, environment="prod", limit=20, status=None, run_id=None):
-            calls.append(("draft-read", guild_id, environment, limit, status, run_id))
+        async def get_recent_topic_editor_drafts(self, guild_id=None, environment="prod", limit=20, status=None, statuses=None, run_id=None, ascending=False):
+            calls.append(("draft-read", guild_id, environment, limit, status, statuses, run_id, ascending))
             return [{"draft_id": "draft-1"}]
 
     db = DatabaseHandler.__new__(DatabaseHandler)

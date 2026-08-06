@@ -1,8 +1,11 @@
+import asyncio
 from datetime import date
+from types import SimpleNamespace
 
 import pytest
 
 from src.features.summarising.topic_editor import (
+    TopicEditor,
     TopicEditorDraft,
     TopicEditorDraftCard,
     TopicEditorDraftLimits,
@@ -442,8 +445,12 @@ class TestNormalizeMediaRef:
         assert result == {"message_id": "111", "kind": "attachment", "index": 3}
 
     def test_rejects_invalid_kind(self):
+        # Visual-kind vocabulary (image/video/gif/audio/file) is normalized to
+        # attachment; only genuinely-unknown kinds raise.
+        assert normalize_media_ref({"message_id": "123", "kind": "image", "index": 0})["kind"] == "attachment"
+        assert normalize_media_ref({"message_id": "123", "kind": "video", "index": 0})["kind"] == "attachment"
         with pytest.raises(ValueError, match="kind must be 'attachment', 'embed', or 'external'"):
-            normalize_media_ref({"message_id": "123", "kind": "image", "index": 0})
+            normalize_media_ref({"message_id": "123", "kind": "unknown", "index": 0})
 
     def test_rejects_missing_message_id(self):
         with pytest.raises(ValueError, match="missing required 'message_id'"):
@@ -471,9 +478,8 @@ class TestNormalizeMediaRef:
         assert result == {"message_id": "456", "kind": "external", "index": 2}
 
     def test_rejects_invalid_kind_after_external_added(self):
-        # Unknown kind must still raise
-        with pytest.raises(ValueError, match="kind must be 'attachment', 'embed', or 'external'"):
-            normalize_media_ref({"message_id": "123", "kind": "video", "index": 0})
+        # Unknown kind must still raise; video (visual vocabulary) is normalized.
+        assert normalize_media_ref({"message_id": "123", "kind": "video", "index": 0})["kind"] == "attachment"
         with pytest.raises(ValueError, match="kind must be 'attachment', 'embed', or 'external'"):
             normalize_media_ref({"message_id": "456", "kind": "link", "index": 1})
 
@@ -1740,3 +1746,204 @@ def test_topic_editor_override_and_rejected_transition_payloads_are_deterministi
         "payload": {"overridden_topic_id": "topic-1", "reason": "false positive"},
         "model": None,
     }]
+
+
+# --------------------------------------------------------------------------
+# Cross-run recovery + publish outbox pure helpers (added 2026-08)
+# --------------------------------------------------------------------------
+
+class TestDraftTerminality:
+    def test_terminal_statuses(self):
+        assert TopicEditor._draft_is_terminal("submitted")
+        assert TopicEditor._draft_is_terminal("abandoned")
+        assert TopicEditor._draft_is_terminal("needs_review")
+        assert not TopicEditor._draft_is_terminal("drafting")
+        assert not TopicEditor._draft_is_terminal("needs_revision")
+        assert not TopicEditor._draft_is_terminal("valid")
+        assert not TopicEditor._draft_is_terminal("blocked_for_submit")
+
+
+class TestNonterminalDraftSummary:
+    def test_returns_only_nonterminal_drafts(self):
+        editor = TopicEditor.__new__(TopicEditor)
+        context = {
+            "drafts": {
+                "d-1": {"draft_id": "d-1", "status": "valid"},
+                "d-2": {"draft_id": "d-2", "status": "submitted"},
+            },
+        }
+        editor.topic_editor_drafts = {"d-3": {"draft_id": "d-3", "status": "drafting"}}
+        result = editor._nonterminal_draft_summary(context)
+        assert result == ["d-1:valid", "d-3:drafting"]
+
+    def test_empty_when_all_terminal(self):
+        editor = TopicEditor.__new__(TopicEditor)
+        editor.topic_editor_drafts = {}
+        context = {"drafts": {"d-1": {"draft_id": "d-1", "status": "submitted"}}}
+        assert editor._nonterminal_draft_summary(context) == []
+
+
+class TestDraftMediaSourceUnion:
+    def _make_editor(self):
+        return TopicEditor.__new__(TopicEditor)
+
+    def test_media_message_ids_collected(self):
+        editor = self._make_editor()
+        draft = {
+            "cards": [
+                {
+                    "source_message_ids": ["100"],
+                    "media_ids": ["200:attachment:0", "300:video:1"],
+                },
+                {"source_message_ids": ["100"], "media_ids": []},
+            ]
+        }
+        # media_message_ids only
+        assert editor._draft_media_message_ids(draft) == ["200", "300"]
+
+    def test_source_ids_unions_media_appended_not_prepended(self):
+        editor = self._make_editor()
+        draft = {
+            "cards": [
+                {
+                    "source_message_ids": ["100", "101"],
+                    "media_ids": ["102:attachment:0"],
+                },
+            ]
+        }
+        # Sources first (preserves positional citation numbering), media appended.
+        assert editor._draft_source_ids(draft) == ["100", "101", "102"]
+
+    def test_source_ids_dedup_media_vs_source(self):
+        editor = self._make_editor()
+        draft = {
+            "cards": [
+                {
+                    "source_message_ids": ["100"],
+                    "media_ids": ["100:attachment:0"],
+                },
+            ]
+        }
+        assert editor._draft_source_ids(draft) == ["100"]
+
+
+class TestEnsureMediaSourcesInCards:
+    def test_appends_media_message_to_card_sources(self):
+        editor = TopicEditor.__new__(TopicEditor)
+        draft = {
+            "cards": [
+                {
+                    "source_message_ids": ["100"],
+                    "media_ids": ["200:attachment:0", "300:video:1"],
+                },
+            ]
+        }
+        out = editor._ensure_media_sources_in_cards(draft)
+        assert out["cards"][0]["source_message_ids"] == ["100", "200", "300"]
+
+    def test_idempotent(self):
+        editor = TopicEditor.__new__(TopicEditor)
+        draft = {
+            "cards": [
+                {"source_message_ids": ["100"], "media_ids": ["100:attachment:0"]},
+            ]
+        }
+        once = editor._ensure_media_sources_in_cards(draft)
+        twice = editor._ensure_media_sources_in_cards(once)
+        assert twice == once
+        assert twice["cards"][0]["source_message_ids"] == ["100"]
+
+
+class TestPublishOutboxHelpers:
+    def test_derive_all_sent(self):
+        rows = [
+            {"unit_index": 0, "status": "sent", "discord_message_id": 11},
+            {"unit_index": 1, "status": "sent", "discord_message_id": 12},
+        ]
+        result = TopicEditor._derive_publish_status_from_outbox(rows)
+        assert result["status"] == "sent"
+        assert result["discord_message_ids"] == [11, 12]
+
+    def test_derive_partial(self):
+        rows = [
+            {"unit_index": 0, "status": "sent", "discord_message_id": 11},
+            {"unit_index": 1, "status": "failed", "discord_message_id": None},
+        ]
+        result = TopicEditor._derive_publish_status_from_outbox(rows)
+        assert result["status"] == "partial"
+        assert result["discord_message_ids"] == [11]
+
+    def test_derive_failed_when_none_sent(self):
+        rows = [
+            {"unit_index": 0, "status": "failed", "discord_message_id": None},
+            {"unit_index": 1, "status": "pending", "discord_message_id": None},
+        ]
+        result = TopicEditor._derive_publish_status_from_outbox(rows)
+        assert result["status"] == "failed"
+        assert result["discord_message_ids"] == []
+
+    def test_outbox_unit_should_send(self):
+        assert not TopicEditor._outbox_unit_should_send({"status": "sent", "discord_message_id": 11})
+        assert not TopicEditor._outbox_unit_should_send({"status": "pending", "discord_message_id": 11})
+        assert TopicEditor._outbox_unit_should_send({"status": "pending", "discord_message_id": None})
+        assert TopicEditor._outbox_unit_should_send({"status": "failed", "discord_message_id": None})
+
+
+class TestMarkOutboxUnits:
+    def test_updates_by_original_indices_not_compressed_positions(self):
+        editor = TopicEditor.__new__(TopicEditor)
+        class FakeDB:
+            def __init__(self):
+                self.updated = []
+            def update_topic_publish_outbox(self, topic_id, unit_index, updates, environment="prod", guild_id=None):
+                self.updated.append((unit_index, updates))
+        db = FakeDB()
+        editor.db = db
+        editor.environment = "prod"
+        # Original indices [2, 4] (unit 3 was skipped already-sent) — must update
+        # rows 2 and 4, NOT 2 and 3 (compressed positions).
+        editor._mark_outbox_units("topic-1", 1, [2, 4], [
+            {"status": "sent", "discord_message_id": 100},
+            {"status": "failed", "error": "boom"},
+        ])
+        assert db.updated == [
+            (2, {"status": "sent", "discord_message_id": 100}),
+            (4, {"status": "failed", "error": "boom"}),
+        ]
+
+    def test_single_unit_wrapped_in_list(self):
+        editor = TopicEditor.__new__(TopicEditor)
+        class FakeDB:
+            def __init__(self):
+                self.updated = []
+            def update_topic_publish_outbox(self, topic_id, unit_index, updates, environment="prod", guild_id=None):
+                self.updated.append((unit_index, updates))
+        db = FakeDB()
+        editor.db = db
+        editor.environment = "prod"
+        editor._mark_outbox_units("topic-1", 1, [7], [{"status": "sending"}])
+        assert db.updated == [(7, {"status": "sending"})]
+
+
+class TestOutboxUpsertPreservesSentRows:
+    def test_insert_uses_upsert_on_conflict(self):
+        import src.common.storage_handler as sh
+        calls = []
+
+        class FakeClient:
+            def table(self, name):
+                calls.append(("table", name))
+                return self
+            def upsert(self, rows, on_conflict=None):
+                calls.append(("upsert", len(rows), on_conflict))
+                return self
+            def execute(self):
+                calls.append(("execute",))
+                return SimpleNamespace(data=[{"draft_id": "x"}])
+
+        handler = sh.StorageHandler.__new__(sh.StorageHandler)
+        handler.supabase_client = FakeClient()
+        result = asyncio.run(handler.insert_topic_publish_outbox("topic-1", [{"send_kind": "text"}], run_id="run-1"))
+        assert result == 1
+        assert ("upsert", 1, "topic_id,unit_index") in calls
+        assert not any(c[0] == "delete" for c in calls), "must not delete prior rows"

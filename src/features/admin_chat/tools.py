@@ -68,6 +68,25 @@ def _resolve_guild_id(params: Optional[Dict[str, Any]] = None) -> Optional[int]:
                 pass
     return _get_server_config().resolve_guild_id(explicit, require_write=True)
 
+
+def _browse_guild_id(params: Optional[Dict[str, Any]] = None,
+                     resolved_guild_id: Optional[int] = None) -> Optional[int]:
+    """Resolve the guild scope for message-browse tools.
+
+    Order: explicit `guild_id` in tool input > caller-provided resolved guild
+    > None (search all guilds). Unlike `_resolve_guild_id`, never falls back to
+    the configured default guild — that fallback would scope DM searches to one
+    guessed server (e.g. the member's default guild) instead of the whole corpus.
+    """
+    if params:
+        raw = params.get('guild_id')
+        if raw not in (None, '', 0, '0'):
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                pass
+    return resolved_guild_id
+
 # Tables the agent is allowed to query
 QUERYABLE_TABLES = {
     'competitions', 'competition_entries', 'discord_reactions',
@@ -1775,7 +1794,9 @@ async def execute_find_messages(
         resolved_username = user_data.get('username', username)
 
     try:
-        resolved_guild_id = resolved_guild_id or _resolve_guild_id(params)
+        # Browse scope: explicit guild_id, else caller's resolved guild, else
+        # search all guilds (e.g. DMs, which have no single-guild context).
+        resolved_guild_id = _browse_guild_id(params, resolved_guild_id)
 
         # ---- Live path: use Discord API directly ----
         if live:
@@ -1943,9 +1964,11 @@ async def execute_inspect_message(
         return {"success": False, "error": "message_id is required"}
 
     try:
-        resolved_guild_id = _resolve_guild_id(params)
-        if resolved_guild_id:
-            _set_active_guild_id(resolved_guild_id)
+        # No guild fallback: inspect is by global message_id, so leave active
+        # guild unset to look up across all guilds (DMs have no single-guild
+        # context).
+        resolved_guild_id = _browse_guild_id(params)
+        _set_active_guild_id(resolved_guild_id)
 
         # Get message + context from DB via discord_tools
         ctx = dt_context(int(message_id), surrounding=context_size)
@@ -2464,9 +2487,8 @@ async def execute_get_active_channels(
     days = params.get('days', 7)
 
     try:
-        resolved_guild_id = resolved_guild_id or _resolve_guild_id(params)
-        if resolved_guild_id:
-            _set_active_guild_id(resolved_guild_id)
+        resolved_guild_id = _browse_guild_id(params, resolved_guild_id)
+        _set_active_guild_id(resolved_guild_id)
 
         chs = dt_channels(days=days)
 
@@ -2508,9 +2530,8 @@ async def execute_get_daily_summaries(
     channel_id = params.get('channel_id')
 
     try:
-        resolved_guild_id = resolved_guild_id or _resolve_guild_id(params)
-        if resolved_guild_id:
-            _set_active_guild_id(resolved_guild_id)
+        resolved_guild_id = _browse_guild_id(params, resolved_guild_id)
+        _set_active_guild_id(resolved_guild_id)
 
         # Permission check for specific channel
         if channel_id and visible_channels is not None:

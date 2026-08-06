@@ -105,9 +105,13 @@ Card style:
   community learned, why this is useful now, or what is worth watching next.
 - Keep card bodies concise. Prefer one tight paragraph over an essay.
 - Use inline `[N]` citations next to factual claims. Each marker must map to
-  that card's source_message_ids. Never append a detached "Sources:" footer.
+  that card's source_message_ids. Restart numbering at `[1]` for EVERY card;
+  `[N]` maps to the Nth entry of that card's source_message_ids. Never append
+  a detached "Sources:" footer.
 - Attach media_ids to the card that discusses that image or video so media
-  appears immediately after the relevant text.
+  appears immediately after the relevant text. Media ids have the shape
+  message_id:kind:index (kinds attachment|embed|external); derive them from the
+  evidence shelf, never raw CDN URLs.
 - Avoid digest prose, broad roundups, padded context, and weak "community
   reacted" points without concrete substance.
 - Too many angles means split topics, watch the extras, or leave them out.
@@ -141,6 +145,12 @@ publishing.
 REQUIRED to end the run: call finalize_run exactly once with full editorial
 reasoning describing what you saw, what you considered, what you skipped and
 why, and what you acted on. The run does not close by plain text alone.
+
+Every open draft must be resolved before finalize_run: submit it, abandon it
+(with a fallback_action), or route it to needs_review. finalize_run is rejected
+while a draft is still drafting/needs_revision/valid/blocked_for_submit unless
+you set acknowledge_pending_drafts=true, which leaves them for cross-run
+recovery.
 """
 
 
@@ -234,7 +244,13 @@ TOPIC_EDITOR_TOOLS: List[Dict[str, Any]] = [
                             "angle": {"type": "string"},
                             "body": {"type": "string"},
                             "source_message_ids": {"type": "array", "items": {"type": "string"}},
-                            "media_ids": {"type": "array", "items": {"type": "string"}},
+                            "media_ids": {
+                                "type": "array",
+                                "items": {
+                                    "type": "string",
+                                    "description": "media id in shape message_id:kind:index (e.g. '1506344740558475356:attachment:0'); kinds attachment|embed|external; derive from the evidence shelf, never raw CDN URLs.",
+                                },
+                            },
                         },
                         "required": ["angle", "body", "source_message_ids"],
                     },
@@ -251,7 +267,10 @@ TOPIC_EDITOR_TOOLS: List[Dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "draft_id": {"type": "string"},
-                "patch": {"type": "object"},
+                "patch": {
+                    "type": "object",
+                    "description": "Partial patch over draft_json. cards[].media_ids must be message_id:kind:index (kinds attachment|embed|external). Restart inline citation numbering at [1] for every card; [N] maps to the Nth entry of that card's source_message_ids.",
+                },
                 "reason": {"type": "string"},
             },
             "required": ["draft_id", "patch", "reason"],
@@ -286,13 +305,13 @@ TOPIC_EDITOR_TOOLS: List[Dict[str, Any]] = [
     },
     {
         "name": "abandon_draft",
-        "description": "End a draft attempt when the topic is not publishable after revision.",
+        "description": "End a draft attempt when the topic is not publishable after revision. Use fallback_action=needs_review to route an unfinishable draft to the durable human-review backlog instead of dropping it.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "draft_id": {"type": "string"},
                 "reason": {"type": "string"},
-                "fallback_action": {"type": "string", "enum": ["watch_topic", "update_topic_sources", "discard_topic"]},
+                "fallback_action": {"type": "string", "enum": ["watch_topic", "update_topic_sources", "discard_topic", "needs_review"]},
             },
             "required": ["draft_id", "reason"],
         },
@@ -313,7 +332,8 @@ TOPIC_EDITOR_TOOLS: List[Dict[str, Any]] = [
             "accepted). Do NOT include a global Sources footer — citations are "
             "rendered inline per block using plain integer markers like [1], [2] "
             "(e.g. \"Body text [1] with a claim [2].\"). Every [N] must match a "
-            "real index in the block's source_message_ids."
+            "real index in the block's source_message_ids. Restart numbering at "
+            "[1] for every block."
         ),
         "input_schema": {
             "type": "object",
@@ -394,7 +414,8 @@ TOPIC_EDITOR_TOOLS: List[Dict[str, Any]] = [
             "accepted). Do NOT include a global Sources footer — citations are "
             "rendered inline per block using plain integer markers like [1], [2] "
             "(e.g. \"Body text [1] with a claim [2].\"). Every [N] must match a "
-            "real index in the block's source_message_ids."
+            "real index in the block's source_message_ids. Restart numbering at "
+            "[1] for every block."
         ),
         "input_schema": {
             "type": "object",
@@ -529,7 +550,9 @@ TOPIC_EDITOR_TOOLS: List[Dict[str, Any]] = [
         "description": (
             "MUST be called exactly once to end the run. Provide your overall editorial reasoning "
             "describing what you saw in the source window, what you considered, what you skipped "
-            "and why, and what (if anything) you acted on. Minimum 100 characters."
+            "and why, and what (if anything) you acted on. Minimum 100 characters. If any draft "
+            "is still open (drafting / needs_revision / valid / blocked_for_submit), finalize is "
+            "rejected unless you set acknowledge_pending_drafts=true — resolve open drafts first."
         ),
         "input_schema": {
             "type": "object",
@@ -542,6 +565,10 @@ TOPIC_EDITOR_TOOLS: List[Dict[str, Any]] = [
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "Optional short bullets naming clusters you looked at (acted on or skipped).",
+                },
+                "acknowledge_pending_drafts": {
+                    "type": "boolean",
+                    "description": "Set true to finalize even with open drafts; they stay durably persisted and are recovered by the next run. Only use when a draft is genuinely unfinishable this run.",
                 },
             },
             "required": ["overall_reasoning"],
@@ -753,7 +780,21 @@ class TopicEditor:
                 started=started,
                 metadata=metadata,
             )
-            if not messages:
+            # Cross-run recovery: re-expose drafts stranded by a prior run's forced
+            # close / lease steal / clean-finalize-with-open-drafts BEFORE the
+            # no-messages fast path, so quiet windows still drain the backlog.
+            recovered_drafts = self._recover_stale_drafts(run_id=run_id, guild_id=guild_id)
+
+            # Publish backlog: retry topics with pending/failed/partial outbox units
+            # (reconcile-before-resend) so quiet windows drain the publish queue too.
+            if hasattr(self.db, "get_pending_topic_publish_outbox_topics"):
+                try:
+                    backlog_results = await self._publish_pending_topics()
+                    metadata["publish_backlog_results"] = backlog_results
+                except Exception as exc:
+                    logger.error("TopicEditor publish-backlog drain failed: run_id=%s error=%s", run_id, exc)
+
+            if not messages and not recovered_drafts:
                 updates = self._run_updates(
                     checkpoint_before=checkpoint,
                     checkpoint_after=checkpoint,
@@ -763,7 +804,11 @@ class TopicEditor:
                     metadata=metadata,
                     skipped_reason="no_new_archived_messages",
                 )
-                self.db.complete_topic_editor_run(run_id, updates, guild_id=guild_id, environment=self.environment)
+                try:
+                    if not self.db.complete_topic_editor_run(run_id, updates, guild_id=guild_id, environment=self.environment):
+                        logger.error("TopicEditor complete_topic_editor_run returned None: run_id=%s", run_id)
+                except Exception as exc:
+                    logger.error("TopicEditor complete_topic_editor_run raised: run_id=%s error=%s", run_id, exc)
                 trace_messages = self._format_trace_messages(run_id, updates, [], [])
                 await self._emit_trace(trace_messages, run_id=run_id, updates=updates, outcomes=[], publish_results=[])
                 return {
@@ -779,6 +824,7 @@ class TopicEditor:
                 messages,
                 active_topics,
                 auto_shortlisted_media=auto_shortlisted_media,
+                recovered_drafts=recovered_drafts,
             )
             messages_arg: List[Dict[str, Any]] = [
                 {"role": "user", "content": [{"type": "text", "text": repr(initial_payload)}]}
@@ -818,7 +864,9 @@ class TopicEditor:
             forced_close_reason: Optional[str] = None
             turn_count = 0
             max_cost_usd = self._env_float("TOPIC_EDITOR_MAX_COST_USD", 2.0)
-            max_tokens = self._env_int("TOPIC_EDITOR_MAX_TOKENS", 1_500_000)
+            # Token cap is disabled by default: the per-run cost cap above is the
+            # real backstop. 0 disables the token check (see guards at :862/:1028).
+            max_tokens = self._env_int("TOPIC_EDITOR_MAX_TOKENS", 0)
             compact_token_threshold = self._env_int("TOPIC_EDITOR_COMPACT_TOKEN_THRESHOLD", 900_000)
             max_compactions = self._env_int("TOPIC_EDITOR_MAX_COMPACTIONS", 2)
             for turn_count in range(1, max_turns + 1):
@@ -862,18 +910,18 @@ class TopicEditor:
                 elif max_tokens > 0 and cumulative_tokens > max_tokens:
                     cap_reason = "token_cap_exceeded"
                 if cap_reason:
-                    # The response has already been paid for. If it contains the
-                    # required finalizer, accept only that close-out tool so we do
-                    # not lose the agent's audit reasoning at the budget edge.
-                    finalize_calls = [call for call in turn_tool_calls if call.get("name") == "finalize_run"]
-                    if finalize_calls:
-                        tool_calls.extend(finalize_calls)
-                        self._populate_idempotent_results(finalize_calls, dispatcher_context)
-                        for call in finalize_calls:
-                            outcomes.append(self._dispatch_tool_call(call, dispatcher_context))
-                        if dispatcher_context.get("finalize"):
-                            metadata["budget_cap_exceeded_after_finalize"] = cap_reason
-                            break
+                    # The response has already been paid for, so execute ALL of the
+                    # tool calls it returned (not just finalize_run) — otherwise a
+                    # budget-edge turn silently discards already-completed work.
+                    # Dispatch goes through _dispatch_tool_call to preserve the
+                    # idempotency invariants (see _idempotent_replay_outcome).
+                    tool_calls.extend(turn_tool_calls)
+                    self._populate_idempotent_results(turn_tool_calls, dispatcher_context)
+                    for call in turn_tool_calls:
+                        outcomes.append(self._dispatch_tool_call(call, dispatcher_context))
+                    if dispatcher_context.get("finalize"):
+                        metadata["budget_cap_exceeded_after_finalize"] = cap_reason
+                        break
                     forced_close = True
                     forced_close_reason = cap_reason
                     break
@@ -1020,13 +1068,15 @@ class TopicEditor:
                 if dispatcher_context.get("finalize"):
                     break
 
-                # Graceful-finalize nudge: after compaction, once we are within 90%
-                # of the token budget, ask the model to close out cleanly instead of
-                # burning the rest of the budget on new investigations.
+                # Graceful-finalize nudge: once we are within TOPIC_EDITOR_COST_NUDGE_RATIO
+                # of the per-run cost cap, ask the model to close out cleanly instead of
+                # burning the rest of the budget on new investigations. (The token cap is
+                # disabled by default, so this is the effective pre-close signal.)
+                cost_nudge_ratio = self._env_float("TOPIC_EDITOR_COST_NUDGE_RATIO", 0.85)
                 if (
-                    compaction_count >= 1
-                    and max_tokens > 0
-                    and cumulative_tokens >= max_tokens * 0.9
+                    max_cost_usd > 0
+                    and has_cache_adjusted_estimate
+                    and cumulative_cache_adjusted_cost_usd >= max_cost_usd * cost_nudge_ratio
                     and not dispatcher_context.get("finalize_nudge_sent")
                 ):
                     dispatcher_context["finalize_nudge_sent"] = True
@@ -1116,8 +1166,7 @@ class TopicEditor:
                 self._dedupe_created_topics(dispatcher_context.get("created_topics") or [])
             )
             metadata["publish_results"] = publish_results
-            checkpoint_after = self._checkpoint_after(checkpoint, messages, run_id)
-            self.db.upsert_topic_editor_checkpoint(checkpoint_after, environment=self.environment)
+            checkpoint_after = self._write_end_of_run_checkpoint(checkpoint, messages, run_id, forced_close)
             updates = self._run_updates(
                 checkpoint_before=checkpoint,
                 checkpoint_after=checkpoint_after,
@@ -1133,7 +1182,11 @@ class TopicEditor:
                 failed_publish_count=sum(1 for result in publish_results if result.get("status") in {"failed", "partial"}),
                 status="failed" if forced_close else "completed",
             )
-            self.db.complete_topic_editor_run(run_id, updates, guild_id=guild_id, environment=self.environment)
+            try:
+                if not self.db.complete_topic_editor_run(run_id, updates, guild_id=guild_id, environment=self.environment):
+                    logger.error("TopicEditor complete_topic_editor_run returned None: run_id=%s", run_id)
+            except Exception as exc:
+                logger.error("TopicEditor complete_topic_editor_run raised: run_id=%s error=%s", run_id, exc)
             trace_messages = self._format_trace_messages(run_id, updates, outcomes, publish_results)
             await self._emit_trace(trace_messages, run_id=run_id, updates=updates, outcomes=outcomes, publish_results=publish_results)
             status = updates.get("status") or "completed"
@@ -1154,7 +1207,11 @@ class TopicEditor:
                 started=started,
                 metadata={**metadata, "error": str(exc)},
             )
-            self.db.fail_topic_editor_run(run_id, str(exc), updates, guild_id=guild_id, environment=self.environment)
+            try:
+                if not self.db.fail_topic_editor_run(run_id, str(exc), updates, guild_id=guild_id, environment=self.environment):
+                    logger.error("TopicEditor fail_topic_editor_run returned None: run_id=%s", run_id)
+            except Exception as nested:
+                logger.error("TopicEditor fail_topic_editor_run raised: run_id=%s error=%s", run_id, nested)
             raise
 
     async def _invoke_anthropic(self, messages_arg: Sequence[Dict[str, Any]]) -> Any:
@@ -1210,6 +1267,7 @@ class TopicEditor:
         messages: Sequence[Dict[str, Any]],
         active_topics: Sequence[Dict[str, Any]],
         auto_shortlisted_media: Optional[Sequence[Dict[str, Any]]] = None,
+        recovered_drafts: Optional[Sequence[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         source_messages: List[Dict[str, Any]] = []
         for message in messages:
@@ -1257,6 +1315,29 @@ class TopicEditor:
                 }
                 for item in auto_shortlisted_media or []
             ],
+            "resumed_drafts": [
+                {
+                    "draft_id": state.get("draft_id"),
+                    "status": state.get("status"),
+                    "revision_number": state.get("revision_number"),
+                    "headline": (state.get("draft_json") or {}).get("headline"),
+                    "template": (state.get("draft_json") or {}).get("template"),
+                    "card_count": len((state.get("draft_json") or {}).get("cards") or []),
+                    "validation_errors": [
+                        err.get("message")
+                        for err in ((state.get("latest_validation") or {}).get("errors") or [])
+                        if isinstance(err, dict)
+                    ],
+                }
+                for state in recovered_drafts or []
+            ],
+            "resumed_drafts_instruction": (
+                "The drafts below were left unfinished by a previous run. Resume each "
+                "one: edit_draft / validate_draft / preview_draft / submit_draft, or "
+                "abandon_draft with a fallback_action, or mark needs_review. Do not "
+                "silently drop them."
+                if recovered_drafts else None
+            ),
         }
 
     def _enrich_media_understandings(
@@ -1706,6 +1787,27 @@ class TopicEditor:
             return self._dispatch_finalize_run(call, context)
         return {"tool_call_id": call["id"], "tool": name, "outcome": "unknown_tool"}
 
+    def _draft_media_message_ids(self, draft_json: Dict[str, Any]) -> List[str]:
+        """Collect the message_ids referenced by each card's media_ids.
+
+        Media is attached from the wider evidence shelf, so its owning message is
+        often not also listed as a card source. Unioning these into the draft's
+        source set lets validation hydrate the media message and resolve its URL.
+        """
+        ids: List[str] = []
+        for card in draft_json.get("cards") or []:
+            if not isinstance(card, dict):
+                continue
+            for media_id in card.get("media_ids") or []:
+                try:
+                    ref = media_id_to_media_ref(str(media_id))
+                    mid = str(ref.get("message_id") or "")
+                except (ValueError, TypeError):
+                    continue
+                if mid and mid not in ids:
+                    ids.append(mid)
+        return ids
+
     def _draft_source_ids(self, draft_json: Dict[str, Any]) -> List[str]:
         ids: List[str] = []
         for card in draft_json.get("cards") or []:
@@ -1715,6 +1817,11 @@ class TopicEditor:
                 sid = str(sid)
                 if sid and sid not in ids:
                     ids.append(sid)
+        # Media message ids are appended (never prepended) so the per-card positional
+        # citation numbering is unchanged; they only widen the hydration set.
+        for mid in self._draft_media_message_ids(draft_json):
+            if mid not in ids:
+                ids.append(mid)
         return ids
 
     def _draft_evidence_and_metadata(
@@ -1782,6 +1889,7 @@ class TopicEditor:
             "revision_attempts": state.get("revision_attempts"),
             "latest_valid_preview_hash": state.get("latest_valid_preview_hash"),
             "submitted_at": state.get("submitted_at"),
+            "needs_review_reason": state.get("needs_review_reason"),
         }
         payload["topic_id"] = state.get("topic_id") if include_topic_id else None
         return payload
@@ -1793,24 +1901,42 @@ class TopicEditor:
         *,
         create: bool = False,
         include_topic_id: bool = False,
-    ) -> None:
+        strict: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        """Persist a draft row, returning the created/updated row (or None on failure).
+
+        With ``strict=True`` the DB failure is re-raised after logging — used where a
+        missing row would orphan the draft across runs (create). Otherwise failures are
+        logged and best-effort, since the in-memory state remains authoritative for the
+        rest of the run.
+        """
         if not self.db or not state.get("draft_id"):
-            return
+            return None
         payload = self._draft_persistence_payload(state, context, include_topic_id=include_topic_id)
         try:
             if create and hasattr(self.db, "create_topic_editor_draft"):
                 created = self.db.create_topic_editor_draft(payload, environment=self.environment)
-                if created:
-                    return
+                if created and str(created.get("draft_id") or "") == str(state.get("draft_id")):
+                    return created
+                # A partial/absent row means the insert did not durably persist the
+                # draft — do NOT fall through to update (it would silently mask a
+                # missing row). Report failure so the agent does not believe the
+                # draft is durable.
+                logger.warning("TopicEditor create_topic_editor_draft returned no draft_id: draft_id=%s created=%s", state.get("draft_id"), created)
+                return None
             if hasattr(self.db, "update_topic_editor_draft"):
-                self.db.update_topic_editor_draft(
+                return self.db.update_topic_editor_draft(
                     str(state.get("draft_id")),
                     payload,
                     guild_id=payload.get("guild_id"),
                     environment=self.environment,
                 )
+            return None
         except Exception as exc:
             logger.warning("TopicEditor draft persistence failed: draft_id=%s error=%s", state.get("draft_id"), exc)
+            if strict:
+                raise
+            return None
 
     def _state_from_persisted_draft_row(self, row: Dict[str, Any]) -> Dict[str, Any]:
         draft_json = row.get("draft_json") or {}
@@ -1830,7 +1956,128 @@ class TopicEditor:
             "publish_result": row.get("publish_result"),
             "publish_diagnostics": row.get("publish_diagnostics"),
             "submitted_at": row.get("submitted_at"),
+            "recovery_count": row.get("recovery_count") or 0,
+            "needs_review_reason": row.get("needs_review_reason"),
         }
+
+    _TERMINAL_DRAFT_STATUSES = frozenset({"submitted", "abandoned", "needs_review"})
+    _NONTERMINAL_DRAFT_STATUSES = frozenset({"drafting", "needs_revision", "valid", "blocked_for_submit"})
+    _RECOVERABLE_DRAFT_STATUSES = frozenset({"drafting", "needs_revision", "valid", "blocked_for_submit"})
+
+    @staticmethod
+    def _draft_is_terminal(status: str) -> bool:
+        return status in TopicEditor._TERMINAL_DRAFT_STATUSES
+
+    def _nonterminal_draft_summary(self, context: Dict[str, Any]) -> List[str]:
+        """List nonterminal draft id:status pairs for finalize rejection."""
+        seen: Dict[str, str] = {}
+        for state in list((context.get("drafts") or {}).values()) + list(self.topic_editor_drafts.values()):
+            status = str(state.get("status") or "drafting")
+            if not self._draft_is_terminal(status):
+                seen[str(state.get("draft_id"))] = status
+        return [f"{draft_id}:{status}" for draft_id, status in seen.items()]
+
+    def _recover_stale_drafts(self, *, run_id: str, guild_id: int) -> List[Dict[str, Any]]:
+        """Claim and re-expose drafts stranded in a nonterminal state by a prior
+        run (force-close, lease steal, or clean finalize with open drafts).
+
+        Returns the list of recovered state dicts. ``submitted`` drafts are NOT
+        recovered here — their topic was already created, so recovery must not
+        re-create/re-publish them; the publish backlog handles those.
+        """
+        if not self.db or not hasattr(self.db, "get_recent_topic_editor_drafts"):
+            return []
+        try:
+            rows = self.db.get_recent_topic_editor_drafts(
+                guild_id=guild_id,
+                environment=self.environment,
+                limit=min(self._env_int("TOPIC_EDITOR_RECOVERY_MAX_PER_RUN", 8), 100),
+                statuses=list(self._RECOVERABLE_DRAFT_STATUSES),
+                ascending=True,  # oldest first
+            )
+        except Exception as exc:
+            logger.error("TopicEditor recovery fetch failed: run_id=%s error=%s", run_id, exc)
+            return []
+
+        max_claims = self._env_int("TOPIC_EDITOR_RECOVERY_MAX_CLAIMS", 3)
+        recovered: List[Dict[str, Any]] = []
+        for row in rows or []:
+            draft_id = str(row.get("draft_id") or "")
+            if not draft_id or draft_id in self.topic_editor_drafts:
+                continue
+            prior_status = str(row.get("status") or "drafting")
+            recovery_count = int(row.get("recovery_count") or 0)
+            if recovery_count >= max_claims:
+                # Deterministic escape for genuinely-unpublishable drafts: move to a
+                # durable human-review backlog instead of surfacing forever.
+                try:
+                    self.db.update_topic_editor_draft(
+                        draft_id,
+                        {"status": "needs_review", "needs_review_reason": "recovery_exhausted"},
+                        guild_id=guild_id,
+                        environment=self.environment,
+                    )
+                except Exception as exc:
+                    logger.error("TopicEditor recovery_exhausted persist failed: draft_id=%s error=%s", draft_id, exc)
+                try:
+                    self._store_transition({
+                        "run_id": run_id,
+                        "guild_id": guild_id,
+                        "action": "draft_needs_review",
+                        "reason": "recovery_exhausted",
+                        "payload": shape_transition_payload(
+                            outcome="rejected",
+                            tool_name="recover_draft",
+                            extra={"draft_id": draft_id, "prior_status": prior_status, "recovery_count": recovery_count},
+                        ),
+                        "model": self.model,
+                    })
+                except Exception as exc:
+                    logger.error("TopicEditor recovery_exhausted transition failed: %s", exc)
+                continue
+
+            # Atomic claim: only succeeds if the status is still recoverable at the
+            # moment of update. The per-guild run lease already serializes same-guild
+            # runs; this guards the residual cross-guild/manual case.
+            try:
+                claimed = self.db.claim_topic_editor_draft(
+                    draft_id,
+                    run_id,
+                    list(self._RECOVERABLE_DRAFT_STATUSES),
+                    guild_id=guild_id,
+                    environment=self.environment,
+                )
+            except Exception as exc:
+                logger.error("TopicEditor recovery claim failed: draft_id=%s error=%s", draft_id, exc)
+                claimed = None
+            if not claimed:
+                continue
+
+            # The claim RPC returns the row with recovery_count already incremented
+            # (atomic, durable) — use it as the source of truth, no separate bump.
+            state = self._state_from_persisted_draft_row(claimed if isinstance(claimed, dict) else row)
+            state["revision_attempts"] = 0  # reset the max-revision gate
+            claimed_count = int((claimed or {}).get("recovery_count") or recovery_count + 1)
+            state["recovery_count"] = claimed_count
+            self.topic_editor_drafts[draft_id] = state
+            try:
+                self._store_transition({
+                    "run_id": run_id,
+                    "guild_id": guild_id,
+                    "action": "draft_recovered",
+                    "reason": f"recovered from {prior_status}",
+                    "payload": shape_transition_payload(
+                        outcome="accepted",
+                        tool_name="recover_draft",
+                        extra={"draft_id": draft_id, "prior_status": prior_status, "recovery_count": claimed_count},
+                    ),
+                    "model": self.model,
+                })
+            except Exception as exc:
+                logger.error("TopicEditor recovery transition failed: %s", exc)
+            recovered.append(state)
+            logger.info("TopicEditor recovered stale draft: run_id=%s draft_id=%s prior_status=%s", run_id, draft_id, prior_status)
+        return recovered
 
     def _load_persisted_draft_state(self, draft_id: str, context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if not draft_id or not self.db or not hasattr(self.db, "get_recent_topic_editor_drafts"):
@@ -1858,6 +2105,30 @@ class TopicEditor:
             context.setdefault("drafts", {})[draft_id] = state
             return state
         return None
+
+    def _ensure_media_sources_in_cards(self, draft_json: Dict[str, Any]) -> Dict[str, Any]:
+        """Append each card's media message_ids to its own source_message_ids.
+
+        This makes the publish-side source hydration (which resolves media URLs
+        from a card's sources) work even when the model attached media from the
+        evidence shelf without listing its message as a text source. Appending
+        (dedup, order-preserving) keeps the positional citation numbering intact.
+        """
+        updated = json.loads(json.dumps(draft_json))
+        for card in updated.get("cards") or []:
+            if not isinstance(card, dict):
+                continue
+            sources = list(card.get("source_message_ids") or [])
+            for media_id in card.get("media_ids") or []:
+                try:
+                    ref = media_id_to_media_ref(str(media_id))
+                    mid = str(ref.get("message_id") or "")
+                except (ValueError, TypeError):
+                    continue
+                if mid and mid not in sources:
+                    sources.append(mid)
+            card["source_message_ids"] = sources
+        return updated
 
     def _apply_draft_patch(self, draft_json: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, Any]:
         updated = json.loads(json.dumps(draft_json))
@@ -2047,7 +2318,23 @@ class TopicEditor:
             }
             self.topic_editor_drafts[draft_id] = state
             context.setdefault("drafts", {})[draft_id] = state
-            self._persist_draft_state(state, context, create=True, include_topic_id=False)
+            try:
+                persisted = self._persist_draft_state(state, context, create=True, include_topic_id=False, strict=True)
+            except Exception as exc:
+                logger.error("TopicEditor create_draft persistence raised: draft_id=%s error=%s", draft_id, exc)
+                persisted = None
+            if persisted is None:
+                # A draft row that never reaches the DB is orphaned on the next run —
+                # fail loudly so the agent does not believe the draft is durable.
+                return {
+                    "tool_call_id": call["id"],
+                    "tool": name,
+                    "outcome": "tool_error",
+                    "error": "draft_persistence_failed",
+                    "draft_id": draft_id,
+                    **self._draft_state_payload(state),
+                    "draft": draft_json,
+                }
             return {"tool_call_id": call["id"], "tool": name, "outcome": "accepted", **self._draft_state_payload(state), "draft": draft_json}
 
         state = (
@@ -2057,6 +2344,13 @@ class TopicEditor:
         )
         if not state:
             return {"tool_call_id": call["id"], "tool": name, "outcome": "tool_error", "error": "draft_not_found", "draft_id": draft_id}
+
+        # Ensure every card's media message_ids are also present in its
+        # source_message_ids so media URL resolution works during validate /
+        # preview / submit even when the model attached media from the shelf
+        # without listing its message as a text source. Idempotent (dedup).
+        if name in ("validate_draft", "preview_draft", "submit_draft"):
+            state["draft_json"] = self._ensure_media_sources_in_cards(state.get("draft_json") or {})
 
         if name == "edit_draft":
             if int(state.get("revision_attempts") or 0) >= int(self.draft_limits.max_revision_attempts):
@@ -2190,12 +2484,22 @@ class TopicEditor:
             return {"tool_call_id": call["id"], "tool": name, "outcome": submit_outcome.get("outcome"), **self._draft_state_payload(state), "submit_result": submit_outcome, "validation": state["latest_validation"]}
 
         if name == "abandon_draft":
-            state["status"] = "abandoned"
-            state["topic_id"] = None
-            state["abandon_reason"] = args.get("reason")
-            state["fallback_action"] = args.get("fallback_action")
+            fallback = args.get("fallback_action")
+            if fallback == "needs_review":
+                # Durable human-review backlog instead of a silent tombstone: the
+                # draft stays visible to ops, and recovery never auto-reclaims it.
+                state["status"] = "needs_review"
+                state["topic_id"] = None
+                state["abandon_reason"] = args.get("reason")
+                state["fallback_action"] = fallback
+                state["needs_review_reason"] = args.get("reason")
+            else:
+                state["status"] = "abandoned"
+                state["topic_id"] = None
+                state["abandon_reason"] = args.get("reason")
+                state["fallback_action"] = fallback
             self._persist_draft_state(state, context, include_topic_id=False)
-            return {"tool_call_id": call["id"], "tool": name, "outcome": "accepted", **self._draft_state_payload(state), "reason": args.get("reason"), "fallback_action": args.get("fallback_action")}
+            return {"tool_call_id": call["id"], "tool": name, "outcome": "accepted", **self._draft_state_payload(state), "reason": args.get("reason"), "fallback_action": fallback}
 
         return {"tool_call_id": call["id"], "tool": name, "outcome": "unknown_tool"}
 
@@ -2742,6 +3046,34 @@ class TopicEditor:
                 "outcome": "rejected_too_short",
                 "error": f"overall_reasoning must be >=100 chars; got {len(reasoning)}",
             }
+        # Do not silently finalize with open drafts. Nonterminal drafts (drafting /
+        # needs_revision / valid / blocked_for_submit) must be resolved first — unless
+        # the agent explicitly acknowledges them, in which case they stay durable and
+        # are recovered by the next run.
+        pending = self._nonterminal_draft_summary(context)
+        if pending and args.get("acknowledge_pending_drafts") is not True:
+            self._store_transition({
+                "run_id": context["run_id"],
+                "guild_id": context["guild_id"],
+                "tool_call_id": call["id"],
+                "action": "rejected_finalize_run",
+                "reason": "nonterminal_drafts_pending",
+                "payload": shape_transition_payload(
+                    outcome="tool_error",
+                    tool_name="finalize_run",
+                    error=f"{len(pending)} draft(s) not terminal: {', '.join(pending)}",
+                    extra={"pending_drafts": pending},
+                ),
+                "model": self.model,
+            })
+            return {
+                "tool_call_id": call["id"],
+                "tool": "finalize_run",
+                "outcome": "rejected_pending_drafts",
+                "error": f"{len(pending)} draft(s) not terminal: {', '.join(pending)}",
+                "pending_drafts": pending,
+                "hint": "Submit, abandon (with fallback_action), or mark needs_review each open draft before finalizing; or set acknowledge_pending_drafts=true to leave them for cross-run recovery.",
+            }
         # Accept — capture into context for the run loop to detect + into transitions for audit.
         context["finalize"] = {
             "overall_reasoning": reasoning,
@@ -3181,26 +3513,55 @@ class TopicEditor:
             "source_message_ids": source_ids,
         }, environment=self.environment)
         topic_id = topic.get("topic_id") if topic else None
-        if topic_id:
-            topic.setdefault("source_message_ids", source_ids)
-            topic.setdefault("run_id", context.get("run_id"))
-            # Register every create (watching + posted) for semantic per-run dedup.
-            context.setdefault("created_topic_keys", {})[str(canonical_key)] = topic
-            if state == "posted":
-                context.setdefault("created_topics", []).append(topic)
-            for message_id in source_ids:
-                self.db.add_topic_source({
-                    "topic_id": topic_id,
-                    "message_id": message_id,
-                    "guild_id": context["guild_id"],
-                    "run_id": context["run_id"],
-                }, environment=self.environment)
-            self.db.upsert_topic_alias({
-                "topic_id": topic_id,
-                "alias_key": args.get("proposed_key") or canonical_key,
-                "alias_kind": "proposed",
+        if not topic_id:
+            # The topic was not durably created (upsert returned nothing). Report a
+            # rejection rather than lying to the agent — otherwise submit_draft marks
+            # the draft submitted with topic_id=None and the publish step silently
+            # skips it. A rejected_* transition does not trip the per-run idempotency
+            # unique index, so the agent may re-attempt with a fresh id.
+            self._store_transition({
+                "run_id": context["run_id"],
                 "guild_id": context["guild_id"],
+                "tool_call_id": call["id"],
+                "action": "rejected_topic_upsert",
+                "reason": "topic_upsert_returned_no_topic_id",
+                "payload": shape_transition_payload(
+                    outcome="rejected",
+                    tool_name=call["name"],
+                    canonical_key=canonical_key,
+                    proposed_key=args.get("proposed_key"),
+                    error="upsert_topic returned no topic_id; topic was not created",
+                ),
+                "model": self.model,
+            })
+            return {
+                "tool_call_id": call["id"],
+                "tool": call["name"],
+                "outcome": "rejected",
+                "action": "rejected_topic_upsert",
+                "error": "topic_upsert_returned_no_topic_id",
+                "canonical_key": canonical_key,
+            }
+
+        topic.setdefault("source_message_ids", source_ids)
+        topic.setdefault("run_id", context.get("run_id"))
+        # Register every create (watching + posted) for semantic per-run dedup.
+        context.setdefault("created_topic_keys", {})[str(canonical_key)] = topic
+        if state == "posted":
+            context.setdefault("created_topics", []).append(topic)
+        for message_id in source_ids:
+            self.db.add_topic_source({
+                "topic_id": topic_id,
+                "message_id": message_id,
+                "guild_id": context["guild_id"],
+                "run_id": context["run_id"],
             }, environment=self.environment)
+        self.db.upsert_topic_alias({
+            "topic_id": topic_id,
+            "alias_key": args.get("proposed_key") or canonical_key,
+            "alias_kind": "proposed",
+            "guild_id": context["guild_id"],
+        }, environment=self.environment)
         self._store_transition({
             "topic_id": topic_id,
             "run_id": context["run_id"],
@@ -3872,6 +4233,107 @@ class TopicEditor:
             results.append(await self._publish_topic(topic))
         return results
 
+    @staticmethod
+    def _derive_publish_status_from_outbox(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+        """Derive the aggregate publish status + ordered discord_message_ids from
+        outbox rows. sent = all sent; partial = some sent; failed = none sent."""
+        rows = [r for r in rows or []]
+        rows.sort(key=lambda r: int(r.get("unit_index") or 0))
+        sent_ids: List[int] = []
+        had_failure = False
+        for row in rows:
+            status = str(row.get("status") or "pending")
+            if status == "sent":
+                mid = row.get("discord_message_id")
+                if mid is not None:
+                    sent_ids.append(int(mid))
+            elif status == "failed":
+                had_failure = True
+        status = (
+            "sent" if sent_ids and not had_failure
+            else "partial" if sent_ids else "failed"
+        )
+        return {"status": status, "discord_message_ids": sent_ids}
+
+    def _mark_outbox_units(
+        self,
+        topic_id: str,
+        guild_id: int,
+        unit_indices: Sequence[int],
+        statuses: Sequence[Dict[str, Any]],
+    ) -> None:
+        """Update outbox rows at the given unit indices after a send.
+
+        ``unit_indices`` are the original send-unit indices (not compressed batch
+        positions), so a skipped already-sent unit never mislabels another row.
+        ``statuses``: one dict per unit: {'status', 'discord_message_id'?, 'error'?}.
+        Best-effort — a failed outbox write only loses recoverability, not the
+        already-sent message."""
+        if not hasattr(self.db, "update_topic_publish_outbox"):
+            return
+        for unit_index, updates in zip(unit_indices, statuses):
+            try:
+                self.db.update_topic_publish_outbox(
+                    topic_id,
+                    unit_index,
+                    {k: v for k, v in updates.items() if v is not None},
+                    environment=self.environment,
+                    guild_id=guild_id,
+                )
+            except Exception as exc:
+                logger.error("TopicEditor outbox row update failed: topic_id=%s unit=%s error=%s", topic_id, unit_index, exc)
+
+    @staticmethod
+    def _outbox_unit_should_send(row: Dict[str, Any]) -> bool:
+        """A unit should be (re)sent only if it is pending/failed AND has no
+        recorded discord_message_id (a crash between Discord-accept and row write
+        leaves the id unset; if set, treat as already sent)."""
+        status = str(row.get("status") or "pending")
+        if status == "sent":
+            return False
+        if row.get("discord_message_id") is not None:
+            return False
+        return status in ("pending", "failed", "sending")
+
+    async def _publish_pending_topics(self) -> List[Dict[str, Any]]:
+        """Retry topics with pending/failed/partial publication via the outbox.
+
+        Sends only pending/failed units (reconcile before resend: 'sent' rows and
+        rows with a discord_message_id are never resent). Skips topics with no
+        outbox rows (legacy — do not blind-resend)."""
+        if not hasattr(self.db, "get_pending_topic_publish_outbox_topics"):
+            return []
+        results: List[Dict[str, Any]] = []
+        try:
+            pending = self.db.get_pending_topic_publish_outbox_topics(
+                environment=self.environment,
+                limit=self._env_int("TOPIC_EDITOR_RETRY_TOPICS_PER_RUN", 5),
+            )
+        except Exception as exc:
+            logger.error("TopicEditor publish-backlog fetch failed: %s", exc)
+            return results
+        for row in pending or []:
+            topic_id = str(row.get("topic_id") or "")
+            if not topic_id:
+                continue
+            try:
+                topic = self.db.get_topic(topic_id, environment=self.environment)
+            except Exception as exc:
+                logger.error("TopicEditor publish-backlog topic fetch failed: topic_id=%s error=%s", topic_id, exc)
+                continue
+            if not topic:
+                continue
+            try:
+                outbox_rows = self.db.get_topic_publish_outbox(topic_id, environment=self.environment)
+            except Exception as exc:
+                logger.error("TopicEditor publish-backlog outbox fetch failed: topic_id=%s error=%s", topic_id, exc)
+                continue
+            if not outbox_rows:
+                logger.warning("TopicEditor publish-backlog topic has no outbox rows (legacy), skipping topic_id=%s", topic_id)
+                continue
+            results.append(await self._publish_topic(topic))
+        return results
+
     def _classify_publish_media_failure(
         self,
         unit: Dict[str, Any],
@@ -4486,6 +4948,43 @@ class TopicEditor:
             had_failure = False
             publish_traces: List[Dict[str, str]] = []
             channel_id = self._resolve_live_channel_id(guild_id)
+
+            # Durable per-unit outbox: record every send unit BEFORE the loop so a
+            # crash mid-send leaves a recoverable trace. Units already sent in a prior
+            # attempt (preserved from the existing outbox) are written as sent and
+            # skipped in the loop — reconcile-before-resend prevents duplicates.
+            preserve_sent: Dict[int, int] = {}
+            if hasattr(self.db, "get_topic_publish_outbox"):
+                try:
+                    existing_outbox = self.db.get_topic_publish_outbox(topic_id, environment=self.environment)
+                    for row in existing_outbox or []:
+                        if str(row.get("status")) == "sent" and row.get("discord_message_id") is not None:
+                            preserve_sent[int(row.get("unit_index") or 0)] = int(row["discord_message_id"])
+                except Exception as exc:
+                    logger.error("TopicEditor outbox read failed: topic_id=%s error=%s", topic_id, exc)
+            if hasattr(self.db, "insert_topic_publish_outbox"):
+                try:
+                    inserted = self.db.insert_topic_publish_outbox(
+                        topic_id,
+                        send_units,
+                        environment=self.environment,
+                        run_id=topic.get("run_id"),
+                        guild_id=guild_id,
+                        preserve_sent=preserve_sent,
+                    )
+                    if not inserted:
+                        # Outbox durable-intent write failed. Proceed to send anyway
+                        # (at-least-once — the message must not be silently lost), but
+                        # flag it loudly so a retry knows reconcile may be imperfect.
+                        logger.error("TopicEditor outbox insert returned 0 rows: topic_id=%s — duplicate-reconcile may be degraded", topic_id)
+                        publish_diagnostics.setdefault("reason_codes", []).append("outbox_insert_failed")
+                except Exception as exc:
+                    logger.error("TopicEditor outbox insert failed: topic_id=%s error=%s", topic_id, exc)
+                    publish_diagnostics.setdefault("reason_codes", []).append("outbox_insert_failed")
+            skip_send: Set[int] = set(preserve_sent.keys())
+            for skipped_idx, skipped_mid in preserve_sent.items():
+                sent_ids.append(skipped_mid)
+
             try:
                 channel = await self._resolve_discord_channel(channel_id)
                 if channel is None:
@@ -4493,7 +4992,15 @@ class TopicEditor:
                 idx = 0
                 while idx < len(send_units):
                     unit = send_units[idx]
+                    if idx in skip_send:
+                        # Already sent in a prior attempt — reconcile, don't resend.
+                        idx += 1
+                        continue
                     if unit.get("send_kind") == "file_url":
+                        # Keep (original_index, unit) pairs so outbox rows are updated by
+                        # their true index even when already-sent units are skipped and
+                        # the batch compresses (skipping would otherwise shift indices).
+                        batch_orig_indices = [idx]
                         batch = [unit]
                         idx += 1
                         while (
@@ -4501,12 +5008,32 @@ class TopicEditor:
                             and send_units[idx].get("send_kind") == "file_url"
                             and len(batch) < 10
                         ):
+                            if idx in skip_send:
+                                idx += 1
+                                continue
+                            batch_orig_indices.append(idx)
                             batch.append(send_units[idx])
                             idx += 1
+                        # Durable intent: mark each batch unit as sending before the call.
+                        self._mark_outbox_units(
+                            topic_id, guild_id, batch_orig_indices,
+                            [{"status": "sending"} for _ in batch],
+                        )
                         batch_sent_ids, batch_error, batch_traces = await self._send_file_url_batch(
                             channel,
                             batch,
                             topic_id,
+                        )
+                        self._mark_outbox_units(
+                            topic_id, guild_id, batch_orig_indices,
+                            [
+                                {
+                                    "status": "sent" if i < len(batch_sent_ids) and batch_sent_ids[i] is not None else "failed",
+                                    "discord_message_id": batch_sent_ids[i] if i < len(batch_sent_ids) else None,
+                                    "error": batch_error,
+                                }
+                                for i in range(len(batch))
+                            ],
                         )
                         sent_ids.extend(batch_sent_ids)
                         publish_traces.extend(batch_traces)
@@ -4537,8 +5064,20 @@ class TopicEditor:
                                 )
                         continue
 
+                    unit_outbox_index = idx
+                    self._mark_outbox_units(
+                        topic_id, guild_id, [unit_outbox_index], [{"status": "sending"}],
+                    )
                     unit_sent_id, unit_error, unit_trace = await self._send_one_unit(
                         channel, unit, topic_id
+                    )
+                    self._mark_outbox_units(
+                        topic_id, guild_id, [unit_outbox_index],
+                        [{
+                            "status": "sent" if unit_sent_id is not None else "failed",
+                            "discord_message_id": unit_sent_id,
+                            "error": unit_error,
+                        }],
                     )
                     idx += 1
                     if unit_sent_id is not None:
@@ -5262,6 +5801,76 @@ class TopicEditor:
             "state": {"source_count": len(messages)},
         }
 
+    def _write_end_of_run_checkpoint(self, checkpoint: Dict[str, Any], messages: Sequence[Dict[str, Any]],
+                                     run_id: str, forced_close: bool) -> Dict[str, Any]:
+        """Advance the source checkpoint at end of run.
+
+        A clean finalize advances normally. A forced close does NOT advance the
+        window (so the next run replays the same source messages and any in-flight
+        drafts are not lost), but the replay is bounded: after
+        TOPIC_EDITOR_MAX_FORCED_CLOSE_REPLAYS consecutive forced closes the window
+        is force-advanced anyway (with a loud audit row) to cap replay cost. Force
+        advancement never deletes persisted drafts — the recovery pass re-finds them
+        by message id.
+        """
+        max_replays = self._env_int("TOPIC_EDITOR_MAX_FORCED_CLOSE_REPLAYS", 4)
+        state = dict(checkpoint.get("state") or {})
+        consecutive = int(state.get("consecutive_forced_closes", 0) or 0)
+
+        if not forced_close:
+            checkpoint_after = self._checkpoint_after(checkpoint, messages, run_id)
+            after_state = dict(checkpoint_after.get("state") or {})
+            after_state["consecutive_forced_closes"] = 0
+            checkpoint_after["state"] = after_state
+            self._upsert_topic_editor_checkpoint(checkpoint_after)
+            return checkpoint_after
+
+        # Forced close: do not advance the window; just record the replay counter.
+        consecutive += 1
+        if consecutive >= max_replays:
+            checkpoint_after = self._checkpoint_after(checkpoint, messages, run_id)
+            after_state = dict(checkpoint_after.get("state") or {})
+            after_state["consecutive_forced_closes"] = 0
+            after_state["forced_advance_after"] = consecutive
+            checkpoint_after["state"] = after_state
+            try:
+                self._store_transition({
+                    "run_id": run_id,
+                    "guild_id": checkpoint.get("guild_id") or self._resolve_guild_id(),
+                    "action": "forced_close_checkpoint_forced_advance",
+                    "reason": f"advanced after {consecutive} consecutive forced closes; window replayed to bound cost",
+                    "payload": shape_transition_payload(
+                        outcome="accepted",
+                        tool_name="checkpoint",
+                        extra={
+                            "consecutive_forced_closes": consecutive,
+                            "last_message_id": checkpoint_after.get("last_message_id"),
+                        },
+                    ),
+                    "model": self.model,
+                })
+            except Exception as exc:
+                logger.error("TopicEditor forced-advance audit failed: %s", exc)
+            self._upsert_topic_editor_checkpoint(checkpoint_after)
+            return checkpoint_after
+
+        checkpoint_after = dict(checkpoint)
+        checkpoint_after["last_run_id"] = run_id
+        checkpoint_after["state"] = {**state, "consecutive_forced_closes": consecutive}
+        self._upsert_topic_editor_checkpoint(checkpoint_after)
+        return checkpoint_after
+
+    def _upsert_topic_editor_checkpoint(self, checkpoint_after: Dict[str, Any]) -> None:
+        """Upsert a checkpoint, logging loudly (not raising) on DB failure.
+
+        Not advancing is the safe direction (the window just replays), so a failed
+        write after publish should not fail the whole run.
+        """
+        try:
+            self.db.upsert_topic_editor_checkpoint(checkpoint_after, environment=self.environment)
+        except Exception as exc:
+            logger.error("TopicEditor checkpoint upsert failed: %s", exc)
+
     @staticmethod
     def _normalize_attachment_list(attachments: Any) -> List[Dict[str, Any]]:
         """Return a list of attachment dicts from list, dict, or JSON-string inputs."""
@@ -5678,6 +6287,12 @@ def normalize_media_ref(ref: Dict[str, Any]) -> Dict[str, Any]:
         return {"message_id": message_id, "kind": "attachment", "index": index}
 
     kind = ref.get("kind", "attachment")
+    # The model sometimes emits visual-kind vocabulary (video/image/gif/audio/file)
+    # when deriving media refs from the evidence shelf. Discord media is indexed as
+    # attachments, so normalize those to "attachment" instead of rejecting them —
+    # this removes the "Media id cannot be resolved" failure class for valid media.
+    if kind in ("video", "image", "gif", "audio", "file"):
+        kind = "attachment"
     if kind not in ("attachment", "embed", "external"):
         raise ValueError(
             f"media_ref kind must be 'attachment', 'embed', or 'external', got {kind!r}"

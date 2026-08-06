@@ -1,6 +1,6 @@
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Optional, List, Dict, Any, Tuple, Set
+from typing import Optional, List, Dict, Any, Tuple, Set, Sequence
 import asyncio
 import hashlib
 import inspect
@@ -615,6 +615,11 @@ class DatabaseHandler:
             self.storage_handler.get_topics(guild_id=guild_id, states=states, limit=limit, environment=environment)
         )
 
+    def get_topic(self, topic_id: str, environment: str = 'prod') -> Optional[Dict[str, Any]]:
+        if not self.storage_handler:
+            return None
+        return self._run_async_in_thread(self.storage_handler.get_topic(topic_id, environment=environment))
+
     def add_topic_source(self, source: Dict[str, Any], environment: str = 'prod') -> Optional[Dict[str, Any]]:
         guild_id = source.get('guild_id')
         if not self._live_write_allowed(guild_id) or not self.storage_handler:
@@ -836,7 +841,9 @@ class DatabaseHandler:
         environment: str = 'prod',
         limit: int = 20,
         status: Optional[str] = None,
+        statuses: Optional[Sequence[str]] = None,
         run_id: Optional[str] = None,
+        ascending: bool = False,
     ) -> List[Dict[str, Any]]:
         if not self.storage_handler:
             return []
@@ -846,7 +853,101 @@ class DatabaseHandler:
                 environment=environment,
                 limit=limit,
                 status=status,
+                statuses=statuses,
                 run_id=run_id,
+                ascending=ascending,
+            )
+        )
+
+    def insert_topic_publish_outbox(
+        self,
+        topic_id: str,
+        units: List[Dict[str, Any]],
+        environment: str = 'prod',
+        run_id: Optional[str] = None,
+        guild_id: Optional[int] = None,
+        preserve_sent: Optional[Dict[int, int]] = None,
+    ) -> int:
+        if not self._live_write_allowed(guild_id) or not self.storage_handler:
+            return 0
+        return self._run_async_in_thread(
+            self.storage_handler.insert_topic_publish_outbox(
+                topic_id, units, environment=environment, run_id=run_id, preserve_sent=preserve_sent,
+            )
+        )
+
+    def update_topic_publish_outbox(
+        self,
+        topic_id: str,
+        unit_index: int,
+        updates: Dict[str, Any],
+        environment: str = 'prod',
+        guild_id: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        if not self._live_write_allowed(guild_id) or not self.storage_handler:
+            return None
+        return self._run_async_in_thread(
+            self.storage_handler.update_topic_publish_outbox(
+                topic_id, unit_index, updates, environment=environment,
+            )
+        )
+
+    def get_topic_publish_outbox(
+        self,
+        topic_id: str,
+        environment: str = 'prod',
+    ) -> List[Dict[str, Any]]:
+        if not self.storage_handler:
+            return []
+        return self._run_async_in_thread(
+            self.storage_handler.get_topic_publish_outbox(topic_id, environment=environment)
+        )
+
+    def get_pending_topic_publish_outbox_topics(
+        self,
+        environment: str = 'prod',
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        if not self.storage_handler:
+            return []
+        return self._run_async_in_thread(
+            self.storage_handler.get_pending_topic_publish_outbox_topics(
+                environment=environment, limit=limit,
+            )
+        )
+
+    def get_topic_editor_needs_review(
+        self,
+        guild_id: Optional[int] = None,
+        environment: str = 'prod',
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        if not self.storage_handler:
+            return []
+        return self._run_async_in_thread(
+            self.storage_handler.get_topic_editor_needs_review(
+                guild_id=guild_id,
+                environment=environment,
+                limit=limit,
+            )
+        )
+
+    def claim_topic_editor_draft(
+        self,
+        draft_id: str,
+        claimant_run_id: str,
+        statuses: Sequence[str],
+        guild_id: Optional[int] = None,
+        environment: str = 'prod',
+    ) -> Optional[Dict[str, Any]]:
+        if not self._live_write_allowed(guild_id) or not self.storage_handler:
+            return None
+        return self._run_async_in_thread(
+            self.storage_handler.claim_topic_editor_draft(
+                draft_id,
+                claimant_run_id,
+                statuses,
+                environment=environment,
             )
         )
 

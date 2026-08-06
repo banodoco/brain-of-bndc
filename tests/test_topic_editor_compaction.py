@@ -346,7 +346,8 @@ def test_multi_turn_run_completes_with_compaction_but_fails_without(monkeypatch)
 # --------------------------------------------------------------------------
 
 def test_graceful_finalize_nudge_appears_near_cap_after_compaction(monkeypatch):
-    monkeypatch.setenv("TOPIC_EDITOR_MAX_TOKENS", "100000")
+    monkeypatch.setenv("TOPIC_EDITOR_MAX_TOKENS", "0")
+    monkeypatch.setenv("TOPIC_EDITOR_MAX_COST_USD", "0.0145")
     monkeypatch.setenv("TOPIC_EDITOR_COMPACT_TOKEN_THRESHOLD", "60000")
     monkeypatch.setenv("TOPIC_EDITOR_MAX_COMPACTIONS", "1")
     db = FakeDB()
@@ -575,7 +576,8 @@ def test_compact_post_nudge_preserves_pair_safe_tail():
 
 
 def test_graceful_finalize_nudge_is_one_shot(monkeypatch):
-    monkeypatch.setenv("TOPIC_EDITOR_MAX_TOKENS", "101050")
+    monkeypatch.setenv("TOPIC_EDITOR_MAX_TOKENS", "0")
+    monkeypatch.setenv("TOPIC_EDITOR_MAX_COST_USD", "0.0145")
     monkeypatch.setenv("TOPIC_EDITOR_COMPACT_TOKEN_THRESHOLD", "60000")
     monkeypatch.setenv("TOPIC_EDITOR_MAX_COMPACTIONS", "1")
     db = FakeDB()
