@@ -849,7 +849,7 @@ class GatingCog(commands.Cog):
                 async for msg in channel.history(limit=200):
                     if msg.author.bot or msg.author.id not in pending_member_ids:
                         continue
-                    if speaker_role and speaker_role in msg.author.roles:
+                    if speaker_role and speaker_role in getattr(msg.author, 'roles', ()):
                         continue
                     if msg.id not in self._pending_messages:
                         self._pending_messages[msg.id] = msg.author.id

@@ -1635,7 +1635,7 @@ class AdminCog(commands.Cog):
 
     @app_commands.command(
         name="remove-from-hivemind",
-        description="Remove your messages from the public hivemind knowledge corpus (does NOT delete anything from Discord).",
+        description="Remove your messages from the public hivemind knowledge corpus.",
     )
     @app_commands.describe(
         dry_run="Preview how many messages would be removed without actually removing them"
