@@ -189,9 +189,44 @@ class DeepSeekClient(BaseLLMClient):
             ))
 
         usage = getattr(response, "usage", None)
+
+        def _usage_attr(name: str, default=0):
+            if usage is None:
+                return default
+            if isinstance(usage, dict):
+                return usage.get(name, default)
+            return getattr(usage, name, default)
+
+        def _usage_int(name: str, default: int = 0) -> int:
+            value = _usage_attr(name, default)
+            try:
+                return int(value)
+            except (TypeError, ValueError, OverflowError):
+                return default
+
+        prompt_tokens = _usage_int("prompt_tokens")
+        completion_tokens = _usage_int("completion_tokens")
+        # DeepSeek's OpenAI-compatible API reports context-cache splits as
+        # prompt_cache_hit_tokens / prompt_cache_miss_tokens. Some gateways only
+        # expose the nested OpenAI-schema form, so fall back to that. Neutral
+        # normalized names (cache_hit/miss_input_tokens) avoid Anthropic's
+        # cache-*creation*-specific pricing semantics.
+        cache_hit = _usage_int("prompt_cache_hit_tokens")
+        cache_miss = _usage_int("prompt_cache_miss_tokens")
+        if not cache_hit and not cache_miss:
+            details = _usage_attr("prompt_tokens_details", None)
+            if details is not None:
+                nested = details.get("cached_tokens") if isinstance(details, dict) else getattr(details, "cached_tokens", None)
+                try:
+                    cache_hit = int(nested)
+                except (TypeError, ValueError, OverflowError):
+                    cache_hit = 0
+                cache_miss = max(0, prompt_tokens - cache_hit)
         normalized_usage = SimpleNamespace(
-            input_tokens=getattr(usage, "prompt_tokens", 0) if usage else 0,
-            output_tokens=getattr(usage, "completion_tokens", 0) if usage else 0,
+            input_tokens=prompt_tokens,
+            output_tokens=completion_tokens,
+            cache_hit_input_tokens=cache_hit,
+            cache_miss_input_tokens=cache_miss,
         )
         return SimpleNamespace(
             content=content_blocks,

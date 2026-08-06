@@ -12,6 +12,7 @@ import asyncio
 import json
 import hashlib
 import logging
+import math
 import re
 import os
 import tempfile
@@ -802,9 +803,13 @@ class TopicEditor:
             outcomes: List[Dict[str, Any]] = []
             total_input_tokens = 0
             total_output_tokens = 0
+            total_cache_hit_tokens = 0
+            total_cache_miss_tokens = 0
             cumulative_tokens = 0
             cumulative_cost_usd = 0.0
             has_cost_estimate = False
+            cumulative_cache_adjusted_cost_usd = 0.0
+            has_cache_adjusted_estimate = False
             compaction_count = 0
             last_compaction_cumulative = 0
             last_context_size = 0
@@ -839,11 +844,17 @@ class TopicEditor:
                 last_context_size = int(usage.get("input_tokens", 0) or 0)
                 total_input_tokens += int(usage.get("input_tokens", 0) or 0)
                 total_output_tokens += int(usage.get("output_tokens", 0) or 0)
+                total_cache_hit_tokens += int(usage.get("cache_hit_tokens", 0) or 0)
+                total_cache_miss_tokens += int(usage.get("cache_miss_tokens", 0) or 0)
                 cumulative_tokens = total_input_tokens + total_output_tokens
                 turn_cost = self._estimate_cost_usd(usage)
                 if turn_cost is not None:
                     has_cost_estimate = True
-                    cumulative_cost_usd = round(cumulative_cost_usd + float(turn_cost), 6)
+                    cumulative_cost_usd = cumulative_cost_usd + float(turn_cost)
+                cache_adjusted_turn_cost = self._estimate_cache_adjusted_cost_usd(usage)
+                if cache_adjusted_turn_cost is not None:
+                    has_cache_adjusted_estimate = True
+                    cumulative_cache_adjusted_cost_usd = cumulative_cache_adjusted_cost_usd + float(cache_adjusted_turn_cost)
 
                 cap_reason = None
                 if max_cost_usd > 0 and has_cost_estimate and cumulative_cost_usd > max_cost_usd:
@@ -926,8 +937,16 @@ class TopicEditor:
                         {"id": call["id"], "name": call["name"], "input": call["input"]}
                         for call in tool_calls
                     ]
-                    metadata["usage"] = {"input_tokens": total_input_tokens, "output_tokens": total_output_tokens}
-                    metadata["cumulative_cost_usd"] = cumulative_cost_usd if has_cost_estimate else None
+                    metadata["usage"] = {
+                        "input_tokens": total_input_tokens,
+                        "output_tokens": total_output_tokens,
+                        "cache_hit_tokens": total_cache_hit_tokens,
+                        "cache_miss_tokens": total_cache_miss_tokens,
+                    }
+                    metadata["cumulative_cost_usd"] = round(cumulative_cost_usd, 6) if has_cost_estimate else None
+                    metadata["estimated_cache_adjusted_cost_usd"] = (
+                        round(cumulative_cache_adjusted_cost_usd, 6) if has_cache_adjusted_estimate else None
+                    )
                     metadata["cumulative_tokens"] = cumulative_tokens
                     metadata["max_cost_usd"] = max_cost_usd
                     metadata["max_tokens"] = max_tokens
@@ -968,8 +987,16 @@ class TopicEditor:
                     {"id": call["id"], "name": call["name"], "input": call["input"]}
                     for call in tool_calls
                 ]
-                metadata["usage"] = {"input_tokens": total_input_tokens, "output_tokens": total_output_tokens}
-                metadata["cumulative_cost_usd"] = cumulative_cost_usd if has_cost_estimate else None
+                metadata["usage"] = {
+                    "input_tokens": total_input_tokens,
+                    "output_tokens": total_output_tokens,
+                    "cache_hit_tokens": total_cache_hit_tokens,
+                    "cache_miss_tokens": total_cache_miss_tokens,
+                }
+                metadata["cumulative_cost_usd"] = round(cumulative_cost_usd, 6) if has_cost_estimate else None
+                metadata["estimated_cache_adjusted_cost_usd"] = (
+                    round(cumulative_cache_adjusted_cost_usd, 6) if has_cache_adjusted_estimate else None
+                )
                 metadata["cumulative_tokens"] = cumulative_tokens
                 metadata["max_cost_usd"] = max_cost_usd
                 metadata["max_tokens"] = max_tokens
@@ -1037,7 +1064,7 @@ class TopicEditor:
                         tool_name="finalize_run",
                         error=self._forced_close_error(reason, max_turns, cumulative_cost_usd, cumulative_tokens),
                         extra={
-                            "cumulative_cost_usd": cumulative_cost_usd if has_cost_estimate else None,
+                            "cumulative_cost_usd": round(cumulative_cost_usd, 6) if has_cost_estimate else None,
                             "cumulative_tokens": cumulative_tokens,
                             "max_cost_usd": max_cost_usd,
                             "max_tokens": max_tokens,
@@ -1050,8 +1077,16 @@ class TopicEditor:
                 {"id": call["id"], "name": call["name"], "input": call["input"]}
                 for call in tool_calls
             ]
-            metadata["usage"] = {"input_tokens": total_input_tokens, "output_tokens": total_output_tokens}
-            metadata["cumulative_cost_usd"] = cumulative_cost_usd if has_cost_estimate else None
+            metadata["usage"] = {
+                "input_tokens": total_input_tokens,
+                "output_tokens": total_output_tokens,
+                "cache_hit_tokens": total_cache_hit_tokens,
+                "cache_miss_tokens": total_cache_miss_tokens,
+            }
+            metadata["cumulative_cost_usd"] = round(cumulative_cost_usd, 6) if has_cost_estimate else None
+            metadata["estimated_cache_adjusted_cost_usd"] = (
+                round(cumulative_cache_adjusted_cost_usd, 6) if has_cache_adjusted_estimate else None
+            )
             metadata["cumulative_tokens"] = cumulative_tokens
             metadata["max_cost_usd"] = max_cost_usd
             metadata["max_tokens"] = max_tokens
@@ -3759,7 +3794,11 @@ class TopicEditor:
             "failed_publish_count": failed_publish_count,
             "input_tokens": usage.get("input_tokens", 0),
             "output_tokens": usage.get("output_tokens", 0),
+            "cache_hit_tokens": usage.get("cache_hit_tokens", 0),
+            "cache_miss_tokens": usage.get("cache_miss_tokens", 0),
+            "cache_hit_pct": self._cache_hit_pct(usage),
             "cost_usd": metadata_cost if isinstance(metadata_cost, (int, float)) else self._estimate_cost_usd(usage),
+            "estimated_cache_adjusted_cost_usd": metadata.get("estimated_cache_adjusted_cost_usd"),
             "latency_ms": int((time.monotonic() - started) * 1000),
             "model": self.model,
             "publishing_enabled": self.publishing_enabled,
@@ -3984,6 +4023,7 @@ class TopicEditor:
         usage = {
             "input_tokens": updates.get("input_tokens", 0),
             "output_tokens": updates.get("output_tokens", 0),
+            "cache_hit_pct": updates.get("cache_hit_pct"),
             "cost_usd": updates.get("cost_usd"),
             "model": updates.get("model"),
         }
@@ -4025,7 +4065,8 @@ class TopicEditor:
             f"env={self.environment} publishing={'ON' if self.publishing_enabled else 'OFF'} trigger-state={updates.get('status') or 'completed'}",
             f"sources={updates.get('source_message_count', 0)} tools={updates.get('tool_call_count', 0)} accepted={updates.get('accepted_count', 0)} rejected={updates.get('rejected_count', 0)} overrides={updates.get('override_count', 0)} observations={updates.get('observation_count', 0)}",
             f"published={updates.get('published_count', 0)} failed_publish={updates.get('failed_publish_count', 0)} latency_ms={updates.get('latency_ms', 0)}",
-            f"tokens in/out={usage['input_tokens']}/{usage['output_tokens']} cost_usd={usage['cost_usd']} model={usage['model']}",
+            f"tokens in/out={usage['input_tokens']}/{usage['output_tokens']} cost_usd={usage['cost_usd']} model={usage['model']}"
+            + (f" cache_hit_pct={usage['cache_hit_pct']}" if usage["cache_hit_pct"] is not None else ""),
             f"outcomes={outcome_counts}",
         ]
         metadata = updates.get("metadata") or {}
@@ -4157,6 +4198,15 @@ class TopicEditor:
             f"cumulative cost: `{self._format_cost(metadata.get('cumulative_cost_usd'))}`",
             f"latency: `{updates.get('latency_ms', 0)} ms`",
         ]
+        cache_hit_pct = updates.get("cache_hit_pct")
+        cache_adjusted = metadata.get("estimated_cache_adjusted_cost_usd")
+        if isinstance(cache_hit_pct, (int, float)) and cache_hit_pct >= 0:
+            model_lines.append(
+                f"cache hit: `{cache_hit_pct:.1f}%` "
+                f"(hit=`{updates.get('cache_hit_tokens', 0)}` miss=`{updates.get('cache_miss_tokens', 0)}`)"
+            )
+        if isinstance(cache_adjusted, (int, float)):
+            model_lines.append(f"cost (cache-adjusted): `{self._format_cost(cache_adjusted)}`")
         embed.add_field(name="model & cost", value="\n".join(model_lines)[:1024], inline=True)
 
         # --- field: input context (time range + channel coverage) ---
@@ -4980,26 +5030,149 @@ class TopicEditor:
                 calls.append({"id": block.get("id"), "name": block.get("name"), "input": block.get("input") or {}})
         return calls
 
+    @staticmethod
+    def _safe_usage_int(value: Any, default: int = 0) -> int:
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError, OverflowError):
+            return default
+
+    @staticmethod
+    def _parse_cost_rate(name: str, default: float) -> float:
+        """Read a cost-per-MTokens env rate, falling back to `default` when the
+        value is missing, unparseable, non-finite, or negative. A misconfigured
+        rate must never yield NaN (which would silently disable the cost cap
+        comparison) or a negative price.
+        """
+        raw = os.getenv(name)
+        if raw is None or str(raw).strip() == "":
+            return default
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            logger.warning("TopicEditor invalid cost rate %s=%r; using default %s", name, raw, default)
+            return default
+        if not math.isfinite(value) or value < 0:
+            logger.warning("TopicEditor non-finite/negative cost rate %s=%r; using default %s", name, raw, default)
+            return default
+        return value
+
     def _extract_usage(self, response: Any) -> Dict[str, int]:
         usage = getattr(response, "usage", None)
         if not usage:
             return {}
-        return {
-            "input_tokens": int(getattr(usage, "input_tokens", 0) or 0),
-            "output_tokens": int(getattr(usage, "output_tokens", 0) or 0),
-        }
+        input_tokens = self._safe_usage_int(getattr(usage, "input_tokens", 0))
+        output_tokens = self._safe_usage_int(getattr(usage, "output_tokens", 0))
+        raw_hit = self._safe_usage_int(getattr(usage, "cache_hit_input_tokens", 0))
+        raw_miss = self._safe_usage_int(getattr(usage, "cache_miss_input_tokens", 0))
+        result = {"input_tokens": input_tokens, "output_tokens": output_tokens}
+        if raw_hit or raw_miss:
+            # The provider reports hit/miss as a partition of prompt tokens. A
+            # shortfall means some tokens were neither flagged — bill them as
+            # misses. An over-count means the counters are inconsistent: prefer
+            # the reported miss count (conservative — more misses bill higher)
+            # and clamp hits to the remainder, rather than emitting a partition
+            # that exceeds the reported prompt size.
+            if raw_hit + raw_miss > input_tokens:
+                logger.warning(
+                    "TopicEditor usage cache counters exceed prompt tokens: "
+                    "hit=%s miss=%s prompt=%s",
+                    raw_hit,
+                    raw_miss,
+                    input_tokens,
+                )
+                miss = min(raw_miss, input_tokens)
+                hit = max(0, input_tokens - miss)
+            else:
+                hit = raw_hit
+                miss = max(0, input_tokens - hit)
+        else:
+            # No cache info reported — treat everything as a cache miss so cost
+            # accounting stays conservative.
+            hit, miss = 0, input_tokens
+        result["cache_hit_tokens"] = hit
+        result["cache_miss_tokens"] = miss
+        return result
 
     def _estimate_cost_usd(self, usage: Dict[str, Any]) -> Optional[float]:
+        """Conservative cost estimate: every input token billed at the full rate.
+
+        Deliberately ignores prompt caching so the `TOPIC_EDITOR_MAX_COST_USD`
+        kill-switch stays a worst-case upper bound. See
+        `_estimate_cache_adjusted_cost_usd` for the cache-aware sibling.
+        """
         try:
             input_tokens = float(usage.get("input_tokens") or 0)
             output_tokens = float(usage.get("output_tokens") or 0)
-            input_rate = float(os.getenv("TOPIC_EDITOR_INPUT_COST_PER_MTOKENS", "0.55") or 0)
-            output_rate = float(os.getenv("TOPIC_EDITOR_OUTPUT_COST_PER_MTOKENS", "2.19") or 0)
+            input_rate = self._parse_cost_rate("TOPIC_EDITOR_INPUT_COST_PER_MTOKENS", 0.55)
+            output_rate = self._parse_cost_rate("TOPIC_EDITOR_OUTPUT_COST_PER_MTOKENS", 2.19)
             if input_rate <= 0 and output_rate <= 0:
                 return None
-            return round((input_tokens / 1_000_000.0 * input_rate) + (output_tokens / 1_000_000.0 * output_rate), 6)
+            return (input_tokens / 1_000_000.0 * input_rate) + (output_tokens / 1_000_000.0 * output_rate)
         except (TypeError, ValueError):
             return None
+
+    def _estimate_cache_adjusted_cost_usd(self, usage: Dict[str, Any]) -> Optional[float]:
+        """Cache-aware cost estimate for reporting (NOT used by the kill-switch).
+
+        Bills cache-hit input at `TOPIC_EDITOR_CACHE_HIT_COST_PER_MTOKENS` (capped
+        at the full input rate) and miss input at the full input rate, so with a
+        valid hit rate the result is at or below the conservative
+        `_estimate_cost_usd` — that gap is exactly the cache discount this
+        estimate exists to surface. Returns `None` (so no cache-adjusted cost is
+        published) unless a valid hit rate is explicitly configured; the
+        conservative estimate that drives the `TOPIC_EDITOR_MAX_COST_USD` guard
+        is never affected by this path.
+        """
+        try:
+            input_tokens = max(0.0, float(usage.get("input_tokens") or 0))
+            output_tokens = max(0.0, float(usage.get("output_tokens") or 0))
+            hit_tokens = max(0.0, float(usage.get("cache_hit_tokens") or 0))
+            miss_tokens = max(0.0, float(usage.get("cache_miss_tokens") or 0))
+            input_rate = self._parse_cost_rate("TOPIC_EDITOR_INPUT_COST_PER_MTOKENS", 0.55)
+            output_rate = self._parse_cost_rate("TOPIC_EDITOR_OUTPUT_COST_PER_MTOKENS", 2.19)
+            if input_rate <= 0 and output_rate <= 0:
+                return None
+            # A valid cache-hit rate must be explicitly configured before any
+            # cache-adjusted number is published (an intentional zero price is
+            # valid). Unset, empty, invalid, negative, or non-finite -> None, so
+            # the reporting field stays absent rather than showing a misleading
+            # "cache-adjusted" figure. The rate is capped at the input rate so
+            # the adjusted estimate can never exceed the conservative one.
+            hit_rate_raw = os.getenv("TOPIC_EDITOR_CACHE_HIT_COST_PER_MTOKENS")
+            if hit_rate_raw is None or str(hit_rate_raw).strip() == "":
+                return None
+            try:
+                hit_rate = float(hit_rate_raw)
+            except (TypeError, ValueError):
+                logger.warning("TopicEditor invalid cache hit rate %r; no cache-adjusted cost", hit_rate_raw)
+                return None
+            if not math.isfinite(hit_rate) or hit_rate < 0:
+                logger.warning("TopicEditor non-finite/negative cache hit rate %r; no cache-adjusted cost", hit_rate_raw)
+                return None
+            if hit_tokens <= 0 and miss_tokens <= 0:
+                # Rate is configured but the provider reported no split: report
+                # the conservative number for this turn (0% hit) rather than None.
+                return self._estimate_cost_usd(usage)
+            hit_rate = min(hit_rate, input_rate)
+            return (
+                (hit_tokens / 1_000_000.0 * hit_rate)
+                + (miss_tokens / 1_000_000.0 * input_rate)
+                + (output_tokens / 1_000_000.0 * output_rate)
+            )
+        except (TypeError, ValueError):
+            return None
+
+    def _cache_hit_pct(self, usage: Dict[str, Any]) -> Optional[float]:
+        try:
+            hit = max(0.0, float(usage.get("cache_hit_tokens") or 0))
+            miss = max(0.0, float(usage.get("cache_miss_tokens") or 0))
+        except (TypeError, ValueError):
+            return None
+        total = hit + miss
+        if total <= 0:
+            return None
+        return round(hit / total * 100, 1)
 
     def _seed_cold_start_checkpoint(
         self,

@@ -4729,3 +4729,212 @@ def test_partial_status_mixed_success_failure(monkeypatch):
 
     # The failed fallback triggered (inner try + outer except re-try)
     assert fail_count[0] >= 1, "Second external ref fallback URL should have been attempted"
+
+
+def test_extract_usage_carries_cache_split_and_resolves_unknown_to_all_miss():
+    editor = TopicEditor.__new__(TopicEditor)
+
+    # Provider-reported hit/miss partition.
+    with_cache = editor._extract_usage(
+        SimpleNamespace(
+            usage=SimpleNamespace(
+                input_tokens=5814,
+                output_tokens=8,
+                cache_hit_input_tokens=5760,
+                cache_miss_input_tokens=54,
+            )
+        )
+    )
+    assert with_cache["cache_hit_tokens"] == 5760
+    assert with_cache["cache_miss_tokens"] == 54
+
+    # No cache fields reported -> conservative all-miss.
+    no_cache = editor._extract_usage(SimpleNamespace(usage=SimpleNamespace(input_tokens=10, output_tokens=1)))
+    assert no_cache["cache_hit_tokens"] == 0
+    assert no_cache["cache_miss_tokens"] == 10
+
+    # No usage at all -> empty.
+    assert editor._extract_usage(SimpleNamespace(usage=None)) == {}
+
+
+def test_extract_usage_reconciles_partition_residual_and_overcount():
+    editor = TopicEditor.__new__(TopicEditor)
+
+    # hit + miss < prompt: the residual is billed as miss.
+    short = editor._extract_usage(
+        SimpleNamespace(
+            usage=SimpleNamespace(
+                input_tokens=100,
+                output_tokens=0,
+                cache_hit_input_tokens=40,
+                cache_miss_input_tokens=40,
+            )
+        )
+    )
+    assert short["cache_hit_tokens"] == 40
+    assert short["cache_miss_tokens"] == 60
+
+    # hit + miss > prompt: counters inconsistent; miss-favoring reconciliation
+    # preserves the reported misses and clamps hits to the remainder.
+    over = editor._extract_usage(
+        SimpleNamespace(
+            usage=SimpleNamespace(
+                input_tokens=100,
+                output_tokens=0,
+                cache_hit_input_tokens=90,
+                cache_miss_input_tokens=90,
+            )
+        )
+    )
+    assert over["cache_hit_tokens"] == 10
+    assert over["cache_miss_tokens"] == 90
+
+
+def test_estimate_cost_usd_stays_conservative_ignores_cache(monkeypatch):
+    monkeypatch.setenv("TOPIC_EDITOR_INPUT_COST_PER_MTOKENS", "0.55")
+    monkeypatch.setenv("TOPIC_EDITOR_OUTPUT_COST_PER_MTOKENS", "2.19")
+    editor = TopicEditor.__new__(TopicEditor)
+
+    usage = {"input_tokens": 1_000_000, "output_tokens": 0, "cache_hit_tokens": 1_000_000, "cache_miss_tokens": 0}
+    assert editor._estimate_cost_usd(usage) == 0.55
+
+
+def test_estimate_cache_adjusted_cost_usd_bills_hits_at_discount(monkeypatch):
+    monkeypatch.setenv("TOPIC_EDITOR_INPUT_COST_PER_MTOKENS", "0.55")
+    monkeypatch.setenv("TOPIC_EDITOR_OUTPUT_COST_PER_MTOKENS", "2.19")
+    monkeypatch.setenv("TOPIC_EDITOR_CACHE_HIT_COST_PER_MTOKENS", "0.055")
+    editor = TopicEditor.__new__(TopicEditor)
+
+    usage = {
+        "input_tokens": 1_000_000,
+        "output_tokens": 0,
+        "cache_hit_tokens": 900_000,
+        "cache_miss_tokens": 100_000,
+    }
+    expected = 900_000 / 1e6 * 0.055 + 100_000 / 1e6 * 0.55
+    assert editor._estimate_cache_adjusted_cost_usd(usage) == pytest.approx(expected)
+
+
+def test_estimate_cache_adjusted_cost_usd_without_configured_hit_rate_is_none(monkeypatch):
+    monkeypatch.setenv("TOPIC_EDITOR_INPUT_COST_PER_MTOKENS", "0.55")
+    monkeypatch.setenv("TOPIC_EDITOR_OUTPUT_COST_PER_MTOKENS", "2.19")
+    # No TOPIC_EDITOR_CACHE_HIT_COST_PER_MTOKENS configured: no cache-adjusted
+    # cost is published at all (the field stays absent, not conservative).
+    editor = TopicEditor.__new__(TopicEditor)
+
+    usage = {"input_tokens": 1_000_000, "output_tokens": 0, "cache_hit_tokens": 900_000, "cache_miss_tokens": 100_000}
+    assert editor._estimate_cache_adjusted_cost_usd(usage) is None
+
+
+def test_cache_hit_pct_helper():
+    editor = TopicEditor.__new__(TopicEditor)
+    assert editor._cache_hit_pct({"cache_hit_tokens": 5760, "cache_miss_tokens": 54}) == 99.1
+    assert editor._cache_hit_pct({"cache_hit_tokens": 0, "cache_miss_tokens": 0}) is None
+    assert editor._cache_hit_pct({}) is None
+
+
+def test_extract_usage_clamps_hits_above_prompt_and_sanitizes_negatives():
+    editor = TopicEditor.__new__(TopicEditor)
+
+    # hit alone exceeds prompt: miss-favoring keeps the reported misses and
+    # clamps hits to the remainder, so the partition never exceeds prompt.
+    over_hit = editor._extract_usage(
+        SimpleNamespace(
+            usage=SimpleNamespace(
+                input_tokens=100,
+                output_tokens=0,
+                cache_hit_input_tokens=120,
+                cache_miss_input_tokens=10,
+            )
+        )
+    )
+    assert over_hit["cache_hit_tokens"] == 90
+    assert over_hit["cache_miss_tokens"] == 10
+
+    # Negative counters are clamped to zero; unknown -> all miss.
+    negative = editor._extract_usage(
+        SimpleNamespace(
+            usage=SimpleNamespace(
+                input_tokens=50,
+                output_tokens=0,
+                cache_hit_input_tokens=-5,
+                cache_miss_input_tokens=-5,
+            )
+        )
+    )
+    assert negative["cache_hit_tokens"] == 0
+    assert negative["cache_miss_tokens"] == 50
+
+
+def test_estimate_cache_adjusted_cost_usd_respects_explicit_zero_hit_rate(monkeypatch):
+    monkeypatch.setenv("TOPIC_EDITOR_INPUT_COST_PER_MTOKENS", "0.55")
+    monkeypatch.setenv("TOPIC_EDITOR_OUTPUT_COST_PER_MTOKENS", "2.19")
+    monkeypatch.setenv("TOPIC_EDITOR_CACHE_HIT_COST_PER_MTOKENS", "0")  # explicitly configured: hits free
+    editor = TopicEditor.__new__(TopicEditor)
+
+    usage = {"input_tokens": 1_000_000, "output_tokens": 0, "cache_hit_tokens": 900_000, "cache_miss_tokens": 100_000}
+    assert editor._estimate_cache_adjusted_cost_usd(usage) == pytest.approx(100_000 / 1e6 * 0.55)
+
+
+def test_estimate_cache_adjusted_cost_usd_caps_hit_rate_at_input_rate(monkeypatch):
+    monkeypatch.setenv("TOPIC_EDITOR_INPUT_COST_PER_MTOKENS", "0.55")
+    monkeypatch.setenv("TOPIC_EDITOR_OUTPUT_COST_PER_MTOKENS", "2.19")
+    monkeypatch.setenv("TOPIC_EDITOR_CACHE_HIT_COST_PER_MTOKENS", "9.99")  # above input rate
+    editor = TopicEditor.__new__(TopicEditor)
+
+    usage = {"input_tokens": 1_000_000, "output_tokens": 0, "cache_hit_tokens": 900_000, "cache_miss_tokens": 100_000}
+    # Hit rate capped at 0.55, so adjusted == conservative (all hits priced like misses).
+    assert editor._estimate_cache_adjusted_cost_usd(usage) == 0.55
+    assert editor._estimate_cache_adjusted_cost_usd(usage) <= editor._estimate_cost_usd(usage)
+
+
+def test_estimate_cache_adjusted_cost_usd_rejects_negative_hit_rate(monkeypatch):
+    monkeypatch.setenv("TOPIC_EDITOR_INPUT_COST_PER_MTOKENS", "0.55")
+    monkeypatch.setenv("TOPIC_EDITOR_OUTPUT_COST_PER_MTOKENS", "2.19")
+    monkeypatch.setenv("TOPIC_EDITOR_CACHE_HIT_COST_PER_MTOKENS", "-1")
+    editor = TopicEditor.__new__(TopicEditor)
+
+    usage = {"input_tokens": 1_000_000, "output_tokens": 0, "cache_hit_tokens": 900_000, "cache_miss_tokens": 100_000}
+    assert editor._estimate_cache_adjusted_cost_usd(usage) is None
+
+
+def test_estimate_cache_adjusted_cost_usd_is_none_on_invalid_hit_rate(monkeypatch):
+    monkeypatch.setenv("TOPIC_EDITOR_INPUT_COST_PER_MTOKENS", "0.55")
+    monkeypatch.setenv("TOPIC_EDITOR_OUTPUT_COST_PER_MTOKENS", "2.19")
+    editor = TopicEditor.__new__(TopicEditor)
+    usage = {"input_tokens": 1_000_000, "output_tokens": 0, "cache_hit_tokens": 900_000, "cache_miss_tokens": 100_000}
+
+    # Garbage, empty, negative, and NaN hit rates suppress cache-adjusted cost
+    # entirely (no misleading "cache-adjusted" figure is published).
+    for bad in ("garbage", "", "-1", "nan", "inf"):
+        monkeypatch.setenv("TOPIC_EDITOR_CACHE_HIT_COST_PER_MTOKENS", bad)
+        assert editor._estimate_cache_adjusted_cost_usd(usage) is None, bad
+
+
+def test_estimate_cost_usd_uses_defaults_on_invalid_input_rate(monkeypatch):
+    # A non-finite input rate must not yield NaN (which would silently disable the
+    # cost-cap comparison); it falls back to the configured default.
+    monkeypatch.setenv("TOPIC_EDITOR_INPUT_COST_PER_MTOKENS", "nan")
+    monkeypatch.setenv("TOPIC_EDITOR_OUTPUT_COST_PER_MTOKENS", "2.19")
+    monkeypatch.delenv("TOPIC_EDITOR_CACHE_HIT_COST_PER_MTOKENS", raising=False)
+    editor = TopicEditor.__new__(TopicEditor)
+    usage = {"input_tokens": 1_000_000, "output_tokens": 1_000_000}
+    assert editor._estimate_cost_usd(usage) == pytest.approx(0.55 + 2.19)
+
+
+def test_extract_usage_handles_non_numeric_tokens_safely():
+    editor = TopicEditor.__new__(TopicEditor)
+    result = editor._extract_usage(
+        SimpleNamespace(
+            usage=SimpleNamespace(
+                input_tokens=float("inf"),
+                output_tokens="not-a-number",
+                cache_hit_input_tokens=None,
+                cache_miss_input_tokens=None,
+            )
+        )
+    )
+    assert result["input_tokens"] == 0
+    assert result["output_tokens"] == 0
+    assert result["cache_hit_tokens"] == 0
+    assert result["cache_miss_tokens"] == 0
