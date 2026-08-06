@@ -516,3 +516,44 @@ def test_live_top_creations_prod_stale_checkpoint_reanchors(monkeypatch):
     assert now - timedelta(hours=49) <= ts <= now - timedelta(hours=47)
     # the stale 2023 cursor must NOT survive re-anchoring
     assert checkpoint_before.get("last_source_created_at") != stale["last_source_created_at"]
+
+
+def test_live_top_creations_prod_empty_checkpoint_reanchors(monkeypatch):
+    """BLOCKER hardening: an empty dict checkpoint (no usable cursor) must be re-anchored
+    to a fresh lookback instead of failing open to the oldest archived rows."""
+    monkeypatch.setenv("TOP_GEN_CHANNEL", "2")
+    monkeypatch.setenv("LIVE_TOP_CREATIONS_COLD_START_LOOKBACK_HOURS", "48")
+    db = FakeDB(checkpoint={}, messages=[_message(1, filename="clip.mp4", reactions=7)])
+    service = LiveTopCreations(db, bot=FakeBot(FakeChannel()), min_reactions=3)
+    result = asyncio.run(service.run_once("test"))
+    assert result["status"] == "completed"
+    ckpt = db.runs[0]["checkpoint_before"]
+    ts = datetime.fromisoformat(ckpt["last_message_created_at"].replace("Z", "+00:00"))
+    assert datetime.now(timezone.utc) - timedelta(hours=49) <= ts <= datetime.now(timezone.utc) - timedelta(hours=47)
+
+
+def test_live_top_creations_prod_bare_source_id_checkpoint_reanchors(monkeypatch):
+    """BLOCKER hardening: a bare last_source_id (no message-id, no timestamp) must be
+    re-anchored — storage would otherwise apply no filter and fetch the oldest rows."""
+    monkeypatch.setenv("TOP_GEN_CHANNEL", "2")
+    monkeypatch.setenv("LIVE_TOP_CREATIONS_COLD_START_LOOKBACK_HOURS", "48")
+    db = FakeDB(checkpoint={"last_source_id": "114515197222"}, messages=[_message(1, filename="clip.mp4", reactions=7)])
+    service = LiveTopCreations(db, bot=FakeBot(FakeChannel()), min_reactions=3)
+    result = asyncio.run(service.run_once("test"))
+    assert result["status"] == "completed"
+    ckpt = db.runs[0]["checkpoint_before"]
+    ts = datetime.fromisoformat(ckpt["last_message_created_at"].replace("Z", "+00:00"))
+    assert datetime.now(timezone.utc) - timedelta(hours=49) <= ts <= datetime.now(timezone.utc) - timedelta(hours=47)
+
+
+def test_live_top_creations_prod_naive_timestamp_reanchors(monkeypatch):
+    """A timezone-less (naive) stale timestamp must not crash and must re-anchor."""
+    monkeypatch.setenv("TOP_GEN_CHANNEL", "2")
+    monkeypatch.setenv("LIVE_TOP_CREATIONS_COLD_START_LOOKBACK_HOURS", "48")
+    stale = {"last_source_created_at": "2023-08-27T00:25:06"}  # no tz
+    db = FakeDB(checkpoint=stale, messages=[_message(1, filename="clip.mp4", reactions=7)])
+    service = LiveTopCreations(db, bot=FakeBot(FakeChannel()), min_reactions=3)
+    result = asyncio.run(service.run_once("test"))
+    assert result["status"] == "completed"
+    ckpt = db.runs[0]["checkpoint_before"]
+    assert ckpt["last_source_created_at"] != stale["last_source_created_at"]
