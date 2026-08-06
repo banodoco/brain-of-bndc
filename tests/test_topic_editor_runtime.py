@@ -4817,11 +4817,22 @@ def test_estimate_cache_adjusted_cost_usd_bills_hits_at_discount(monkeypatch):
     assert editor._estimate_cache_adjusted_cost_usd(usage) == pytest.approx(expected)
 
 
-def test_estimate_cache_adjusted_cost_usd_without_configured_hit_rate_is_none(monkeypatch):
+def test_estimate_cache_adjusted_cost_usd_uses_default_hit_rate_when_unset(monkeypatch):
     monkeypatch.setenv("TOPIC_EDITOR_INPUT_COST_PER_MTOKENS", "0.55")
     monkeypatch.setenv("TOPIC_EDITOR_OUTPUT_COST_PER_MTOKENS", "2.19")
-    # No TOPIC_EDITOR_CACHE_HIT_COST_PER_MTOKENS configured: no cache-adjusted
-    # cost is published at all (the field stays absent, not conservative).
+    monkeypatch.delenv("TOPIC_EDITOR_CACHE_HIT_COST_PER_MTOKENS", raising=False)
+    editor = TopicEditor.__new__(TopicEditor)
+
+    usage = {"input_tokens": 1_000_000, "output_tokens": 0, "cache_hit_tokens": 900_000, "cache_miss_tokens": 100_000}
+    # Unset hit rate falls back to DeepSeek's published deepseek-v4-flash hit price.
+    expected = 900_000 / 1e6 * 0.0028 + 100_000 / 1e6 * 0.55
+    assert editor._estimate_cache_adjusted_cost_usd(usage) == pytest.approx(expected)
+
+
+def test_estimate_cache_adjusted_cost_usd_explicit_empty_hit_rate_is_none(monkeypatch):
+    monkeypatch.setenv("TOPIC_EDITOR_INPUT_COST_PER_MTOKENS", "0.55")
+    monkeypatch.setenv("TOPIC_EDITOR_OUTPUT_COST_PER_MTOKENS", "2.19")
+    monkeypatch.setenv("TOPIC_EDITOR_CACHE_HIT_COST_PER_MTOKENS", "")  # explicitly disabled
     editor = TopicEditor.__new__(TopicEditor)
 
     usage = {"input_tokens": 1_000_000, "output_tokens": 0, "cache_hit_tokens": 900_000, "cache_miss_tokens": 100_000}
@@ -4921,7 +4932,8 @@ def test_estimate_cost_usd_uses_defaults_on_invalid_input_rate(monkeypatch):
     monkeypatch.delenv("TOPIC_EDITOR_CACHE_HIT_COST_PER_MTOKENS", raising=False)
     editor = TopicEditor.__new__(TopicEditor)
     usage = {"input_tokens": 1_000_000, "output_tokens": 1_000_000}
-    assert editor._estimate_cost_usd(usage) == pytest.approx(0.55 + 2.19)
+    # Invalid input rate falls back to the default input rate (0.14); output is explicit.
+    assert editor._estimate_cost_usd(usage) == pytest.approx(0.14 + 2.19)
 
 
 def test_extract_usage_handles_non_numeric_tokens_safely():

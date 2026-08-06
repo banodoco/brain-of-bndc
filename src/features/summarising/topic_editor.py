@@ -5104,8 +5104,8 @@ class TopicEditor:
         try:
             input_tokens = float(usage.get("input_tokens") or 0)
             output_tokens = float(usage.get("output_tokens") or 0)
-            input_rate = self._parse_cost_rate("TOPIC_EDITOR_INPUT_COST_PER_MTOKENS", 0.55)
-            output_rate = self._parse_cost_rate("TOPIC_EDITOR_OUTPUT_COST_PER_MTOKENS", 2.19)
+            input_rate = self._parse_cost_rate("TOPIC_EDITOR_INPUT_COST_PER_MTOKENS", 0.14)
+            output_rate = self._parse_cost_rate("TOPIC_EDITOR_OUTPUT_COST_PER_MTOKENS", 0.28)
             if input_rate <= 0 and output_rate <= 0:
                 return None
             return (input_tokens / 1_000_000.0 * input_rate) + (output_tokens / 1_000_000.0 * output_rate)
@@ -5119,8 +5119,8 @@ class TopicEditor:
         at the full input rate) and miss input at the full input rate, so with a
         valid hit rate the result is at or below the conservative
         `_estimate_cost_usd` — that gap is exactly the cache discount this
-        estimate exists to surface. Returns `None` (so no cache-adjusted cost is
-        published) unless a valid hit rate is explicitly configured; the
+        estimate exists to surface. Returns `None` (no cache-adjusted cost
+        published) when the hit rate is explicitly emptied or misconfigured; the
         conservative estimate that drives the `TOPIC_EDITOR_MAX_COST_USD` guard
         is never affected by this path.
         """
@@ -5129,18 +5129,18 @@ class TopicEditor:
             output_tokens = max(0.0, float(usage.get("output_tokens") or 0))
             hit_tokens = max(0.0, float(usage.get("cache_hit_tokens") or 0))
             miss_tokens = max(0.0, float(usage.get("cache_miss_tokens") or 0))
-            input_rate = self._parse_cost_rate("TOPIC_EDITOR_INPUT_COST_PER_MTOKENS", 0.55)
-            output_rate = self._parse_cost_rate("TOPIC_EDITOR_OUTPUT_COST_PER_MTOKENS", 2.19)
+            input_rate = self._parse_cost_rate("TOPIC_EDITOR_INPUT_COST_PER_MTOKENS", 0.14)
+            output_rate = self._parse_cost_rate("TOPIC_EDITOR_OUTPUT_COST_PER_MTOKENS", 0.28)
             if input_rate <= 0 and output_rate <= 0:
                 return None
-            # A valid cache-hit rate must be explicitly configured before any
-            # cache-adjusted number is published (an intentional zero price is
-            # valid). Unset, empty, invalid, negative, or non-finite -> None, so
-            # the reporting field stays absent rather than showing a misleading
-            # "cache-adjusted" figure. The rate is capped at the input rate so
-            # the adjusted estimate can never exceed the conservative one.
-            hit_rate_raw = os.getenv("TOPIC_EDITOR_CACHE_HIT_COST_PER_MTOKENS")
-            if hit_rate_raw is None or str(hit_rate_raw).strip() == "":
+            # Cache-hit input is billed at TOPIC_EDITOR_CACHE_HIT_COST_PER_MTOKENS,
+            # defaulting to DeepSeek's published deepseek-v4-flash hit price.
+            # An explicitly empty/invalid/negative/non-finite value suppresses the
+            # cache-adjusted number entirely (never a misleading figure). The rate
+            # is capped at the input rate so the adjusted estimate can never
+            # exceed the conservative one.
+            hit_rate_raw = os.getenv("TOPIC_EDITOR_CACHE_HIT_COST_PER_MTOKENS", "0.0028")
+            if str(hit_rate_raw).strip() == "":
                 return None
             try:
                 hit_rate = float(hit_rate_raw)
