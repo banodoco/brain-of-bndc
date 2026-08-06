@@ -477,11 +477,23 @@ class AdminCog(commands.Cog):
             if not code:
                 continue
             try:
-                inv = await self.bot.fetch_invite(code)
-                self._speaker_invite_uses[guild.id] = inv.uses
-                logger.info(f"Seeded Speaker invite ({code}) baseline uses={inv.uses} for guild {guild.id}")
+                inv = await self.bot.fetch_invite(code, with_counts=True)
+                self._speaker_invite_uses[guild.id] = inv.uses or 0
+                logger.info(f"Seeded Speaker invite ({code}) baseline uses={inv.uses or 0} for guild {guild.id}")
+                if inv.uses is None:
+                    logger.warning(f"Speaker invite ({code}) uses unavailable — the bot needs Manage Server permission for invite tracking to work.")
             except (discord.NotFound, discord.Forbidden, discord.HTTPException) as e:
                 logger.warning(f"Could not seed Speaker invite {code!r}: {e}")
+
+        # Audit what Discord actually has registered (visibility debugging).
+        try:
+            registered = await self.bot.tree.fetch_commands()
+            for cmd in registered:
+                opts = [o.name for o in (cmd.options or [])]
+                logger.info(f"[CmdAudit] registered '{cmd.name}' options={opts}")
+            logger.info(f"[CmdAudit] total registered commands on Discord: {len(registered)}")
+        except Exception as e:
+            logger.warning(f"[CmdAudit] could not fetch registered commands: {e}")
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -573,7 +585,7 @@ class AdminCog(commands.Cog):
         if not code:
             return False
         try:
-            inv = await self.bot.fetch_invite(code)
+            inv = await self.bot.fetch_invite(code, with_counts=True)
             current_uses = inv.uses or 0
         except discord.NotFound:
             return False  # invite deleted/invalid — no Speaker join
@@ -587,7 +599,6 @@ class AdminCog(commands.Cog):
         return current_uses > cached
 
     @app_commands.command(name="direct_invite", description="Create a direct Speaker invite (Equity Holders only)")
-    @app_commands.guild_only()
     @app_commands.describe(
         channel="Dropdown of all channels — where the invite lands (default: #live_updates)",
         max_uses="Optional max uses (omit for unlimited)",
@@ -599,6 +610,7 @@ class AdminCog(commands.Cog):
         # Defer FIRST — before any DB/role work — so a slow Supabase read can
         # never let the interaction time out ("application did not respond").
         await interaction.response.defer(ephemeral=True)
+        logger.info(f"direct_invite invoked by {interaction.user.id} ({interaction.user.name}) guild={interaction.guild_id} channel={interaction.channel_id if hasattr(interaction, 'channel_id') else 'n/a'}")
         try:
             equity_holder_id = self._get_equity_holders_role_id(interaction.guild_id)
             # interaction.user can be a plain User (no .roles), and the member may
