@@ -491,3 +491,28 @@ def test_live_top_creations_overflow_older_low_reaction_candidate_preserved(monk
     # non-candidate message 61), which is BEFORE all overflow (51-60) — so the
     # older, lower-reaction overflow candidate is NOT skipped.
     assert db.checkpoint["last_source_message_id"] == 61
+
+
+def test_live_top_creations_prod_stale_checkpoint_reanchors(monkeypatch):
+    """A legacy checkpoint whose cursor is years old (e.g. 2023) must be re-anchored
+    to a recent lookback so the feature does not scan/post old archived content."""
+    monkeypatch.setenv("TOP_GEN_CHANNEL", "2")
+    monkeypatch.setenv("LIVE_TOP_CREATIONS_COLD_START_LOOKBACK_HOURS", "48")
+    channel = FakeChannel()
+    stale = {
+        "last_source_created_at": "2023-08-27T00:25:06+00:00",
+        "last_source_message_id": 114515197222,
+        "last_source_id": "114515197222",
+    }
+    db = FakeDB(checkpoint=stale, messages=[_message(1, filename="clip.mp4", reactions=7)])
+    service = LiveTopCreations(db, bot=FakeBot(channel), min_reactions=3)
+
+    result = asyncio.run(service.run_once("test"))
+
+    assert result["status"] == "completed"
+    checkpoint_before = db.runs[0]["checkpoint_before"]
+    ts = datetime.fromisoformat(checkpoint_before["last_message_created_at"].replace("Z", "+00:00"))
+    now = datetime.now(timezone.utc)
+    assert now - timedelta(hours=49) <= ts <= now - timedelta(hours=47)
+    # the stale 2023 cursor must NOT survive re-anchoring
+    assert checkpoint_before.get("last_source_created_at") != stale["last_source_created_at"]

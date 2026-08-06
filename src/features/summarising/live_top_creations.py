@@ -100,10 +100,43 @@ class LiveTopCreations:
             if not checkpoint.get("last_message_created_at") and checkpoint.get("last_source_created_at"):
                 checkpoint["last_message_created_at"] = checkpoint["last_source_created_at"]
 
-        # Synthesize an initial checkpoint if none exists (dev AND prod). In prod a
-        # missing checkpoint would otherwise make get_archived_messages_after_checkpoint
-        # fetch the OLDEST archived messages and post a first-deploy burst of stale
-        # items; anchor it at now - lookback so we start from recent history.
+        # Re-anchor STALE checkpoints: a checkpoint whose cursor predates the lookback
+        # window (e.g. a legacy top-gens checkpoint left pointing at 2023) would make
+        # get_archived_messages_after_checkpoint scan years of archived messages and
+        # post old content. Treat it as missing so the synthesis below anchors at
+        # now - lookback.
+        if checkpoint is not None:
+            stale_lookback = (
+                max(1, int(self.dry_run_lookback_hours or 6))
+                if self.environment == "dev"
+                else max(1, self._env_int("LIVE_TOP_CREATIONS_COLD_START_LOOKBACK_HOURS", 48))
+            )
+            cursor_created = (
+                checkpoint.get("last_source_created_at")
+                or checkpoint.get("last_message_created_at")
+            )
+            # Only re-anchor when we have a cursor TIMESTAMP that predates the
+            # lookback. A message-id-only cursor (no timestamp) is a valid cursor
+            # and must be left untouched — re-anchoring it would lose dedupe state.
+            if cursor_created:
+                cursor_dt = None
+                try:
+                    cursor_dt = datetime.fromisoformat(str(cursor_created).replace("Z", "+00:00"))
+                except ValueError:
+                    cursor_dt = None
+                if cursor_dt is None or cursor_dt < datetime.now(timezone.utc) - timedelta(hours=stale_lookback):
+                    self.logger.info(
+                        "[LiveTopCreations] %s: stale checkpoint cursor (%s) older than %sh lookback; re-anchoring",
+                        "dev" if self.environment == "dev" else "prod",
+                        cursor_created,
+                        stale_lookback,
+                    )
+                    checkpoint = None
+
+        # Synthesize an initial checkpoint if none exists (dev AND prod) or the
+        # existing one was stale. A missing/stale checkpoint would otherwise make
+        # get_archived_messages_after_checkpoint fetch the OLDEST archived messages
+        # and post stale items; anchor it at now - lookback so we start from recent history.
         if checkpoint is None:
             if self.environment == "dev":
                 lookback = max(1, int(self.dry_run_lookback_hours or 6))
