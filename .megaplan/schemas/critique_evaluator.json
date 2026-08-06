@@ -1,0 +1,89 @@
+{
+  "type": "object",
+  "properties": {
+    "selections": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "check_id": {
+            "type": "string"
+          },
+          "critic_model": {
+            "type": "string"
+          },
+          "why": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "check_id",
+          "critic_model",
+          "why"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "skipped": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "check_id": {
+            "type": "string"
+          },
+          "why": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "check_id",
+          "why"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "evaluator_model": {
+      "type": "string"
+    },
+    "flag_verifications": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "flag_id": {
+            "type": "string"
+          },
+          "lens": {
+            "type": "string"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "verified",
+              "open",
+              "accepted_tradeoff"
+            ]
+          },
+          "rationale": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "flag_id",
+          "lens",
+          "outcome",
+          "rationale"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "selections",
+    "skipped",
+    "evaluator_model",
+    "flag_verifications"
+  ],
+  "additionalProperties": false
+}

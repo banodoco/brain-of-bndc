@@ -3,6 +3,7 @@
 from discord.ext import commands
 import logging
 import os
+import time
 from discord.ext import tasks
 
 from .live_update_editor import LiveUpdateEditor as LegacyLiveUpdateEditor
@@ -42,7 +43,7 @@ def _build_topic_editor_llm_client():
     if provider == "deepseek":
         from src.common.llm.deepseek_client import DeepSeekClient
 
-        os.environ.setdefault("TOPIC_EDITOR_MODEL", "deepseek-v4-pro")
+        os.environ.setdefault("TOPIC_EDITOR_MODEL", "deepseek-v4-flash")
         return DeepSeekClient()
     logger.warning(
         "Unknown TOPIC_EDITOR_LLM_CLIENT=%r; using the bot default Claude client",
@@ -68,18 +69,18 @@ class SummarizerCog(commands.Cog):
         self.dev_mode = bool(getattr(bot, "dev_mode", False))
         # Default reflects production usage; override via env if needed.
         self.live_updates_enabled = self.dev_mode or _env_flag("LIVE_UPDATES_ENABLED", True)
-        # The old live-top-creations loop directly auto-posted media once it hit
-        # the reaction threshold. TopicEditor now auto-shortlists those media
-        # posts as watching topics so the agent can inspect context/vision first.
-        # LIVE_TOP_CREATIONS_ENABLED is deprecated and intentionally not read.
-        self.live_top_creations_enabled = False
+        # When enabled, the hourly pass also publishes top community generations
+        # (previously handled by the removed legacy daily summariser's top_generations.py).
+        self.live_top_creations_enabled = self.dev_mode or _env_flag("LIVE_TOP_CREATIONS_ENABLED", True)
+        self.live_top_creations_interval_hours = _env_int("LIVE_TOP_CREATIONS_INTERVAL_HOURS", 6)
+        self._last_top_creations_ts = None
         self.live_pass_interval_minutes = _env_int("LIVE_PASS_INTERVAL_MINUTES", 60)
         dry_run_lookback_hours = _env_int("LIVE_UPDATE_DEV_LOOKBACK_HOURS", 6)
         self.live_update_editor = live_update_editor or self._build_live_update_editor(
             db_handler,
             dry_run_lookback_hours=dry_run_lookback_hours,
         )
-        self.live_top_creations = live_top_creations
+        self.live_top_creations = live_top_creations or self._build_live_top_creations(db_handler)
         if start_loops:
             self.run_live_pass.change_interval(minutes=self.live_pass_interval_minutes)
             if self.live_updates_enabled or self.live_top_creations_enabled:
@@ -104,6 +105,17 @@ class SummarizerCog(commands.Cog):
                 logger.info("Scheduled live-update editor pass finished: %s", result)
             except Exception as e:
                 logger.error(f"Error during scheduled live-update editor pass: {e}", exc_info=True)
+        if self.live_top_creations_enabled and (
+            self._last_top_creations_ts is None
+            or (time.monotonic() - self._last_top_creations_ts) >= self.live_top_creations_interval_hours * 3600
+        ):
+            logger.info("Scheduled top-creations pass starting...")
+            try:
+                result = await self.live_top_creations.run_once(trigger="scheduled")
+                logger.info("Scheduled top-creations pass finished: %s", result)
+            except Exception as e:
+                logger.error(f"Error during scheduled top-creations pass: {e}", exc_info=True)
+            self._last_top_creations_ts = time.monotonic()
         # Flush the editor's deferred reasoning embed + trace file.
         try:
             flush_pending_reasoning = getattr(self.live_update_editor, "flush_pending_reasoning", None)
@@ -138,6 +150,14 @@ class SummarizerCog(commands.Cog):
         if topic_llm_client is not None:
             topic_kwargs["llm_client"] = topic_llm_client
         return TopicEditor(**topic_kwargs)
+
+    def _build_live_top_creations(self, db_handler):
+        # guild_id and art_channel_id intentionally left None — resolved at runtime.
+        return LiveTopCreations(
+            db_handler,
+            bot=self.bot,
+            environment="dev" if self.dev_mode else "prod",
+        )
 
     @run_live_pass.before_loop
     async def before_run_live_pass(self):

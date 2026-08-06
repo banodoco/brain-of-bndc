@@ -29,7 +29,6 @@ logger.addHandler(handler)
 
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 TARGET_GUILD_ID = int(os.getenv("TARGET_GUILD_ID", os.getenv("GUILD_ID", "0"))) or None
-EXEMPT_CHANNELS = {int(x.strip()) for x in os.getenv("SPEAKER_EXEMPT_CHANNELS", "").split(",") if x.strip()}
 
 intents = discord.Intents.default()
 intents.guilds = True
@@ -45,13 +44,23 @@ async def on_ready():
         return
 
     db = DatabaseHandler()
-    speaker_role_id = None
-    sc = getattr(db, 'server_config', None)
-    if sc:
-        speaker_role_id = sc.get_server_field(TARGET_GUILD_ID, 'speaker_role_id', cast=int)
-    if speaker_role_id is None:
-        env_value = os.getenv("SPEAKER_ROLE_ID")
-        speaker_role_id = int(env_value) if env_value else None
+
+    def resolve_role_id(field: str, env_var: str) -> int | None:
+        sc = getattr(db, 'server_config', None)
+        if sc:
+            val = sc.get_server_field(TARGET_GUILD_ID, field, cast=int)
+            if val:
+                return val
+        env_value = os.getenv(env_var)
+        return int(env_value) if env_value else None
+
+    speaker_role_id = resolve_role_id('speaker_role_id', 'SPEAKER_ROLE_ID')
+    newbie_role_id = resolve_role_id('newbie_role_id', 'NEWBIE_ROLE_ID')
+    moderated_role_id = resolve_role_id('moderated_role_id', 'MODERATED_ROLE_ID')
+    if not speaker_role_id or not newbie_role_id or not moderated_role_id:
+        logger.error("Need SPEAKER_ROLE_ID, NEWBIE_ROLE_ID, MODERATED_ROLE_ID before applying perms.")
+        await client.close()
+        return
 
     guild = client.get_guild(TARGET_GUILD_ID)
     if not guild:
@@ -59,19 +68,24 @@ async def on_ready():
         await client.close()
         return
 
-    role = guild.get_role(speaker_role_id) if speaker_role_id else None
-    if not role:
-        logger.error(f"Speaker role {speaker_role_id} not found")
+    roles = {
+        'everyone': guild.default_role,
+        'newbie': guild.get_role(newbie_role_id),
+        'speaker': guild.get_role(speaker_role_id),
+        'moderated': guild.get_role(moderated_role_id),
+    }
+    if not all(roles.values()):
+        logger.error("One or more tier roles not found in the guild.")
         await client.close()
         return
 
-    # Load channel modes from DB
+    # Load channel modes from DB (normalized to the four-mode set)
     modes = {}
     try:
         modes = db.get_all_channel_speaker_modes()
         logger.info(f"Loaded {len(modes)} channel modes from DB")
     except Exception as e:
-        logger.warning(f"Could not load modes from DB, using env var only: {e}")
+        logger.warning(f"Could not load modes from DB, using defaults only: {e}")
 
     logger.info(f"Setting permissions on channels in {guild.name}...")
 
@@ -84,14 +98,10 @@ async def on_ready():
             skipped += 1
             continue
 
-        mode = modes.get(channel.id) or 'normal'
-
-        # Env var fallback
-        if channel.id in EXEMPT_CHANNELS:
-            mode = 'exempt'
+        mode = modes.get(channel.id) or 'community'
 
         try:
-            changed, api_calls = await apply_perms_to_channel(channel, role, mode)
+            changed, api_calls = await apply_perms_to_channel(channel, roles, mode)
             if changed:
                 updated += 1
                 logger.info(f"  Applied mode={mode} to #{channel.name} ({channel.id}), api_calls={api_calls}")

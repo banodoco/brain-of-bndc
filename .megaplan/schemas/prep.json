@@ -102,6 +102,36 @@
     },
     "suggested_approach": {
       "type": "string"
+    },
+    "open_questions": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "object",
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": [
+              "blocking",
+              "assume_and_proceed"
+            ]
+          },
+          "question": {
+            "type": "string"
+          },
+          "assumption": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "severity",
+          "question",
+          "assumption"
+        ],
+        "additionalProperties": false
+      }
     }
   },
   "required": [
@@ -112,7 +142,8 @@
     "test_expectations",
     "constraints",
     "primary_criterion",
-    "suggested_approach"
+    "suggested_approach",
+    "open_questions"
   ],
   "additionalProperties": false
 }

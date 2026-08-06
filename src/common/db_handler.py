@@ -11,6 +11,26 @@ from .redaction import redact_wallet as _redact_wallet
 
 logger = logging.getLogger('DiscordBot')
 
+# Three-tier member model: every non-bot member holds exactly one of these.
+MEMBER_STATUS_NEWBIE = 'newbie'
+MEMBER_STATUS_SPEAKER = 'speaker'
+MEMBER_STATUS_MODERATED = 'moderated'
+MEMBER_STATUSES = (MEMBER_STATUS_NEWBIE, MEMBER_STATUS_SPEAKER, MEMBER_STATUS_MODERATED)
+
+# Per-channel posting modes (replaces the legacy normal/readonly/exempt set).
+CHANNEL_MODE_BOT = 'bot'
+CHANNEL_MODE_NEWBIE = 'newbie'
+CHANNEL_MODE_COMMUNITY = 'community'
+CHANNEL_MODE_APPEAL = 'appeal'
+CHANNEL_MODES = (CHANNEL_MODE_BOT, CHANNEL_MODE_NEWBIE, CHANNEL_MODE_COMMUNITY, CHANNEL_MODE_APPEAL)
+
+# Legacy speaker_mode -> new mode mapping for `discord_channels` rows.
+_LEGACY_MODE_MAP = {
+    'normal': CHANNEL_MODE_COMMUNITY,
+    'readonly': CHANNEL_MODE_BOT,
+    'exempt': CHANNEL_MODE_APPEAL,
+}
+
 
 class WalletUpdateBlockedError(Exception):
     """Raised when a wallet change is attempted while a payment flow is still active."""
@@ -4648,42 +4668,235 @@ class DatabaseHandler:
 
     # ========== Timed Mutes ==========
 
-    def set_is_speaker(self, member_id: int, is_speaker: bool,
-                       guild_id: Optional[int] = None) -> bool:
-        """Update guild-scoped speaker state for a member.
+    def get_guild_member(self, member_id: int, guild_id: int) -> Optional[Dict]:
+        """Fetch a single guild_members row (member_status, prior_* snapshots)."""
+        if not self.storage_handler or not self.storage_handler.supabase_client:
+            return None
+        try:
+            result = (
+                self.storage_handler.supabase_client.table('guild_members')
+                .select('*')
+                .eq('guild_id', guild_id)
+                .eq('member_id', member_id)
+                .limit(1)
+                .execute()
+            )
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error(f"Error fetching guild_members row for {member_id}: {e}", exc_info=True)
+            return None
 
-        The canonical state lives on guild_members.speaker_muted so muting a
-        member in one guild does not affect the same Discord account elsewhere.
+    def set_member_status(self, member_id: int, guild_id: int, status: str,
+                          prior_status: Optional[str] = None, *,
+                          set_prior: bool = False) -> bool:
+        """Set a member's tier status and the derived speaker_muted flag.
+
+        `speaker_muted` is kept in sync (`status == 'moderated'`) so legacy
+        readers and migration backfills stay correct. When `set_prior` is True
+        (i.e. at moderation time), the previous tier and can_message_bot value
+        are snapshotted so unmute / timed-mute expiry can restore them.
         """
+        if status not in MEMBER_STATUSES:
+            logger.error(f"Invalid member_status '{status}' for member {member_id}")
+            return False
         if not self._gate_check(guild_id):
             return False
         if not self.storage_handler or not self.storage_handler.supabase_client:
-            logger.error("Supabase client not initialized for set_is_speaker")
+            logger.error("Supabase client not initialized for set_member_status")
+            return False
+        if guild_id is None:
+            logger.error("set_member_status requires guild_id")
             return False
 
         try:
-            if guild_id is None:
-                logger.error("set_is_speaker requires guild_id")
-                return False
-
-            (
-                self.storage_handler.supabase_client.table('guild_members')
-                .upsert({
-                    'guild_id': guild_id,
-                    'member_id': member_id,
-                    'speaker_muted': not is_speaker,
-                    'updated_at': datetime.now(timezone.utc).isoformat(),
-                })
-                .execute()
-            )
-            logger.info(f"Set guild speaker state is_speaker={is_speaker} for member {member_id} in guild {guild_id}")
+            data = {
+                'guild_id': guild_id,
+                'member_id': member_id,
+                'member_status': status,
+                'speaker_muted': status == MEMBER_STATUS_MODERATED,
+                'updated_at': datetime.now(timezone.utc).isoformat(),
+            }
+            if set_prior:
+                if prior_status is not None and prior_status in MEMBER_STATUSES:
+                    data['prior_status'] = prior_status
+                data['prior_can_message_bot'] = self.get_member_can_message_bot(member_id)
+            self.storage_handler.supabase_client.table('guild_members').upsert(data).execute()
+            logger.info(f"Set member_status={status} for member {member_id} in guild {guild_id}")
             return True
         except Exception as e:
-            logger.error(f"Error setting is_speaker for member {member_id}: {e}", exc_info=True)
+            logger.error(f"Error setting member_status for member {member_id}: {e}", exc_info=True)
             return False
 
+    def set_is_speaker(self, member_id: int, is_speaker: bool,
+                       guild_id: Optional[int] = None) -> bool:
+        """Backward-compat shim: is_speaker maps onto the three-tier status."""
+        return self.set_member_status(
+            member_id, guild_id,
+            MEMBER_STATUS_SPEAKER if is_speaker else MEMBER_STATUS_MODERATED,
+        )
+
+    def get_member_status(self, member_id: int, guild_id: Optional[int] = None) -> str:
+        """Return a member's tier status.
+
+        Legacy rows without member_status are inferred from speaker_muted
+        (True -> moderated, else speaker), preserving the old binary semantics.
+        """
+        if not self.storage_handler or not self.storage_handler.supabase_client:
+            return MEMBER_STATUS_SPEAKER
+        try:
+            if guild_id is not None:
+                result = (
+                    self.storage_handler.supabase_client.table('guild_members')
+                    .select('member_status, speaker_muted')
+                    .eq('guild_id', guild_id)
+                    .eq('member_id', member_id)
+                    .limit(1)
+                    .execute()
+                )
+                if result.data:
+                    row = result.data[0]
+                    status = row.get('member_status')
+                    if status in MEMBER_STATUSES:
+                        return status
+                    return MEMBER_STATUS_MODERATED if row.get('speaker_muted') else MEMBER_STATUS_SPEAKER
+                return MEMBER_STATUS_SPEAKER
+            # No guild scope: legacy members.is_speaker fallback.
+            result = (
+                self.storage_handler.supabase_client.table('members')
+                .select('is_speaker')
+                .eq('member_id', member_id)
+                .limit(1)
+                .execute()
+            )
+            if result.data and result.data[0].get('is_speaker') is False:
+                return MEMBER_STATUS_MODERATED
+            return MEMBER_STATUS_SPEAKER
+        except Exception as e:
+            logger.error(f"Error getting member_status for member {member_id}: {e}", exc_info=True)
+            return MEMBER_STATUS_SPEAKER
+
+    def get_member_prior_status(self, member_id: int, guild_id: int) -> Optional[str]:
+        """Return the tier snapshotted at moderation time (for restore)."""
+        row = self.get_guild_member(member_id, guild_id)
+        if not row:
+            return None
+        prior = row.get('prior_status')
+        return prior if prior in MEMBER_STATUSES else None
+
+    def get_guild_member_statuses(self, guild_id: int) -> Dict[int, Dict]:
+        """Bulk-fetch tier state for a guild in one query.
+
+        Returns a map of member_id -> row dict (member_status, speaker_muted,
+        prior_can_message_bot). Used by migration scripts to avoid a per-member
+        query when classifying a whole guild.
+        """
+        if not self.storage_handler or not self.storage_handler.supabase_client:
+            return {}
+        try:
+            # PostgREST caps at 1000 rows/request — page through the whole guild.
+            statuses: Dict[int, Dict] = {}
+            offset = 0
+            page = 1000
+            while True:
+                result = (
+                    self.storage_handler.supabase_client.table('guild_members')
+                    .select('member_id,member_status,speaker_muted,prior_can_message_bot')
+                    .eq('guild_id', guild_id)
+                    .range(offset, offset + page - 1)
+                    .execute()
+                )
+                rows = result.data or []
+                for row in rows:
+                    statuses[row['member_id']] = row
+                if len(rows) < page:
+                    break
+                offset += page
+            return statuses
+        except Exception as e:
+            logger.error(f"Error bulk-fetching member statuses: {e}", exc_info=True)
+            return {}
+
+    def get_members_by_status(self, guild_id: int, status: str) -> List[int]:
+        """Return member IDs in a guild with the given tier status.
+
+        For 'moderated' this also matches legacy speaker_muted=True rows so
+        reconciliation sees pre-migration mutes. Paginated — PostgREST caps at
+        1000 rows/request, so large tiers (18k+ members) would otherwise be
+        truncated and never reconciled.
+        """
+        if not self.storage_handler or not self.storage_handler.supabase_client:
+            return []
+        try:
+            ids: List[int] = []
+            offset = 0
+            page = 1000
+            while True:
+                query = (
+                    self.storage_handler.supabase_client.table('guild_members')
+                    .select('member_id')
+                    .eq('guild_id', guild_id)
+                )
+                if status == MEMBER_STATUS_MODERATED:
+                    query = query.or_("member_status.eq.moderated,speaker_muted.eq.true")
+                else:
+                    query = query.eq('member_status', status)
+                result = query.range(offset, offset + page - 1).execute()
+                rows = result.data or []
+                ids.extend(row['member_id'] for row in rows)
+                if len(rows) < page:
+                    break
+                offset += page
+            return ids
+        except Exception as e:
+            logger.error(f"Error fetching members by status {status}: {e}", exc_info=True)
+            return []
+
+    def set_member_can_message_bot(self, member_id: int, can_message_bot: bool,
+                                   username: Optional[str] = None) -> bool:
+        """Set members.can_message_bot (DM routing gate).
+
+        The members table has a NOT NULL username column, so creating a row for a
+        member who has none requires the username — pass it from the member object.
+        """
+        if not self.storage_handler or not self.storage_handler.supabase_client:
+            logger.error("Supabase client not initialized for set_member_can_message_bot")
+            return False
+        try:
+            data = {'member_id': member_id, 'can_message_bot': can_message_bot}
+            if username:
+                data['username'] = username
+            (
+                self.storage_handler.supabase_client.table('members')
+                .upsert(data)
+                .execute()
+            )
+            logger.info(f"Set can_message_bot={can_message_bot} for member {member_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Error setting can_message_bot for member {member_id}: {e}", exc_info=True)
+            return False
+
+    def get_member_can_message_bot(self, member_id: int) -> bool:
+        """Return members.can_message_bot (defaults True for unknown members)."""
+        if not self.storage_handler or not self.storage_handler.supabase_client:
+            return True
+        try:
+            result = (
+                self.storage_handler.supabase_client.table('members')
+                .select('can_message_bot')
+                .eq('member_id', member_id)
+                .limit(1)
+                .execute()
+            )
+            if result.data:
+                return bool(result.data[0].get('can_message_bot'))
+            return True
+        except Exception as e:
+            logger.error(f"Error getting can_message_bot for member {member_id}: {e}", exc_info=True)
+            return True
+
     def get_muted_member_ids(self, guild_id: Optional[int] = None) -> List[int]:
-        """Return member IDs muted in a guild via guild_members.speaker_muted."""
+        """Return member IDs muted in a guild (speaker_muted OR status='moderated')."""
         if not self.storage_handler or not self.storage_handler.supabase_client:
             return []
 
@@ -4691,7 +4904,7 @@ class DatabaseHandler:
             query = (
                 self.storage_handler.supabase_client.table('guild_members')
                 .select('member_id')
-                .eq('speaker_muted', True)
+                .or_("member_status.eq.moderated,speaker_muted.eq.true")
             )
             if guild_id is not None:
                 query = query.eq('guild_id', guild_id)
@@ -4702,45 +4915,11 @@ class DatabaseHandler:
             return []
 
     def get_is_speaker(self, member_id: int, guild_id: Optional[int] = None) -> bool:
-        """Check if a member should have the Speaker role in a guild.
+        """Backward-compat shim: status == 'speaker'."""
+        return self.get_member_status(member_id, guild_id) == MEMBER_STATUS_SPEAKER
 
-        Defaults to True unless guild_members.speaker_muted is explicitly True.
-        Falls back to the legacy members.is_speaker only when no guild_id
-        is supplied.
-        """
-        if not self.storage_handler or not self.storage_handler.supabase_client:
-            return True
-
-        try:
-            if guild_id is not None:
-                result = (
-                    self.storage_handler.supabase_client.table('guild_members')
-                    .select('speaker_muted')
-                    .eq('guild_id', guild_id)
-                    .eq('member_id', member_id)
-                    .limit(1)
-                    .execute()
-                )
-                if result.data:
-                    return result.data[0].get('speaker_muted') is not True
-                return True
-
-            result = (
-                self.storage_handler.supabase_client.table('members')
-                .select('is_speaker')
-                .eq('member_id', member_id)
-                .limit(1)
-                .execute()
-            )
-            if result.data:
-                return result.data[0].get('is_speaker') is not False
-            return True
-        except Exception as e:
-            logger.error(f"Error getting is_speaker for member {member_id}: {e}", exc_info=True)
-            return True
-
-    def create_timed_mute(self, member_id: int, guild_id: int, mute_end_at: str, reason: Optional[str] = None, muted_by_id: Optional[int] = None) -> bool:
-        """Upsert a timed mute record."""
+    def create_timed_mute(self, member_id: int, guild_id: int, mute_end_at: str, reason: Optional[str] = None, muted_by_id: Optional[int] = None, prior_status: Optional[str] = None, prior_can_message_bot: Optional[bool] = None) -> bool:
+        """Upsert a timed mute record, remembering the tier to restore on expiry."""
         if not self._gate_check(guild_id):
             return False
         if not self.storage_handler or not self.storage_handler.supabase_client:
@@ -4754,6 +4933,8 @@ class DatabaseHandler:
                 'mute_end_at': mute_end_at,
                 'reason': reason,
                 'muted_by_id': muted_by_id,
+                'prior_status': prior_status,
+                'prior_can_message_bot': prior_can_message_bot,
             }
             self.storage_handler.supabase_client.table('timed_mutes').upsert(data).execute()
             logger.info(f"Created timed mute for member {member_id} in guild {guild_id}, expires {mute_end_at}")
@@ -4851,6 +5032,9 @@ class DatabaseHandler:
     def get_all_channel_speaker_modes(self, guild_id: Optional[int] = None) -> Dict[int, str]:
         """Bulk fetch speaker_mode for channels, optionally scoped to a guild.
 
+        Legacy values (normal/readonly/exempt) are normalized to the four-mode
+        set; unknown/NULL modes default to 'community'.
+
         Returns:
             Dict mapping channel_id (int) -> speaker_mode string.
         """
@@ -4859,17 +5043,27 @@ class DatabaseHandler:
             return {}
 
         try:
-            query = (
-                self.storage_handler.supabase_client.table('discord_channels')
-                .select('channel_id,speaker_mode')
-            )
-            if guild_id is not None:
-                query = query.eq('guild_id', guild_id)
-            result = query.execute()
-            return {
-                row['channel_id']: row.get('speaker_mode', 'normal')
-                for row in (result.data or [])
-            }
+            modes = {}
+            offset = 0
+            page = 1000
+            while True:
+                query = (
+                    self.storage_handler.supabase_client.table('discord_channels')
+                    .select('channel_id,speaker_mode')
+                )
+                if guild_id is not None:
+                    query = query.eq('guild_id', guild_id)
+                result = query.range(offset, offset + page - 1).execute()
+                rows = result.data or []
+                for row in rows:
+                    raw = row.get('speaker_mode') or CHANNEL_MODE_COMMUNITY
+                    modes[row['channel_id']] = _LEGACY_MODE_MAP.get(
+                        raw, raw if raw in CHANNEL_MODES else CHANNEL_MODE_COMMUNITY
+                    )
+                if len(rows) < page:
+                    break
+                offset += page
+            return modes
         except Exception as e:
             logger.error(f"Error fetching channel speaker modes: {e}", exc_info=True)
             return {}
@@ -4880,13 +5074,13 @@ class DatabaseHandler:
 
         Args:
             channel_id: Discord channel ID.
-            mode: One of 'normal', 'readonly', 'exempt'.
+            mode: One of 'bot', 'newbie', 'community', 'appeal'.
             guild_id: Guild ID for gate check.
 
         Returns:
             True if update succeeded.
         """
-        if mode not in ('normal', 'readonly', 'exempt'):
+        if mode not in CHANNEL_MODES:
             logger.error(f"Invalid speaker_mode '{mode}' for channel {channel_id}")
             return False
 

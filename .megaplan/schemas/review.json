@@ -74,6 +74,12 @@
               ],
               "additionalProperties": false
             }
+          },
+          "concerned_task_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         },
         "required": [
@@ -81,7 +87,8 @@
           "question",
           "guidance",
           "findings",
-          "prior_findings"
+          "prior_findings",
+          "concerned_task_ids"
         ],
         "additionalProperties": false
       }

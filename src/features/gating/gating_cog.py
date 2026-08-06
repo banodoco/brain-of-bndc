@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 from datetime import datetime, timedelta, timezone
 
@@ -115,16 +116,32 @@ class GatingCog(commands.Cog):
 
     # ── Config helpers ──
 
+    _ROLE_ENV_MAP = {
+        'speaker_role_id': 'SPEAKER_ROLE_ID',
+        'newbie_role_id': 'NEWBIE_ROLE_ID',
+        'moderated_role_id': 'MODERATED_ROLE_ID',
+    }
+    _CHANNEL_ENV_MAP = {
+        'gate_channel_id': 'GATE_CHANNEL_ID',
+        'intro_channel_id': 'INTRO_CHANNEL_ID',
+        'welcome_channel_id': 'WELCOME_CHANNEL_ID',
+    }
+
     def _get_guild_config(self, guild_id: int) -> dict:
-        """Resolve gating config for a guild from server_config."""
+        """Resolve gating config for a guild from server_config, then env fallback."""
         sc = getattr(self.db, 'server_config', None) if self.db else None
         server = sc.get_server(guild_id) if sc else None
         cfg = {}
         for key in (
             'gate_channel_id', 'intro_channel_id', 'speaker_role_id',
             'approver_role_id', 'super_approver_role_id', 'welcome_channel_id',
+            'newbie_role_id', 'moderated_role_id',
         ):
             val = server.get(key) if server else None
+            if val is None:
+                env_key = self._ROLE_ENV_MAP.get(key) or self._CHANNEL_ENV_MAP.get(key)
+                env_val = os.getenv(env_key) if env_key else None
+                val = env_val
             cfg[key] = int(val) if val is not None else None
         return cfg
 
@@ -211,9 +228,12 @@ class GatingCog(commands.Cog):
                 and message.reference.resolved.author.id != message.author.id):
             return
 
-        # Only track non-Speakers
+        # Only track non-Speakers who aren't moderated
         speaker_role = message.guild.get_role(cfg['speaker_role_id'])
         if not speaker_role or speaker_role in message.author.roles:
+            return
+        moderated_role = message.guild.get_role(cfg['moderated_role_id']) if cfg.get('moderated_role_id') else None
+        if moderated_role and moderated_role in message.author.roles:
             return
 
         # Track this message so any reaction on it can trigger approval
@@ -343,6 +363,9 @@ class GatingCog(commands.Cog):
         speaker_role = guild.get_role(cfg['speaker_role_id'])
         if speaker_role and speaker_role in author_member.roles:
             return None
+        moderated_role = guild.get_role(cfg['moderated_role_id']) if cfg.get('moderated_role_id') else None
+        if moderated_role and moderated_role in author_member.roles:
+            return None
 
         member_id = message.author.id
 
@@ -432,9 +455,31 @@ class GatingCog(commands.Cog):
         speaker_role = guild.get_role(cfg['speaker_role_id'])
         if not speaker_role:
             return
+        newbie_role = guild.get_role(cfg['newbie_role_id']) if cfg.get('newbie_role_id') else None
 
         try:
-            await member.add_roles(speaker_role, reason="Intro approved by community")
+            # Never promote a moderated member — check both the role and the DB status
+            moderated_role = guild.get_role(cfg['moderated_role_id']) if cfg.get('moderated_role_id') else None
+            if moderated_role and moderated_role in member.roles:
+                logger.warning(f"GatingCog: refused to approve moderated member {member}")
+                return
+            if self.db:
+                try:
+                    if self.db.get_member_status(intro['member_id'], guild_id=guild.id) == 'moderated':
+                        logger.warning(f"GatingCog: refused to approve DB-moderated member {member}")
+                        return
+                except Exception:
+                    pass
+
+            # Swap Newbie -> Speaker. Write the DB status FIRST so on_member_update
+            # (fired by the role changes) sees 'speaker' and doesn't strip the new
+            # role as a stray while the old status is still 'newbie'.
+            if self.db:
+                self.db.set_member_status(intro['member_id'], guild.id, 'speaker')
+            if newbie_role and newbie_role in member.roles:
+                await member.remove_roles(newbie_role, reason="Intro approved — promoted to Speaker")
+            if speaker_role not in member.roles:
+                await member.add_roles(speaker_role, reason="Intro approved by community")
             self.db.approve_pending_intro(intro['message_id'], guild_id=intro.get('guild_id'))
             self._remove_member_messages(intro['member_id'])
             logger.info(f"GatingCog: approved {member} (msg {intro['message_id']})")

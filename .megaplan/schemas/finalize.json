@@ -70,6 +70,14 @@
           "reviewer_verdict": {
             "type": "string"
           },
+          "complexity": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5
+          },
+          "complexity_justification": {
+            "type": "string"
+          },
           "stance": {
             "type": [
               "object",
@@ -125,6 +133,8 @@
           "auto_attributed_files",
           "evidence_files",
           "reviewer_verdict",
+          "complexity",
+          "complexity_justification",
           "stance",
           "stop_signal"
         ],

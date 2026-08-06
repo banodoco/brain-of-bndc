@@ -8,6 +8,7 @@
 > ### 2. Communication and Respect:
 > • Don't direct offensive language at others.
 > • Keep discussions focused on AI art and technology — no political or religious debates or content.
+> • Art focused on political or religious subjects is okay so long as it's tasteful and not lazy — per moderators' subjective judgment.
 > • Feedback is encouraged, but keep the tone supportive and constructive — don't dismiss or belittle others' work.
 > • Don't share personal information without consent.
 > • If you have an issue with another member, contact a moderator rather than escalating publicly.

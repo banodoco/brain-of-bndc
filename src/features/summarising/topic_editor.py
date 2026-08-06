@@ -791,6 +791,7 @@ class TopicEditor:
                 "observation_count": 0,
                 "created_topics": [],
                 "finalize": None,
+                "finalize_nudge_sent": False,
                 "vision_budget_usd": self._env_float("TOPIC_EDITOR_VISION_BUDGET_PER_RUN", 1.0),
                 "vision_cost_usd": 0.0,
             }
@@ -801,12 +802,17 @@ class TopicEditor:
             cumulative_tokens = 0
             cumulative_cost_usd = 0.0
             has_cost_estimate = False
+            compaction_count = 0
+            last_compaction_cumulative = 0
+            last_context_size = 0
             text_chunks: List[str] = []
             forced_close = False
             forced_close_reason: Optional[str] = None
             turn_count = 0
             max_cost_usd = self._env_float("TOPIC_EDITOR_MAX_COST_USD", 2.0)
             max_tokens = self._env_int("TOPIC_EDITOR_MAX_TOKENS", 1_500_000)
+            compact_token_threshold = self._env_int("TOPIC_EDITOR_COMPACT_TOKEN_THRESHOLD", 900_000)
+            max_compactions = self._env_int("TOPIC_EDITOR_MAX_COMPACTIONS", 2)
             for turn_count in range(1, max_turns + 1):
                 logger.info(
                     "TopicEditor invoking LLM: run_id=%s turn=%s messages=%s",
@@ -827,6 +833,7 @@ class TopicEditor:
                 if turn_reasoning:
                     text_chunks.append(turn_reasoning)
                 usage = self._extract_usage(response)
+                last_context_size = int(usage.get("input_tokens", 0) or 0)
                 total_input_tokens += int(usage.get("input_tokens", 0) or 0)
                 total_output_tokens += int(usage.get("output_tokens", 0) or 0)
                 cumulative_tokens = total_input_tokens + total_output_tokens
@@ -856,6 +863,37 @@ class TopicEditor:
                     forced_close = True
                     forced_close_reason = cap_reason
                     break
+
+                # Threshold-based compaction: once the run's cumulative spend crosses
+                # the boundary, fold earlier context into a compact "decisions so far"
+                # recap while keeping the most recent full turn verbatim. The hard
+                # token cap above remains the backstop.
+                if (
+                    compaction_count < max_compactions
+                    and compact_token_threshold > 0
+                    and cumulative_tokens >= last_compaction_cumulative + compact_token_threshold
+                ):
+                    messages_arg = self._compact_conversation(
+                        messages_arg,
+                        initial_payload,
+                        dispatcher_context,
+                        outcomes,
+                        messages,
+                        turn_count,
+                    )
+                    compaction_count += 1
+                    last_compaction_cumulative = cumulative_tokens
+                    logger.info(
+                        "TopicEditor compacted conversation: run_id=%s turn=%s cumulative_tokens=%s",
+                        run_id,
+                        turn_count,
+                        cumulative_tokens,
+                    )
+                    metadata.setdefault("compactions", []).append({
+                        "turn": turn_count,
+                        "cumulative_tokens": cumulative_tokens,
+                        "context_size_before": last_context_size,
+                    })
 
                 if not turn_tool_calls:
                     # Agent ended with text only — push back demanding finalize_run.
@@ -952,6 +990,32 @@ class TopicEditor:
                 if dispatcher_context.get("finalize"):
                     break
 
+                # Graceful-finalize nudge: after compaction, once we are within 90%
+                # of the token budget, ask the model to close out cleanly instead of
+                # burning the rest of the budget on new investigations.
+                if (
+                    compaction_count >= 1
+                    and max_tokens > 0
+                    and cumulative_tokens >= max_tokens * 0.9
+                    and not dispatcher_context.get("finalize_nudge_sent")
+                ):
+                    dispatcher_context["finalize_nudge_sent"] = True
+                    messages_arg.append(
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": (
+                                        "You are near the token budget. If your work is sufficiently "
+                                        "complete, call finalize_run now with your overall reasoning; "
+                                        "do not start new investigations."
+                                    ),
+                                }
+                            ],
+                        }
+                    )
+
                 if turn_count >= max_turns:
                     forced_close = True
                     forced_close_reason = "max_turns_reached_without_finalize"
@@ -1010,7 +1074,9 @@ class TopicEditor:
                 for entry in auto_shortlisted_media
             ])
 
-            publish_results = await self._publish_created_topics(dispatcher_context["created_topics"])
+            publish_results = await self._publish_created_topics(
+                self._dedupe_created_topics(dispatcher_context.get("created_topics") or [])
+            )
             metadata["publish_results"] = publish_results
             checkpoint_after = self._checkpoint_after(checkpoint, messages, run_id)
             self.db.upsert_topic_editor_checkpoint(checkpoint_after, environment=self.environment)
@@ -1209,6 +1275,217 @@ class TopicEditor:
                 if text and text.strip():
                     chunks.append(text.strip())
         return "\n\n".join(chunks).strip()
+
+    def _compact_conversation(
+        self,
+        messages_arg: List[Dict[str, Any]],
+        initial_payload: Dict[str, Any],
+        dispatcher_context: Dict[str, Any],
+        outcomes: List[Dict[str, Any]],
+        messages: Sequence[Dict[str, Any]],
+        turn_count: int,
+    ) -> List[Dict[str, Any]]:
+        """Fold the growing conversation into a compact "decisions so far" recap.
+
+        Drops the static source dump and the earlier turns, keeping the most
+        recent full turn (assistant message + its tool_result user message)
+        verbatim so the model retains immediate context while later turns pay
+        far fewer input tokens.
+        """
+        recap = self._compaction_recap_text(
+            dispatcher_context=dispatcher_context,
+            outcomes=outcomes,
+            messages=messages,
+        )
+        compacted: List[Dict[str, Any]] = [
+            {"role": "user", "content": [{"type": "text", "text": recap}]}
+        ]
+        # PAIR-SAFE tail: preserve from the last assistant message that carries a
+        # tool_use block, so the preserved tail always starts with an assistant
+        # tool_use and never with an orphaned user tool_result (which would be
+        # rejected by Anthropic-style clients). If no such assistant exists (e.g.
+        # first-turn compaction), preserve only the recap — this also drops the
+        # initial static dump for very low thresholds.
+        tail_start = self._last_tool_use_assistant_index(messages_arg)
+        if tail_start is not None:
+            compacted.extend(messages_arg[tail_start:])
+        return compacted
+
+    @staticmethod
+    def _last_tool_use_assistant_index(messages_arg: Sequence[Dict[str, Any]]) -> Optional[int]:
+        """Index of the last assistant message whose content has a tool_use block."""
+        for i in range(len(messages_arg) - 1, -1, -1):
+            message = messages_arg[i]
+            if not message or message.get("role") != "assistant":
+                continue
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    return i
+                if not isinstance(block, dict) and getattr(block, "type", None) == "tool_use":
+                    return i
+        return None
+
+    def _compaction_recap_text(
+        self,
+        *,
+        dispatcher_context: Dict[str, Any],
+        outcomes: List[Dict[str, Any]],
+        messages: Sequence[Dict[str, Any]],
+    ) -> str:
+        lines: List[str] = [
+            "Run status recap (the earlier conversation was compacted to save tokens).",
+            "",
+            "Your standing job: curate a small, source-backed public update for the "
+            "community from the source window, and close the run with finalize_run.",
+            "",
+            "--- Source window digest ---",
+            f"Total source messages: {len(messages or [])}",
+        ]
+        channel_tally = self._tally_channels(messages)
+        if channel_tally:
+            tally = ", ".join(
+                f"{name}={count}"
+                for name, count in sorted(channel_tally.items(), key=lambda kv: kv[1], reverse=True)
+            )
+            lines.append(f"Channel tally: {tally}")
+        top_items = self._top_source_items(messages, limit=6)
+        if top_items:
+            lines.append("Top items by reactions:")
+            lines.extend(top_items)
+        lines.append("")
+
+        active_lines = self._active_topics_recap(dispatcher_context)
+        if active_lines:
+            lines.append("--- Active / watching topics ---")
+            lines.extend(active_lines)
+            lines.append("")
+
+        lines.append("--- Decisions so far ---")
+        decision_lines = self._decisions_so_far(outcomes, dispatcher_context)
+        if decision_lines:
+            lines.extend(decision_lines)
+        else:
+            lines.append("(no accepted decisions yet)")
+        lines.append("")
+
+        created_lines = self._created_topics_recap(dispatcher_context)
+        if created_lines:
+            lines.append("--- Topics created this run ---")
+            lines.extend(created_lines)
+            lines.append("")
+
+        lines.append(
+            "The full source-message dump and earlier turns were summarized to save tokens. "
+            "Use the message/reply/search context tools to re-read any specific source in "
+            "full before deciding on it."
+        )
+        return "\n".join(lines)
+
+    def _top_source_items(self, messages: Sequence[Dict[str, Any]], limit: int = 6) -> List[str]:
+        ranked = sorted(
+            (m for m in (messages or []) if m.get("content")),
+            key=lambda m: self._message_reaction_count(m),
+            reverse=True,
+        )
+        items: List[str] = []
+        for message in ranked[:limit]:
+            content = str(message.get("content") or "").replace("\n", " ").strip()
+            if len(content) > 120:
+                content = content[:117].rstrip() + "..."
+            author = self._author_name(message)
+            channel = message.get("channel_name") or message.get("channel_id") or "?"
+            reactions = self._message_reaction_count(message)
+            items.append(
+                f"- reactions={reactions} channel={channel} author={author or '?'}: {content}"
+            )
+        return items
+
+    def _decisions_so_far(
+        self,
+        outcomes: List[Dict[str, Any]],
+        dispatcher_context: Dict[str, Any],
+    ) -> List[str]:
+        lines: List[str] = []
+        seen_keys: set = set()
+        # Recent decisions, newest last. Include accepted, idempotent replays and
+        # rejected outcomes (with their rejection reason) so a post-compaction
+        # model can recover "why" a key was declined.
+        recent = (outcomes or [])[-40:]
+        for outcome in recent:
+            outcome_name = str(outcome.get("outcome") or "?")
+            if outcome_name != "accepted" and outcome_name != "idempotent_replay" and not outcome_name.startswith("rejected"):
+                continue
+            action = str(outcome.get("action") or outcome.get("tool") or "?")
+            canonical_key = outcome.get("canonical_key")
+            topic_id = outcome.get("topic_id")
+            draft_id = outcome.get("draft_id")
+            key = canonical_key or topic_id or draft_id or outcome.get("tool_call_id")
+            if key is not None:
+                key = str(key)
+            if key is not None and key in seen_keys:
+                continue
+            if key is not None:
+                seen_keys.add(key)
+            if outcome_name.startswith("rejected"):
+                reason = outcome.get("error") or outcome.get("reason") or outcome_name
+                line = f"- REJECTED {action} reason={reason}"
+            elif outcome_name == "idempotent_replay":
+                line = f"- replay {action}"
+            else:
+                line = f"- {action}"
+            if canonical_key:
+                line += f" canonical_key={canonical_key}"
+            if topic_id:
+                line += f" topic_id={topic_id}"
+            if draft_id:
+                line += f" draft_id={draft_id}"
+            lines.append(line)
+        return lines
+
+    def _active_topics_recap(self, dispatcher_context: Dict[str, Any], cap: int = 30) -> List[str]:
+        """Terse list of the active/watching topic set known to the run."""
+        lines: List[str] = []
+        seen: set = set()
+        for topic in dispatcher_context.get("active_topics") or []:
+            canonical_key = str(topic.get("canonical_key") or "") or str(topic.get("topic_id") or "")
+            if not canonical_key or canonical_key in seen:
+                continue
+            seen.add(canonical_key)
+            headline = str(topic.get("headline") or "")
+            if len(headline) > 90:
+                headline = headline[:87].rstrip() + "..."
+            state = topic.get("state") or "?"
+            lines.append(f"- state={state} canonical_key={canonical_key} headline={headline!r}")
+            if len(lines) >= cap:
+                break
+        return lines
+
+    def _created_topics_recap(self, dispatcher_context: Dict[str, Any], cap: int = 30) -> List[str]:
+        """Terse list of topics created/published this run with their source ids."""
+        by_key = dispatcher_context.get("created_topic_keys") or {}
+        created = dispatcher_context.get("created_topics") or []
+        lines: List[str] = []
+        seen: set = set()
+        for topic in list(by_key.values()) + list(created):
+            if not isinstance(topic, dict):
+                continue
+            canonical_key = str(topic.get("canonical_key") or "")
+            topic_id = str(topic.get("topic_id") or "")
+            key = canonical_key or topic_id
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            state = topic.get("state") or "?"
+            source_ids = [str(sid) for sid in (topic.get("source_message_ids") or [])][:6]
+            lines.append(
+                f"- {state} canonical_key={canonical_key} topic_id={topic_id} sources={','.join(source_ids)}"
+            )
+            if len(lines) >= cap:
+                break
+        return lines
 
     def _tool_result_content(self, call: Dict[str, Any], outcome: Dict[str, Any]) -> str:
         """Build a concise tool_result content string to feed back into the agent loop."""
@@ -2441,6 +2718,36 @@ class TopicEditor:
         # Pre‑compute canonical_key early — T7 validation rejections need it
         canonical_key = canonicalize_proposed_key(args.get("proposed_key"), args.get("headline") or "")
 
+        # BLOCKER 1: semantic per-run dedup. Compaction drops old tool_call_ids,
+        # so the model may re-issue a create for a key already created this run
+        # with a FRESH tool_call_id. Idempotency keyed only by tool_call_id would
+        # treat that as new → duplicate row + duplicate publish. Guard on the
+        # normalized canonical_key against this run's created topics.
+        existing_created = (context.get("created_topic_keys") or {}).get(str(canonical_key)) if canonical_key else None
+        if existing_created is not None:
+            replay_action = {
+                "post_topic": "post_topic",
+                "post_simple_topic": "post_simple",
+                "post_sectioned_topic": "post_sectioned",
+                "watch_topic": "watch",
+            }.get(call["name"], call["name"])
+            logger.info(
+                "TopicEditor semantic replay skipped: run_id=%s tool=%s canonical_key=%s topic_id=%s (created this run)",
+                context.get("run_id"),
+                call["name"],
+                canonical_key,
+                existing_created.get("topic_id"),
+            )
+            return {
+                "tool_call_id": call.get("id"),
+                "tool": call["name"],
+                "outcome": "idempotent_replay",
+                "action": replay_action,
+                "topic_id": existing_created.get("topic_id"),
+                "canonical_key": canonical_key,
+                "error": "semantic_replay_created_this_run",
+            }
+
         # ── T7: Build merged resolved-message map (window + archive) ──────
         resolved_by_id: Dict[str, Dict[str, Any]] = {}
         for msg in context.get("messages") or []:
@@ -2787,6 +3094,8 @@ class TopicEditor:
         if topic_id:
             topic.setdefault("source_message_ids", source_ids)
             topic.setdefault("run_id", context.get("run_id"))
+            # Register every create (watching + posted) for semantic per-run dedup.
+            context.setdefault("created_topic_keys", {})[str(canonical_key)] = topic
             if state == "posted":
                 context.setdefault("created_topics", []).append(topic)
             for message_id in source_ids:
@@ -3420,6 +3729,18 @@ class TopicEditor:
         except Exception as exc:
             logger.warning("TopicEditor progress persistence failed: %s", exc, exc_info=True)
 
+    def _dedupe_created_topics(self, topics: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Keep the first occurrence of each canonical_key/topic_id before publishing."""
+        seen: set = set()
+        out: List[Dict[str, Any]] = []
+        for topic in topics or []:
+            key = str(topic.get("canonical_key") or "") or str(topic.get("topic_id") or "")
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            out.append(topic)
+        return out
+
     async def _publish_created_topics(self, topics: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
         publishable = [
             topic for topic in topics or []
@@ -3553,9 +3874,13 @@ class TopicEditor:
         if metadata.get("forced_close"):
             lines.insert(1, f"⚠ FORCE-CLOSED reason={metadata.get('forced_close_reason') or 'unknown'}")
         if metadata.get("cumulative_tokens") is not None:
+            compaction_note = ""
+            compactions = metadata.get("compactions") or []
+            if compactions:
+                compaction_note = f" compactions={len(compactions)}"
             lines.insert(
                 5,
-                f"cumulative_tokens={metadata.get('cumulative_tokens')} cumulative_cost_usd={metadata.get('cumulative_cost_usd')}",
+                f"cumulative_tokens={metadata.get('cumulative_tokens')} cumulative_cost_usd={metadata.get('cumulative_cost_usd')}{compaction_note}",
             )
         shortlist_lines = [
             (
