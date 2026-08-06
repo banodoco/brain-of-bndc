@@ -273,7 +273,9 @@ def test_topic_editor_run_once_uses_native_tools_and_topic_run_lifecycle(monkeyp
     monkeypatch.setenv("TOPIC_EDITOR_INPUT_COST_PER_MTOKENS", "3")
     monkeypatch.setenv("TOPIC_EDITOR_OUTPUT_COST_PER_MTOKENS", "15")
     monkeypatch.setenv("LIVE_UPDATE_TRACE_CHANNEL_ID", "999")
-    monkeypatch.delenv("TOPIC_EDITOR_PUBLISHING_ENABLED", raising=False)
+    # Production default for TOPIC_EDITOR_PUBLISHING_ENABLED is "true" (publishing
+    # ON); pin it off explicitly so this lifecycle test runs without publishing.
+    monkeypatch.setenv("TOPIC_EDITOR_PUBLISHING_ENABLED", "false")
 
     class TraceChannel:
         def __init__(self):

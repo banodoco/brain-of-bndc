@@ -171,7 +171,7 @@ class TestTopicEditorDraftPrimitives:
         assert units[0]["content"].startswith("## T2 Trains Relight LoRA")
         assert "A new test shows" in units[0]["content"]
         assert units[1]["content"].startswith("T2 posted")
-        assert "[1](https://discord.com/channels/123/456/1506344740558475356)" in units[1]["content"]
+        assert "[[1]](https://discord.com/channels/123/456/1506344740558475356)" in units[1]["content"]
         assert units[2]["ref"] == {
             "message_id": "1506344740558475356",
             "kind": "attachment",
@@ -1187,8 +1187,8 @@ class TestRenderTopicPublishUnits:
         }
         units = render_topic_publish_units(topic, source_metadata=source_metadata)
         content = units[0]["content"]
-        assert "[1](https://discord.com/channels/123/456/111)" in content
-        assert "[2](https://discord.com/channels/123/456/222)" in content
+        assert "[[1]](https://discord.com/channels/123/456/111)" in content
+        assert "[[2]](https://discord.com/channels/123/456/222)" in content
         assert "Sources:" not in content
 
     # ── T-new-2: out-of-range marker left literal, Sources fallback fires ──
@@ -1249,8 +1249,8 @@ class TestRenderTopicPublishUnits:
         units = render_topic_publish_units(topic, source_metadata=source_metadata)
         content = units[0]["content"]
         # [1] and [2] become masked links
-        assert "[1](https://discord.com/channels/123/456/111)" in content
-        assert "[2](https://discord.com/channels/123/456/222)" in content
+        assert "[[1]](https://discord.com/channels/123/456/111)" in content
+        assert "[[2]](https://discord.com/channels/123/456/222)" in content
         # [3] stays literal (out of range, no link)
         assert "[3]" in content
         assert "[3](" not in content
@@ -1276,11 +1276,41 @@ class TestRenderTopicPublishUnits:
         # Pre-existing markdown link untouched
         assert "[1](https://example.com)" in content
         # [2] gets substituted into a masked link
-        assert "[2](https://discord.com/channels/123/456/222)" in content
+        assert "[[2]](https://discord.com/channels/123/456/222)" in content
         # At least one substitution succeeded → no Sources: footer
         assert "Sources:" not in content
 
-    def test_bare_sentence_end_citation_numbers_are_bracketed_and_linked(self):
+    def test_already_rendered_masked_citations_are_not_double_wrapped(self):
+        """A body that already contains rendered [[N]](url) masked links (agent
+        copied the format, or a prior render pass) must not be re-wrapped into
+        [[[N]](url)](url)."""
+        topic = self._topic_with_blocks([
+            {
+                "type": "intro",
+                "text": (
+                    "Custom audio drives lip-sync [[1]](https://discord.com/channels/123/456/111) "
+                    "and was proven before [[2]](https://discord.com/channels/123/456/222)."
+                ),
+                "source_message_ids": ["111", "222"],
+            }
+        ])
+        source_metadata = {
+            "111": self._source_meta("111"),
+            "222": self._source_meta("222"),
+        }
+        units = render_topic_publish_units(topic, source_metadata=source_metadata)
+        content = units[0]["content"]
+        # Already-rendered masked citations are preserved verbatim — no triple brackets.
+        assert "[[1]](https://discord.com/channels/123/456/111)" in content
+        assert "[[2]](https://discord.com/channels/123/456/222)" in content
+        assert "[[[1]]" not in content
+        assert "[[[2]]" not in content
+        # No bare markers remain to re-substitute, so no Sources: footer either.
+        assert "Sources:" not in content
+
+    def test_bare_sentence_end_digits_are_not_auto_bracketed_and_sources_fallback_fires(self):
+        """Bare sentence-end digits are trusted as text (auto-bracketing was
+        removed); with no explicit [N] markers the Sources: footer carries URLs."""
         topic = self._topic_with_blocks([
             {
                 "type": "intro",
@@ -1300,13 +1330,16 @@ class TestRenderTopicPublishUnits:
         units = render_topic_publish_units(topic, source_metadata=source_metadata)
         content = units[0]["content"]
 
-        assert "frame [1](https://discord.com/channels/123/456/111)." in content
-        assert "generally [2](https://discord.com/channels/123/456/222) [3](https://discord.com/channels/123/456/333)." in content
-        assert "frame 1." not in content
-        assert "generally 23." not in content
-        assert "Sources:" not in content
+        assert "frame 1." in content
+        assert "generally 23." in content
+        assert "Sources: [1] <https://discord.com/channels/123/456/111>" in content
+        assert "[2] <https://discord.com/channels/123/456/222>" in content
+        assert "[3] <https://discord.com/channels/123/456/333>" in content
+        assert "[[1]](" not in content
 
-    def test_bare_citation_normalizer_does_not_touch_model_versions_or_mid_sentence_numbers(self):
+    def test_bare_digits_do_not_corrupt_model_versions_or_mid_sentence_numbers(self):
+        """Bare digits (model versions, counts, sentence-end) are never
+        auto-bracketed; the Sources: footer carries the URL instead."""
         topic = self._topic_with_blocks([
             {
                 "type": "intro",
@@ -1320,7 +1353,9 @@ class TestRenderTopicPublishUnits:
         content = units[0]["content"]
 
         assert "LTX2.3 still supports 12 frame tests" in content
-        assert "source [1](https://discord.com/channels/123/456/111)." in content
+        assert "source 1." in content
+        assert "Sources: [1] <https://discord.com/channels/123/456/111>" in content
+        assert "[[1]](" not in content
 
 
 class TestResolveMediaUrlFromMetadata:

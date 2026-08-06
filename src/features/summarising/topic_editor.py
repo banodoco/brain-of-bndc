@@ -6588,10 +6588,18 @@ def render_topic_publish_units(
                     return f"[[{n}]]({url})"
                 return m.group(0)  # out-of-range / unresolvable → literal
 
+            # Negative lookahead (?!\() skips pre-existing [N](url) links;
+            # negative lookbehind (?<!\[) skips the [N] inside an already-
+            # rendered [[N]](url) masked link so re-rendering a body that already
+            # contains citations never double-wraps them into [[[N]](url)](url).
             substituted_text = re.sub(
-                r"\[(\d{1,2})\](?!\()", _sub_citation, block_text
+                r"(?<!\[)\[(\d{1,2})\](?!\()", _sub_citation, block_text
             )
-            inline_substituted = substituted_text != block_text
+            # Treat already-rendered [[N]](url) masked links as an inline-citation
+            # success too: neither double-wrap them nor append a redundant
+            # Sources: footer alongside the citations already in the body.
+            has_rendered_citations = bool(re.search(r"\[\[\d{1,2}\]\]\(", block_text))
+            inline_substituted = (substituted_text != block_text) or has_rendered_citations
         else:
             substituted_text = block_text
             inline_substituted = False
