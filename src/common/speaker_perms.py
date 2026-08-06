@@ -1,6 +1,29 @@
-"""Shared helpers for Speaker role permission enforcement."""
+"""Shared helpers for three-tier role permission enforcement.
+
+The model manages four roles per channel — @everyone, Newbie, Speaker, and
+Moderated — where @everyone is denied send in every mode (no open channels).
+Each channel carries a posting mode that decides which of the managed roles
+may send:
+  - bot       → nobody posts (gate channel)
+  - newbie    → Newbie + Speaker (introductions, grants forum, help/support)
+  - community → Speaker only (all topical channels)
+  - appeal    → Speaker + Moderated (moderation / appeal channel)
+
+Moderated is denied everywhere except `appeal`.
+
+IMPORTANT (Discord permission semantics): for a member holding multiple roles,
+channel overwrite allows and denies are OR'd across all roles and then applied
+as `(base & ~denies) | allows` — so an ALLOW from any role wins over a DENY from
+another role for the same member. Role position does NOT make a deny beat an
+allow. The Moderated tier therefore only blocks a member if they hold NO role
+that grants send in that channel. Moderation enforces this by REMOVING the
+Newbie/Speaker roles synchronously (swap -> Moderated), and the 5-minute
+reconciliation loop + `on_member_update` strip any stale tier role within
+minutes. Moderated is still positioned above Newbie/Speaker as defense in depth,
+but that ordering is not what enforces the block.
+"""
 import logging
-from typing import Tuple
+from typing import Mapping, Tuple
 
 import discord
 
@@ -14,28 +37,32 @@ SEND_PERMS = [
     'create_private_threads',
 ]
 
+# Per-channel posting mode -> which of the managed roles may send.
+# @everyone is denied in every mode.
+_MODE_ROLE_ALLOWED = {
+    'bot':       {'everyone': False, 'newbie': False, 'speaker': False, 'moderated': False},
+    'newbie':    {'everyone': False, 'newbie': True,  'speaker': True,  'moderated': False},
+    'community': {'everyone': False, 'newbie': False, 'speaker': True,  'moderated': False},
+    'appeal':    {'everyone': False, 'newbie': False, 'speaker': True,  'moderated': True},
+}
 
-def _expected_values(mode: str, target: str) -> dict:
-    """Return the expected permission values for a given mode and target.
+VALID_MODES = frozenset(_MODE_ROLE_ALLOWED.keys())
+ROLE_KEYS = ('everyone', 'newbie', 'speaker', 'moderated')
+
+
+def _expected_values(mode: str, role_key: str) -> dict:
+    """Return the expected SEND_PERMS values for a role in a channel mode.
 
     Args:
-        mode: 'normal', 'readonly', or 'exempt'
-        target: 'everyone' or 'speaker'
+        mode: 'bot', 'newbie', 'community', or 'appeal'.
+        role_key: 'everyone', 'newbie', 'speaker', or 'moderated'.
 
     Returns:
         Dict mapping each SEND_PERMS attr to True/False.
     """
-    if mode == 'readonly':
-        # Both @everyone and Speaker are denied
-        return {p: False for p in SEND_PERMS}
-    if mode == 'exempt':
-        # Everyone can post — no Speaker restriction
-        return {p: True for p in SEND_PERMS}
-    # 'normal' (and fallback)
-    if target == 'everyone':
-        return {p: False for p in SEND_PERMS}
-    else:  # speaker
-        return {p: True for p in SEND_PERMS}
+    allowed = _MODE_ROLE_ALLOWED.get(mode, _MODE_ROLE_ALLOWED['community'])
+    can_send = allowed.get(role_key, False)
+    return {p: can_send for p in SEND_PERMS}
 
 
 def check_overwrite_matches(overwrite: discord.PermissionOverwrite, expected: dict) -> bool:
@@ -52,57 +79,45 @@ def check_overwrite_matches(overwrite: discord.PermissionOverwrite, expected: di
 
 async def apply_perms_to_channel(
     channel: discord.abc.GuildChannel,
-    role: discord.Role,
+    roles: Mapping[str, discord.Role],
     mode: str,
 ) -> Tuple[bool, int]:
     """Check and correct permissions for a single channel.
 
     Args:
         channel: The Discord channel to enforce.
-        role: The Speaker role.
-        mode: 'normal', 'readonly', or 'exempt'.
+        roles: Mapping of role_key -> Role for 'everyone', 'newbie', 'speaker',
+            'moderated'.
+        mode: 'bot', 'newbie', 'community', or 'appeal'.
 
     Returns:
         (changed, api_calls) — whether anything was fixed, and how many API calls made.
     """
-    everyone = channel.guild.default_role
+    if mode not in VALID_MODES:
+        mode = 'community'
     changed = False
     api_calls = 0
 
-    # --- @everyone overwrite ---
-    everyone_expected = _expected_values(mode, 'everyone')
-    everyone_ow = channel.overwrites_for(everyone)
-    needs_everyone_update = not check_overwrite_matches(everyone_ow, everyone_expected)
-    # Clean up legacy add_reactions overwrite (no longer managed)
-    if everyone_ow.add_reactions is not None:
-        everyone_ow.add_reactions = None
-        needs_everyone_update = True
-    if needs_everyone_update:
-        for attr, value in everyone_expected.items():
-            setattr(everyone_ow, attr, value)
-        await channel.set_permissions(
-            everyone, overwrite=everyone_ow,
-            reason=f"Speaker perm enforcement — {mode} @everyone",
-        )
-        api_calls += 1
-        changed = True
+    for role_key in ROLE_KEYS:
+        role = roles.get(role_key)
+        if role is None:
+            continue
 
-    # --- Speaker role overwrite ---
-    speaker_expected = _expected_values(mode, 'speaker')
-    speaker_ow = channel.overwrites_for(role)
-    needs_speaker_update = not check_overwrite_matches(speaker_ow, speaker_expected)
-    # Clean up legacy add_reactions overwrite (no longer managed)
-    if speaker_ow.add_reactions is not None:
-        speaker_ow.add_reactions = None
-        needs_speaker_update = True
-    if needs_speaker_update:
-        for attr, value in speaker_expected.items():
-            setattr(speaker_ow, attr, value)
-        await channel.set_permissions(
-            role, overwrite=speaker_ow,
-            reason=f"Speaker perm enforcement — {mode} Speaker",
-        )
-        api_calls += 1
-        changed = True
+        expected = _expected_values(mode, role_key)
+        ow = channel.overwrites_for(role)
+        needs_update = not check_overwrite_matches(ow, expected)
+        # Clean up legacy add_reactions overwrite (no longer managed)
+        if ow.add_reactions is not None:
+            ow.add_reactions = None
+            needs_update = True
+        if needs_update:
+            for attr, value in expected.items():
+                setattr(ow, attr, value)
+            await channel.set_permissions(
+                role, overwrite=ow,
+                reason=f"Speaker perm enforcement — {mode} {role_key}",
+            )
+            api_calls += 1
+            changed = True
 
     return (changed, api_calls)

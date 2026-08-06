@@ -446,6 +446,23 @@ class ServerConfig:
                 pass
         return None
 
+    def set_server_field(self, guild_id: int, field: str, value) -> bool:
+        """Update a server_config field in the DB and the local cache.
+
+        Used for runtime-configurable fields (e.g. the active Speaker invite
+        code) so a bot command can take effect without a redeploy.
+        """
+        if not self._supabase:
+            return False
+        try:
+            self._supabase.table('server_config').update({field: value}).eq('guild_id', guild_id).execute()
+            if guild_id in self._servers:
+                self._servers[guild_id] = {**self._servers[guild_id], field: value}
+            return True
+        except Exception as e:
+            logger.error(f"ServerConfig: failed to set {field} for guild {guild_id}: {e}", exc_info=True)
+            return False
+
     # ------------------------------------------------------------------
     # Per-channel agent guidance
     # ------------------------------------------------------------------

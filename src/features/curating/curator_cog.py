@@ -25,6 +25,8 @@ class CuratorCog(commands.Cog):
     @commands.command(name='curate')
     async def manual_curate(self, ctx):
         """Forces a curation cycle manually, if appropriate."""
+        if not await self.bot.is_owner(ctx.author):
+            return
         if not hasattr(self.art_curator, 'manual_curate'):
             await ctx.send("Manual curation is not implemented for the current curator.")
             return

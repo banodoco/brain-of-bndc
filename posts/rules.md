@@ -3,11 +3,12 @@
 > ### 1. Open-Source Values:
 > • This space is for people who believe in open-source technology and want to work on it, promote it, and create art with it.
 > • Sharing things you've made is encouraged, especially code, insights, and resources. Promoting paid products or services is not what this space is for, unless they also happen to be open source.
-> • All messages sent here are stored and publicly accessible — for LLMs to learn from and for people to find. If you wish your messages to be deleted, please contact <@301463647895683072>.
+> • All messages sent here are stored and publicly accessible — for LLMs to learn from and for people to find. To remove your messages from the public corpus, use the `/remove-from-hivemind` command with <@1316765722738688030>. If you wish your messages to be deleted from Discord entirely, please contact <@301463647895683072>.
 
 > ### 2. Communication and Respect:
 > • Don't direct offensive language at others.
 > • Keep discussions focused on AI art and technology — no political or religious debates or content.
+> • Art focused on political or religious subjects is okay so long as it's tasteful and not lazy — per moderators' subjective judgment.
 > • Feedback is encouraged, but keep the tone supportive and constructive — don't dismiss or belittle others' work.
 > • Don't share personal information without consent.
 > • If you have an issue with another member, contact a moderator rather than escalating publicly.

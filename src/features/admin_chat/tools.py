@@ -4083,6 +4083,38 @@ def _resolve_speaker_role_id(guild_id: int) -> Optional[int]:
     return int(env_value) if env_value else None
 
 
+def _resolve_newbie_role_id(guild_id: int) -> Optional[int]:
+    """Mirror AdminCog._get_newbie_role_id."""
+    sc = _get_server_config()
+    value = sc.get_server_field(guild_id, 'newbie_role_id', cast=int)
+    if value is not None:
+        return value
+    env_value = os.getenv('NEWBIE_ROLE_ID')
+    return int(env_value) if env_value else None
+
+
+def _resolve_moderated_role_id(guild_id: int) -> Optional[int]:
+    """Mirror AdminCog._get_moderated_role_id."""
+    sc = _get_server_config()
+    value = sc.get_server_field(guild_id, 'moderated_role_id', cast=int)
+    if value is not None:
+        return value
+    env_value = os.getenv('MODERATED_ROLE_ID')
+    return int(env_value) if env_value else None
+
+
+def _invalidate_dm_cache(bot, member_id: int) -> None:
+    """Best-effort: drop the AdminCog's 60s DM-access cache for this member."""
+    if bot is None:
+        return
+    # discord.py keeps the full class name as the cog name (AdminCog, not Admin).
+    for name in ('AdminCog', 'Admin'):
+        cog = bot.get_cog(name)
+        if cog is not None and hasattr(cog, '_dm_access_cache'):
+            cog._dm_access_cache.pop(member_id, None)
+            return
+
+
 def _is_speaker_management_enabled(guild_id: int) -> bool:
     """Mirror AdminCog._is_speaker_management_enabled."""
     sc = _get_server_config()
@@ -4129,14 +4161,20 @@ async def execute_mute_speaker(
     role_id = _resolve_speaker_role_id(guild_id)
     if not role_id:
         return {"success": False, "error": "SPEAKER_ROLE_ID is not configured."}
+    newbie_role_id = _resolve_newbie_role_id(guild_id)
+    moderated_role_id = _resolve_moderated_role_id(guild_id)
+    if not newbie_role_id or not moderated_role_id:
+        return {"success": False, "error": "NEWBIE_ROLE_ID / MODERATED_ROLE_ID are not configured."}
 
     guild = bot.get_guild(guild_id)
     if not guild:
         return {"success": False, "error": f"Guild {guild_id} not in cache"}
 
-    role = guild.get_role(role_id)
-    if not role:
-        return {"success": False, "error": "Speaker role not found in this server."}
+    speaker_role = guild.get_role(role_id)
+    newbie_role = guild.get_role(newbie_role_id)
+    moderated_role = guild.get_role(moderated_role_id)
+    if not speaker_role or not newbie_role or not moderated_role:
+        return {"success": False, "error": "Speaker/Newbie/Moderated roles not all found in this server."}
 
     member = guild.get_member(member_id)
     if not member:
@@ -4163,14 +4201,43 @@ async def execute_mute_speaker(
         f"Muted by {actor_label}: {reason_text}" + (f" (for {duration})" if duration else "")
     )
 
-    was_already_muted = role not in member.roles
+    was_already_muted = moderated_role in member.roles
+    if not was_already_muted and db_handler:
+        was_already_muted = db_handler.get_member_status(member_id, guild_id=guild_id) == 'moderated'
+
+    prior_status = 'speaker'
+    prior_can_message_bot = None
+    if db_handler:
+        if was_already_muted:
+            # Preserve the ORIGINAL snapshot so re-muting doesn't clobber the
+            # prior tier / DM value the member is restored to on unmute.
+            existing = db_handler.get_guild_member(member_id, guild_id)
+            prior_status = (existing or {}).get('prior_status') or 'speaker'
+            if prior_status not in ('newbie', 'speaker'):
+                prior_status = 'speaker'
+            prior_can_message_bot = (existing or {}).get('prior_can_message_bot')
+        else:
+            prior_status = db_handler.get_member_status(member_id, guild_id=guild_id)
+            if prior_status not in ('newbie', 'speaker'):
+                prior_status = 'speaker'
+            prior_can_message_bot = db_handler.get_member_can_message_bot(member_id)
 
     try:
         if db_handler:
-            db_handler.set_is_speaker(member_id, False, guild_id=guild_id)
+            db_handler.set_member_status(member_id, guild_id, 'moderated',
+                                         prior_status=prior_status, set_prior=not was_already_muted)
 
-        if not was_already_muted:
-            await member.remove_roles(role, reason=audit_reason[:512])
+        # Swap whichever tier role they held -> Moderated
+        roles_to_remove = [r for r in (newbie_role, speaker_role) if r in member.roles]
+        if roles_to_remove:
+            await member.remove_roles(*roles_to_remove, reason=audit_reason[:512])
+        if moderated_role not in member.roles:
+            await member.add_roles(moderated_role, reason=audit_reason[:512])
+
+        # Revoke DM-to-bot access
+        if db_handler:
+            db_handler.set_member_can_message_bot(member_id, False, username=member.name)
+        _invalidate_dm_cache(bot, member_id)
 
         mute_end_iso = None
         timed_saved = False
@@ -4183,6 +4250,8 @@ async def execute_mute_speaker(
                 mute_end_at=mute_end_iso,
                 reason=reason_text,
                 muted_by_id=int(admin_user_id) if admin_user_id else None,
+                prior_status=prior_status,
+                prior_can_message_bot=prior_can_message_bot,
             )
         elif was_already_muted and not td and db_handler:
             # Converting an existing timed mute back to permanent: clear the timer.
@@ -4215,11 +4284,11 @@ async def execute_mute_speaker(
                 msg = f"<@{member_id}> was already muted — converted to permanent (cleared any timer)."
         else:
             if duration and timed_saved:
-                msg = f"Muted <@{member_id}> for {duration} — Speaker role removed."
+                msg = f"Muted <@{member_id}> for {duration} — moved to Moderated."
             elif duration and not timed_saved:
-                msg = f"Muted <@{member_id}> — Speaker role removed, but auto-unmute couldn't be scheduled."
+                msg = f"Muted <@{member_id}> — moved to Moderated, but auto-unmute couldn't be scheduled."
             else:
-                msg = f"Muted <@{member_id}> — Speaker role removed."
+                msg = f"Muted <@{member_id}> — moved to Moderated."
 
         if not mod_log_posted:
             msg += " (Note: couldn't post to the moderation log channel — check bot permissions / channel type.)"
@@ -4238,7 +4307,7 @@ async def execute_mute_speaker(
             "message": msg,
         }
     except discord.Forbidden:
-        return {"success": False, "error": "I don't have permission to remove that role."}
+        return {"success": False, "error": "I don't have permission to change that user's roles."}
     except Exception as e:
         logger.error(f"[AdminChat] Error in mute_speaker for {member_id}: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
@@ -4268,14 +4337,20 @@ async def execute_unmute_speaker(
     role_id = _resolve_speaker_role_id(guild_id)
     if not role_id:
         return {"success": False, "error": "SPEAKER_ROLE_ID is not configured."}
+    newbie_role_id = _resolve_newbie_role_id(guild_id)
+    moderated_role_id = _resolve_moderated_role_id(guild_id)
+    if not newbie_role_id or not moderated_role_id:
+        return {"success": False, "error": "NEWBIE_ROLE_ID / MODERATED_ROLE_ID are not configured."}
 
     guild = bot.get_guild(guild_id)
     if not guild:
         return {"success": False, "error": f"Guild {guild_id} not in cache"}
 
-    role = guild.get_role(role_id)
-    if not role:
-        return {"success": False, "error": "Speaker role not found in this server."}
+    speaker_role = guild.get_role(role_id)
+    newbie_role = guild.get_role(newbie_role_id)
+    moderated_role = guild.get_role(moderated_role_id)
+    if not speaker_role or not newbie_role or not moderated_role:
+        return {"success": False, "error": "Speaker/Newbie/Moderated roles not all found in this server."}
 
     member = guild.get_member(member_id)
     if not member:
@@ -4290,36 +4365,56 @@ async def execute_unmute_speaker(
     actor_label = f"admin {admin_user_id}" if admin_user_id else "admin chat"
     reason_text = (params.get('reason') or "").strip() or "Unmuted via admin chat"
 
-    if role in member.roles:
+    if moderated_role not in member.roles:
         # Make sure DB & timed-mute state are in sync even if Discord role is already correct.
         if db_handler:
-            db_handler.set_is_speaker(member_id, True, guild_id=guild_id)
+            prior_status = db_handler.get_member_prior_status(member_id, guild_id) or 'speaker'
+            if prior_status not in ('newbie', 'speaker'):
+                prior_status = 'speaker'
+            db_handler.set_member_status(member_id, guild_id, prior_status)
             db_handler.delete_timed_mute(member_id, guild_id)
         return {
             "success": True,
             "already_unmuted": True,
             "user_id": str(member_id),
             "username": member.name,
-            "message": f"<@{member_id}> already has the Speaker role.",
+            "message": f"<@{member_id}> is not moderated.",
         }
+
+    # Determine prior tier from the DB snapshot (default Speaker for legacy mutes).
+    prior_status = 'speaker'
+    prior_can_message_bot = None
+    if db_handler:
+        prior_status = db_handler.get_member_prior_status(member_id, guild_id) or 'speaker'
+        if prior_status not in ('newbie', 'speaker'):
+            prior_status = 'speaker'
+        gm = db_handler.get_guild_member(member_id, guild_id)
+        if gm and gm.get('prior_can_message_bot') is not None:
+            prior_can_message_bot = bool(gm['prior_can_message_bot'])
 
     try:
         if db_handler:
-            db_handler.set_is_speaker(member_id, True, guild_id=guild_id)
-        await member.add_roles(role, reason=f"Unmuted by {actor_label}: {reason_text}"[:512])
+            db_handler.set_member_status(member_id, guild_id, prior_status)
+        await member.remove_roles(moderated_role, reason=f"Unmuted by {actor_label}: {reason_text}"[:512])
+        restore_role = speaker_role if prior_status == 'speaker' else newbie_role
+        if restore_role not in member.roles:
+            await member.add_roles(restore_role, reason=f"Unmuted by {actor_label}: {reason_text}"[:512])
         if db_handler:
+            if prior_can_message_bot is not None:
+                db_handler.set_member_can_message_bot(member_id, prior_can_message_bot, username=member.name)
             db_handler.delete_timed_mute(member_id, guild_id)
+        _invalidate_dm_cache(bot, member_id)
         logger.info(
-            f"[AdminChat] unmute_speaker: {member_id} ({member.name}) unmuted by {actor_label} — reason: {reason_text}"
+            f"[AdminChat] unmute_speaker: {member_id} ({member.name}) unmuted by {actor_label} — restored {prior_status}"
         )
         return {
             "success": True,
             "user_id": str(member_id),
             "username": member.name,
-            "message": f"Unmuted <@{member_id}> — Speaker role restored.",
+            "message": f"Unmuted <@{member_id}> — restored to {'Speaker' if prior_status == 'speaker' else 'Newbie'}.",
         }
     except discord.Forbidden:
-        return {"success": False, "error": "I don't have permission to add that role."}
+        return {"success": False, "error": "I don't have permission to change that user's roles."}
     except Exception as e:
         logger.error(f"[AdminChat] Error in unmute_speaker for {member_id}: {e}", exc_info=True)
         return {"success": False, "error": str(e)}

@@ -521,8 +521,6 @@ def test_semantic_dedup_canonical_key_prefix_alias_collision(monkeypatch):
     # Only one publish result (for alpha).
     publish_results = db.completed[0][1]["metadata"].get("publish_results") or []
     assert len(publish_results) == 1
-
-
 # --------------------------------------------------------------------------
 # 7. BLOCKER 2 — pair-safe tail + one-shot nudge
 # --------------------------------------------------------------------------
@@ -655,8 +653,6 @@ def test_last_tool_use_assistant_index_finds_deepseek_openai_assistant_message()
     assert compacted[1]["content"][0]["type"] == "openai_assistant_message"
     assert compacted[2]["role"] == "user"
     assert compacted[2]["content"][0]["type"] == "tool_result"
-
-
 # --------------------------------------------------------------------------
 # 8. SHOULD-FIX 3 — compaction is boundary-spaced, not consecutive
 # --------------------------------------------------------------------------
@@ -769,8 +765,6 @@ def test_compaction_recap_includes_active_topics_rejections_and_created_sources(
     assert "--- Topics created this run ---" in recap
     assert "canonical_key=alpha topic_id=topic-9" in recap
     assert "sources=100,101" in recap
-
-
 def test_invoke_anthropic_times_out_on_hanging_provider(monkeypatch):
     """A hung provider call must raise TimeoutError so run_once can fail the run."""
     import asyncio as _asyncio

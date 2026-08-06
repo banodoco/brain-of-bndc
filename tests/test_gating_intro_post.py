@@ -554,5 +554,155 @@ def test_build_application_embed_no_bio_provided():
     assert embed.description == 'No bio provided.'
 
 
+# =============================================================================
+# _recover_untracked_intro — admit a member from ANY of their messages
+#
+# Regression coverage for the fix where an approver reacting to a member's
+# reply / follow-up in the intro channel was silently dropped. A member who
+# already has an open pending intro must now be admitted from any of their
+# messages, not just the originally-tracked intro.
+# =============================================================================
+
+_GUILD_ID = 1076117621407223829
+_INTRO_CHANNEL_ID = 1138861011206688829
+_SPEAKER_ROLE_ID = 1475121624855482418
+_MEMBER_ID = 618927024295116810   # 0xdeluxa
+_APPROVER_ID = 301463647895683072
+
+
+def _make_cog_for_recovery(*, speaker=False):
+    """Build a GatingCog wired for unit-testing _recover_untracked_intro.
+
+    ``speaker=True`` makes the message author already hold the Speaker role so
+    the early-out guard is exercised.
+    """
+    from src.features.gating.gating_cog import GatingCog
+
+    bot = SimpleNamespace(user=SimpleNamespace(id=42))
+    cog = GatingCog(bot)
+    cog.db = MagicMock()
+    cog._get_gating_config = MagicMock(return_value={
+        'gate_channel_id': 100,
+        'intro_channel_id': _INTRO_CHANNEL_ID,
+        'speaker_role_id': _SPEAKER_ROLE_ID,
+        'approver_role_id': 1328101710488408207,
+        'super_approver_role_id': 1138851070311931946,
+    })
+
+    speaker_role = SimpleNamespace(id=_SPEAKER_ROLE_ID)
+    member = SimpleNamespace(id=_MEMBER_ID, roles=[speaker_role] if speaker else [])
+
+    guild = MagicMock()
+    guild.get_role.return_value = speaker_role
+    guild.get_member.return_value = member
+    guild.fetch_member = AsyncMock(return_value=member)
+    bot.get_guild = MagicMock(return_value=guild)
+
+    channel = MagicMock()
+    guild.get_channel.return_value = channel
+    return cog, channel
+
+
+def _reply_message(msg_id, author_id, replied_author_id):
+    """A message that replies to a different author (a conversation, not an intro)."""
+    return SimpleNamespace(
+        id=msg_id,
+        author=SimpleNamespace(id=author_id, bot=False),
+        reference=SimpleNamespace(
+            resolved=SimpleNamespace(author=SimpleNamespace(id=replied_author_id))
+        ),
+    )
+
+
+def _top_level_message(msg_id, author_id):
+    """A standalone (non-reply) message."""
+    return SimpleNamespace(
+        id=msg_id, author=SimpleNamespace(id=author_id, bot=False), reference=None
+    )
+
+
+def _payload(msg_id):
+    return SimpleNamespace(guild_id=_GUILD_ID, channel_id=_INTRO_CHANNEL_ID, message_id=msg_id)
+
+
+def test_recovery_resolves_reply_to_existing_pending_intro(fresh_event_loop):
+    # The bug: approver reacted to the member's *reply*, not their tracked intro.
+    cog, channel = _make_cog_for_recovery()
+    channel.fetch_message = AsyncMock(
+        return_value=_reply_message(1520415968205996034, _MEMBER_ID, _APPROVER_ID)
+    )
+    cog.db.get_pending_intro_by_member = MagicMock(
+        return_value={'id': 501, 'member_id': _MEMBER_ID}
+    )
+
+    result = fresh_event_loop.run_until_complete(
+        cog._recover_untracked_intro(_payload(1520415968205996034))
+    )
+
+    assert result == _MEMBER_ID
+    assert cog._pending_messages[1520415968205996034] == _MEMBER_ID
+    cog.db.get_pending_intro_by_member.assert_called_once()
+
+
+def test_recovery_creates_intro_from_reply_without_pending_intro(fresh_event_loop):
+    # Any of the member's messages — including a reply — can seed a pending intro, so an
+    # approver reacting to a reply admits them even with no prior intro tracked.
+    cog, channel = _make_cog_for_recovery()
+    channel.fetch_message = AsyncMock(
+        return_value=_reply_message(111, _MEMBER_ID, _APPROVER_ID)
+    )
+    cog.db.get_pending_intro_by_member = MagicMock(return_value=None)
+    cog.db.create_pending_intro = MagicMock(return_value={'id': 999})
+
+    result = fresh_event_loop.run_until_complete(cog._recover_untracked_intro(_payload(111)))
+
+    assert result == _MEMBER_ID
+    cog.db.create_pending_intro.assert_called_once()
+    assert cog._pending_messages[111] == _MEMBER_ID
+
+
+def test_recovery_creates_intro_for_top_level_message(fresh_event_loop):
+    # Pre-existing behaviour preserved: an untracked standalone intro is created on the fly.
+    cog, channel = _make_cog_for_recovery()
+    channel.fetch_message = AsyncMock(return_value=_top_level_message(222, _MEMBER_ID))
+    cog.db.get_pending_intro_by_member = MagicMock(return_value=None)
+    cog.db.create_pending_intro = MagicMock(return_value={'id': 999})
+
+    result = fresh_event_loop.run_until_complete(cog._recover_untracked_intro(_payload(222)))
+
+    assert result == _MEMBER_ID
+    cog.db.create_pending_intro.assert_called_once()
+    assert cog._pending_messages[222] == _MEMBER_ID
+
+
+def test_recovery_skips_already_speaker(fresh_event_loop):
+    cog, channel = _make_cog_for_recovery(speaker=True)
+    channel.fetch_message = AsyncMock(
+        return_value=_reply_message(333, _MEMBER_ID, _APPROVER_ID)
+    )
+    cog.db.get_pending_intro_by_member = MagicMock(
+        return_value={'id': 501, 'member_id': _MEMBER_ID}
+    )
+
+    result = fresh_event_loop.run_until_complete(cog._recover_untracked_intro(_payload(333)))
+
+    assert result is None
+    # Bailed at the speaker guard before ever consulting the pending-intro row.
+    cog.db.get_pending_intro_by_member.assert_not_called()
+
+
+def test_recovery_skips_bot_message(fresh_event_loop):
+    cog, channel = _make_cog_for_recovery()
+    msg = _top_level_message(444, _MEMBER_ID)
+    msg.author = SimpleNamespace(id=_MEMBER_ID, bot=True)
+    channel.fetch_message = AsyncMock(return_value=msg)
+    cog.db.get_pending_intro_by_member = MagicMock()
+
+    result = fresh_event_loop.run_until_complete(cog._recover_untracked_intro(_payload(444)))
+
+    assert result is None
+    cog.db.get_pending_intro_by_member.assert_not_called()
+
+
 # Suppress unused-import warning for shared scaffolding.
 _ = AsyncMock

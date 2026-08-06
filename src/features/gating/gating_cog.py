@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 from datetime import datetime, timedelta, timezone
 
@@ -115,16 +116,32 @@ class GatingCog(commands.Cog):
 
     # ── Config helpers ──
 
+    _ROLE_ENV_MAP = {
+        'speaker_role_id': 'SPEAKER_ROLE_ID',
+        'newbie_role_id': 'NEWBIE_ROLE_ID',
+        'moderated_role_id': 'MODERATED_ROLE_ID',
+    }
+    _CHANNEL_ENV_MAP = {
+        'gate_channel_id': 'GATE_CHANNEL_ID',
+        'intro_channel_id': 'INTRO_CHANNEL_ID',
+        'welcome_channel_id': 'WELCOME_CHANNEL_ID',
+    }
+
     def _get_guild_config(self, guild_id: int) -> dict:
-        """Resolve gating config for a guild from server_config."""
+        """Resolve gating config for a guild from server_config, then env fallback."""
         sc = getattr(self.db, 'server_config', None) if self.db else None
         server = sc.get_server(guild_id) if sc else None
         cfg = {}
         for key in (
             'gate_channel_id', 'intro_channel_id', 'speaker_role_id',
             'approver_role_id', 'super_approver_role_id', 'welcome_channel_id',
+            'newbie_role_id', 'moderated_role_id',
         ):
             val = server.get(key) if server else None
+            if val is None:
+                env_key = self._ROLE_ENV_MAP.get(key) or self._CHANNEL_ENV_MAP.get(key)
+                env_val = os.getenv(env_key) if env_key else None
+                val = env_val
             cfg[key] = int(val) if val is not None else None
         return cfg
 
@@ -211,9 +228,12 @@ class GatingCog(commands.Cog):
                 and message.reference.resolved.author.id != message.author.id):
             return
 
-        # Only track non-Speakers
+        # Only track non-Speakers who aren't moderated
         speaker_role = message.guild.get_role(cfg['speaker_role_id'])
         if not speaker_role or speaker_role in message.author.roles:
+            return
+        moderated_role = message.guild.get_role(cfg['moderated_role_id']) if cfg.get('moderated_role_id') else None
+        if moderated_role and moderated_role in message.author.roles:
             return
 
         # Track this message so any reaction on it can trigger approval
@@ -298,10 +318,18 @@ class GatingCog(commands.Cog):
     # ═══════════════════════════════════════════════════════════════
 
     async def _recover_untracked_intro(self, payload: discord.RawReactionActionEvent) -> int | None:
-        """Recover an intro that wasn't in `_pending_messages` (e.g. bot was offline
-        when it was posted). Returns the author's member_id if the message looks like
-        a legitimate pending intro, else None. Persists the recovery so future reactions
-        on the same message are tracked normally.
+        """Resolve a reaction on a message that wasn't in `_pending_messages`.
+
+        If the author already has an open pending intro, the reaction is resolved to it
+        so the member can be admitted from ANY of their messages in the intro channel
+        (replies and follow-ups included), not just the originally-tracked intro. This
+        matters because approvers frequently react to a member's later message or reply
+        rather than to the exact tracked intro.
+
+        Otherwise, a pending intro is created on the fly for the reacted message — replies
+        included — so an approver reacting to ANY of the member's messages in the intro
+        channel admits them. Returns the author's member_id, else None. Persists the result
+        so future reactions on the same message are tracked normally.
         """
         cfg = self._get_gating_config(payload.guild_id)
         if not cfg:
@@ -325,12 +353,6 @@ class GatingCog(commands.Cog):
         if message.author.bot:
             return None
 
-        # Skip replies to other people (conversations, not intros) — same rule as on_message.
-        if (message.reference and message.reference.resolved
-                and getattr(message.reference.resolved, 'author', None)
-                and message.reference.resolved.author.id != message.author.id):
-            return None
-
         author_member = guild.get_member(message.author.id)
         if not author_member:
             try:
@@ -341,19 +363,28 @@ class GatingCog(commands.Cog):
         speaker_role = guild.get_role(cfg['speaker_role_id'])
         if speaker_role and speaker_role in author_member.roles:
             return None
+        moderated_role = guild.get_role(cfg['moderated_role_id']) if cfg.get('moderated_role_id') else None
+        if moderated_role and moderated_role in author_member.roles:
+            return None
 
         member_id = message.author.id
 
         existing = self.db.get_pending_intro_by_member(member_id, guild_id=payload.guild_id)
         if existing:
-            # Pending intro exists in DB but this specific message wasn't tracked in memory.
+            # The member already has an open pending intro, but the approver reacted to a
+            # different message of theirs in the intro channel (often a reply or a later
+            # message). Resolve the reaction to their pending intro so they can be admitted
+            # from ANY of their messages — not just the originally-tracked intro.
             self._pending_messages[payload.message_id] = member_id
             logger.info(
-                f"GatingCog: recovered untracked message {payload.message_id} "
-                f"for existing pending intro of {member_id}"
+                f"GatingCog: resolved reaction on message {payload.message_id} "
+                f"to existing pending intro of {member_id}"
             )
             return member_id
 
+        # No existing pending intro. Any of the member's messages in the intro channel
+        # (including replies) can seed one on the fly, so an approver reacting to any of
+        # their messages admits them.
         try:
             self.db.create_pending_intro(
                 member_id, payload.message_id, payload.channel_id, guild_id=payload.guild_id
@@ -424,9 +455,31 @@ class GatingCog(commands.Cog):
         speaker_role = guild.get_role(cfg['speaker_role_id'])
         if not speaker_role:
             return
+        newbie_role = guild.get_role(cfg['newbie_role_id']) if cfg.get('newbie_role_id') else None
 
         try:
-            await member.add_roles(speaker_role, reason="Intro approved by community")
+            # Never promote a moderated member — check both the role and the DB status
+            moderated_role = guild.get_role(cfg['moderated_role_id']) if cfg.get('moderated_role_id') else None
+            if moderated_role and moderated_role in member.roles:
+                logger.warning(f"GatingCog: refused to approve moderated member {member}")
+                return
+            if self.db:
+                try:
+                    if self.db.get_member_status(intro['member_id'], guild_id=guild.id) == 'moderated':
+                        logger.warning(f"GatingCog: refused to approve DB-moderated member {member}")
+                        return
+                except Exception:
+                    pass
+
+            # Swap Newbie -> Speaker. Write the DB status FIRST so on_member_update
+            # (fired by the role changes) sees 'speaker' and doesn't strip the new
+            # role as a stray while the old status is still 'newbie'.
+            if self.db:
+                self.db.set_member_status(intro['member_id'], guild.id, 'speaker')
+            if newbie_role and newbie_role in member.roles:
+                await member.remove_roles(newbie_role, reason="Intro approved — promoted to Speaker")
+            if speaker_role not in member.roles:
+                await member.add_roles(speaker_role, reason="Intro approved by community")
             self.db.approve_pending_intro(intro['message_id'], guild_id=intro.get('guild_id'))
             self._remove_member_messages(intro['member_id'])
             logger.info(f"GatingCog: approved {member} (msg {intro['message_id']})")
@@ -796,7 +849,7 @@ class GatingCog(commands.Cog):
                 async for msg in channel.history(limit=200):
                     if msg.author.bot or msg.author.id not in pending_member_ids:
                         continue
-                    if speaker_role and speaker_role in msg.author.roles:
+                    if speaker_role and speaker_role in getattr(msg.author, 'roles', ()):
                         continue
                     if msg.id not in self._pending_messages:
                         self._pending_messages[msg.id] = msg.author.id

@@ -1370,7 +1370,6 @@ class TopicEditor:
                 if TopicEditor._content_has_tool_use(inner_content):
                     return True
         return False
-
     def _compaction_recap_text(
         self,
         *,
