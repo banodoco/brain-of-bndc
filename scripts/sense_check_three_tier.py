@@ -8,7 +8,8 @@ backfill/channel-mode scripts have run.
 Checks:
   1. Every non-bot member holds exactly one tier role (Newbie/Speaker/Moderated).
   2. Every channel resolves to a valid mode (bot/newbie/community/appeal).
-  3. @everyone denies SEND_PERMS in every channel (no channel open to everyone).
+  3. @everyone denies SEND_PERMS and pin_messages in every channel (no channel open to everyone).
+     Tier roles match the mode table including forum-only pin_messages grants.
   4. Moderated role is positioned above Newbie & Speaker.
   5. Every moderated/muted member holds Moderated and lacks Newbie/Speaker.
   6. DB member_status matches the member's actual tier role.
@@ -34,7 +35,7 @@ from src.common.db_handler import (
     DatabaseHandler, MEMBER_STATUS_NEWBIE, MEMBER_STATUS_SPEAKER, MEMBER_STATUS_MODERATED,
     CHANNEL_MODES,
 )
-from src.common.speaker_perms import SEND_PERMS
+from src.common.speaker_perms import PIN_PERMS, SEND_PERMS, pin_allowed
 
 load_dotenv()
 
@@ -147,24 +148,27 @@ async def on_ready():
     invalid = [cid for cid, m in modes.items() if m not in CHANNEL_MODES]
     check(not invalid, f"All DB channel modes valid (bot/newbie/community/appeal) — {len(modes)} modes, {len(invalid)} invalid")
 
-    # ── Check 3: @everyone explicitly DENIES SEND_PERMS everywhere ──
+    # ── Check 3: @everyone explicitly DENIES SEND_PERMS (and pin) everywhere ──
     # An unset (None) overwrite is a leak — @everyone's base permissions default
     # to allowing send in text channels, so only an explicit deny is safe.
     from src.common.speaker_perms import _expected_values
     everyone_leaks = []
     tier_mismatches = []
     for c in channels:
+        is_forum = c.type is discord.ChannelType.forum
         ow = c.overwrites_for(guild.default_role)
-        for perm in SEND_PERMS:
+        for perm in SEND_PERMS + list(PIN_PERMS):
             if getattr(ow, perm) is not False:
                 everyone_leaks.append(f"#{c.name} ({perm})")
                 break
-        # Validate each tier role's overwrite matches the expected mode.
+        # Validate each tier role's overwrite matches the expected mode table,
+        # including the forum-only pin_messages grant.
         mode = modes.get(c.id) or 'community'
         for role_key, role in (('newbie', newbie_role), ('speaker', speaker_role), ('moderated', moderated_role)):
             expected = _expected_values(mode, role_key)
+            expected['pin_messages'] = pin_allowed(mode, role_key, is_forum=is_forum)
             row_ow = c.overwrites_for(role)
-            for perm in SEND_PERMS:
+            for perm in SEND_PERMS + list(PIN_PERMS):
                 if getattr(row_ow, perm) != expected[perm]:
                     tier_mismatches.append(
                         f"#{c.name} mode={mode} {role_key}.{perm}: "

@@ -1,4 +1,13 @@
-"""Remove the Speaker role channel overwrites and restore @everyone send permissions."""
+"""Remove the Speaker role channel overwrites and restore @everyone send permissions.
+
+WARNING: this is now an INCOMPLETE rollback for the three-tier model. It only
+touches the @everyone and Speaker overwrites; it leaves the Newbie/Moderated
+overwrites (and their pin_messages fields, added with forum-only pinning) in
+place, so channels end up half-reverted. The bot's 30-minute
+`enforce_channel_permissions` reconciliation will also re-apply the managed
+tier perms on its next pass. Prefer updating a channel's speaker_mode in the DB
+(or /migrate_channel_modes.py) over this script.
+"""
 import asyncio
 import os
 import logging

@@ -37,6 +37,13 @@ SEND_PERMS = [
     'create_private_threads',
 ]
 
+# Pinning is a standalone permission (discord.py >=2.7.0). We grant it to the
+# posting roles ONLY on forum channels, so members can pin/unpin messages inside
+# forum posts but not in regular channels. See pin_allowed().
+PIN_PERMS = [
+    'pin_messages',
+]
+
 # Per-channel posting mode -> which of the managed roles may send.
 # @everyone is denied in every mode.
 _MODE_ROLE_ALLOWED = {
@@ -63,6 +70,17 @@ def _expected_values(mode: str, role_key: str) -> dict:
     allowed = _MODE_ROLE_ALLOWED.get(mode, _MODE_ROLE_ALLOWED['community'])
     can_send = allowed.get(role_key, False)
     return {p: can_send for p in SEND_PERMS}
+
+
+def pin_allowed(mode: str, role_key: str, *, is_forum: bool) -> bool:
+    """Whether a role may pin messages in a channel of the given type.
+
+    Pinning is forum-only: no role may pin in regular channels (``is_forum=False``).
+    In a forum channel, the roles that may post in that mode may also pin.
+    """
+    if not is_forum:
+        return False
+    return _MODE_ROLE_ALLOWED.get(mode, _MODE_ROLE_ALLOWED['community']).get(role_key, False)
 
 
 def check_overwrite_matches(overwrite: discord.PermissionOverwrite, expected: dict) -> bool:
@@ -104,6 +122,13 @@ async def apply_perms_to_channel(
             continue
 
         expected = _expected_values(mode, role_key)
+        # Pinning is enabled only inside forum posts (not regular channels).
+        # Use ChannelType.forum rather than isinstance(ForumChannel): discord.py
+        # maps GUILD_MEDIA channels to ForumChannel too, and they must stay denied.
+        expected['pin_messages'] = pin_allowed(
+            mode, role_key,
+            is_forum=channel.type is discord.ChannelType.forum,
+        )
         ow = channel.overwrites_for(role)
         needs_update = not check_overwrite_matches(ow, expected)
         # Clean up legacy add_reactions overwrite (no longer managed)

@@ -17,7 +17,14 @@ from src.common.db_handler import (
     MEMBER_STATUS_SPEAKER,
     _LEGACY_MODE_MAP,
 )
-from src.common.speaker_perms import SEND_PERMS, ROLE_KEYS, VALID_MODES, _expected_values
+from src.common.speaker_perms import (
+    PIN_PERMS,
+    SEND_PERMS,
+    ROLE_KEYS,
+    VALID_MODES,
+    _expected_values,
+    pin_allowed,
+)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -62,6 +69,127 @@ def test_expected_values_cover_all_send_perms():
     for mode in VALID_MODES:
         for role_key in ROLE_KEYS:
             assert set(_expected_values(mode, role_key).keys()) == set(SEND_PERMS)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# forum-only message pinning
+# ═══════════════════════════════════════════════════════════════════
+
+def test_dependency_contract_pin_messages_flag_present():
+    """Fails fast if discord.py lacks the pin_messages flag (needs >=2.7.0)."""
+    assert PIN_PERMS == ['pin_messages']
+    assert 'pin_messages' in discord.Permissions.VALID_FLAGS
+    assert 'pin_messages' in discord.PermissionOverwrite.VALID_NAMES
+    allow, _ = discord.PermissionOverwrite(pin_messages=True).pair()
+    assert allow.pin_messages is True
+    _, deny = discord.PermissionOverwrite(pin_messages=False).pair()
+    assert deny.pin_messages is True  # deny bit serializes correctly
+
+
+def test_pin_allowed_forum_only():
+    # Non-forum channels: nobody may pin, regardless of mode or role.
+    for mode in VALID_MODES:
+        for role_key in ROLE_KEYS:
+            assert pin_allowed(mode, role_key, is_forum=False) is False
+    # Forum channels: the roles that may post in that mode may also pin.
+    assert pin_allowed('community', 'speaker', is_forum=True) is True
+    assert pin_allowed('community', 'newbie', is_forum=True) is False
+    assert pin_allowed('community', 'moderated', is_forum=True) is False
+    assert pin_allowed('newbie', 'newbie', is_forum=True) is True
+    assert pin_allowed('newbie', 'speaker', is_forum=True) is True
+    assert pin_allowed('newbie', 'moderated', is_forum=True) is False
+    assert pin_allowed('appeal', 'speaker', is_forum=True) is True
+    assert pin_allowed('appeal', 'moderated', is_forum=True) is True
+    assert pin_allowed('appeal', 'newbie', is_forum=True) is False
+    assert pin_allowed('bot', 'speaker', is_forum=True) is False  # bot mode: nobody posts
+    # @everyone never pins, even in a forum.
+    for mode in VALID_MODES:
+        assert pin_allowed(mode, 'everyone', is_forum=True) is False
+
+
+def _make_perm_channel(channel_type):
+    channel = MagicMock()
+    channel.type = channel_type
+    # Fresh overwrite per role — apply_perms_to_channel mutates the returned
+    # object in place, so a shared return_value would leak the last role's state.
+    channel.overwrites_for.side_effect = lambda role: discord.PermissionOverwrite()
+    channel.set_permissions = AsyncMock()
+    return channel
+
+
+def _overwrite_for_role(channel, role_id):
+    """Pull the overwrite passed to an *awaited* set_permissions call for a role id."""
+    for call in channel.set_permissions.await_args_list:
+        if call.args[0].id == role_id:
+            return call.kwargs['overwrite']
+    raise AssertionError(f"set_permissions never awaited for role id {role_id}")
+
+
+def test_apply_perms_grants_pin_only_on_forum_channels():
+    from src.common.speaker_perms import apply_perms_to_channel
+    roles = _make_tier_roles()
+
+    # Forum channel (community mode): only Speaker may pin.
+    forum = _make_perm_channel(discord.ChannelType.forum)
+    changed, api_calls = asyncio.run(apply_perms_to_channel(forum, roles, 'community'))
+    assert changed is True and api_calls == 4  # all four roles rewritten
+    assert _overwrite_for_role(forum, 2).pin_messages is True   # speaker
+    assert _overwrite_for_role(forum, 1).pin_messages is False  # newbie
+    assert _overwrite_for_role(forum, 3).pin_messages is False  # moderated
+    assert _overwrite_for_role(forum, 0).pin_messages is False  # @everyone
+
+    # Text channel: every managed role is denied pin.
+    text = _make_perm_channel(discord.ChannelType.text)
+    asyncio.run(apply_perms_to_channel(text, roles, 'community'))
+    for role_id in (0, 1, 2, 3):
+        assert _overwrite_for_role(text, role_id).pin_messages is False
+
+    # Media channel (also ForumChannel under the hood): denied too.
+    media = _make_perm_channel(discord.ChannelType.media)
+    asyncio.run(apply_perms_to_channel(media, roles, 'community'))
+    assert _overwrite_for_role(media, 2).pin_messages is False
+
+
+_ROLE_ID_TO_KEY = {0: 'everyone', 1: 'newbie', 2: 'speaker', 3: 'moderated'}
+
+
+def _seeded_overwrite(role_id, mode):
+    """An overwrite whose SEND_PERMS already match the mode table, but whose
+    pin_messages is None — simulating the rollout case where only the new pin
+    grant has drifted and send permissions are already correct."""
+    ow = discord.PermissionOverwrite()
+    for perm, value in _expected_values(mode, _ROLE_ID_TO_KEY[role_id]).items():
+        setattr(ow, perm, value)
+    return ow
+
+
+def test_apply_perms_fixes_pin_only_drift_and_is_idempotent():
+    """The rollout-critical case: send perms already correct, pin_messages=None."""
+    from src.common.speaker_perms import apply_perms_to_channel
+    roles = _make_tier_roles()
+    forum = MagicMock()
+    forum.type = discord.ChannelType.forum
+    stored = {}
+
+    def overwrites_for(role):
+        return stored.get(role.id) or _seeded_overwrite(role.id, 'community')
+
+    async def set_perms(role, overwrite, reason):
+        stored[role.id] = overwrite
+
+    forum.overwrites_for.side_effect = overwrites_for
+    forum.set_permissions = AsyncMock(side_effect=set_perms)
+
+    # First pass: pin_messages drifted (None), so all four roles get rewritten.
+    changed, api_calls = asyncio.run(apply_perms_to_channel(forum, roles, 'community'))
+    assert changed is True and api_calls == 4
+    assert stored[2].pin_messages is True   # speaker grant applied
+    assert stored[1].pin_messages is False  # newbie denied
+    assert stored[0].pin_messages is False  # @everyone denied
+
+    # Second pass: state now matches expected — no further API calls.
+    changed2, api_calls2 = asyncio.run(apply_perms_to_channel(forum, roles, 'community'))
+    assert changed2 is False and api_calls2 == 0
 
 
 # ═══════════════════════════════════════════════════════════════════

@@ -1,6 +1,6 @@
 # Core dependencies
 aiohttp>=3.8.0
-discord.py>=2.0.0
+discord.py~=2.7.1
 python-dotenv>=0.19.0
 python-dateutil>=2.8.0
 PyYAML>=6.0.0
