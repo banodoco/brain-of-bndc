@@ -598,7 +598,7 @@ class AdminCog(commands.Cog):
             return False  # no baseline yet — treat the first join as normal
         return current_uses > cached
 
-    @app_commands.command(name="direct_invite", description="Create a direct Speaker invite (Equity Holders only)")
+    @app_commands.command(name="direct_invite", description="Create a private invite to #live_updates that auto-grants Speaker (max 10 uses)")
     @app_commands.describe(
         max_uses="Max joins before the invite expires (1-10; defaults to 10)",
     )
