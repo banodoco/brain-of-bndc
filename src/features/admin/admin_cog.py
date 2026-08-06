@@ -253,110 +253,6 @@ async def post_mute_to_moderation(
 
 
 # --- Direct-invite channel picker (works from DMs too) ---
-class DirectInviteChannelPicker(discord.ui.View):
-    """Paginated channel dropdown for /direct_invite.
-
-    Discord caps a Select at 25 options, so long lists are paginated with
-    Prev/Next buttons. Presenting it in the command response lets the caller
-    choose a channel even from a private DM (where the slash-command channel
-    option can't reliably show guild channels).
-    """
-
-    PAGE_SIZE = 24
-
-    def __init__(self, cog, guild, caller_id: int, max_uses: Optional[int]):
-        super().__init__(timeout=120)
-        self.cog = cog
-        self.guild = guild
-        self.caller_id = caller_id
-        self.max_uses = max_uses
-        self.channels = [
-            c for c in guild.channels
-            if isinstance(c, (discord.TextChannel, discord.ForumChannel, discord.VoiceChannel))
-            and c.permissions_for(guild.me).create_instant_invite
-        ]
-        self.page = 0
-        self._render()
-
-    def _render(self):
-        self.clear_items()
-        page_channels = self.channels[self.page * self.PAGE_SIZE:(self.page + 1) * self.PAGE_SIZE]
-        options = [
-            discord.SelectOption(label=f"#{c.name}", value=str(c.id))
-            for c in page_channels
-        ]
-        if not options:
-            options = [discord.SelectOption(label="No channels available", value="-1")]
-        select = discord.ui.Select(
-            placeholder="Choose a channel for the invite",
-            min_values=1, max_values=1,
-            options=options[:25],
-        )
-
-        async def on_select(interaction):
-            if interaction.user.id != self.caller_id:
-                await interaction.response.send_message("Only the person who ran /direct_invite can choose.", ephemeral=True)
-                return
-            channel_id = int(select.values[0])
-            channel = self.guild.get_channel(channel_id)
-            if channel is None:
-                await interaction.response.send_message("Channel not found.", ephemeral=True)
-                return
-            await self._create_invite(interaction, channel)
-
-        select.callback = on_select
-        self.add_item(select)
-
-        if self.page > 0:
-            prev = discord.ui.Button(label="◀ Prev", style=discord.ButtonStyle.secondary)
-            async def go_prev(interaction):
-                if interaction.user.id != self.caller_id:
-                    return
-                self.page -= 1
-                self._render()
-                await interaction.response.edit_message(view=self)
-            prev.callback = go_prev
-            self.add_item(prev)
-        if (self.page + 1) * self.PAGE_SIZE < len(self.channels):
-            nxt = discord.ui.Button(label="Next ▶", style=discord.ButtonStyle.secondary)
-            async def go_next(interaction):
-                if interaction.user.id != self.caller_id:
-                    return
-                self.page += 1
-                self._render()
-                await interaction.response.edit_message(view=self)
-            nxt.callback = go_next
-            self.add_item(nxt)
-
-    async def _create_invite(self, interaction, channel):
-        try:
-            invite = await channel.create_invite(
-                max_uses=self.max_uses or 0,
-                max_age=0,
-                reason=f"Direct invite created by {interaction.user.name}",
-            )
-            stored = True
-            if self.cog.server_config:
-                stored = self.cog.server_config.set_server_field(self.guild.id, 'speaker_invite_code', invite.code)
-            self.cog._speaker_invite_uses[self.guild.id] = invite.uses or 0
-            logger.info(f"Direct invite created by {interaction.user.name}: {invite.url} (code={invite.code}, stored={stored})")
-            await interaction.response.edit_message(
-                content=(
-                    f"Direct Speaker invite created: {invite.url}\n"
-                    f"Joins via this invite auto-assign the **Speaker** role."
-                ),
-                view=None,
-            )
-        except discord.Forbidden:
-            await interaction.response.edit_message(content="I don't have permission to create invites there.", view=None)
-        except discord.HTTPException as e:
-            await interaction.response.edit_message(content=f"Failed to create invite: {e}", view=None)
-        except Exception as e:
-            logger.error(f"direct_invite channel pick failed: {e}", exc_info=True)
-            await interaction.response.edit_message(content=f"Something went wrong: {e}", view=None)
-
-
-# --- Admin Cog Class ---
 class AdminCog(commands.Cog):
     _commands_synced = False  # Add flag to track if commands have been synced
 
@@ -704,13 +600,11 @@ class AdminCog(commands.Cog):
 
     @app_commands.command(name="direct_invite", description="Create a direct Speaker invite (Equity Holders only)")
     @app_commands.describe(
-        channel="Dropdown of all channels — where the invite lands (default: #live_updates)",
-        max_uses="Optional max uses (omit for unlimited)",
+        max_uses="Max joins before the invite expires (1-10; defaults to 10)",
     )
     async def direct_invite(self, interaction: discord.Interaction,
-                            channel: Optional[discord.abc.GuildChannel] = None,
                             max_uses: Optional[int] = None):
-        """Create a direct invite that auto-assigns Speaker on join."""
+        """Create a direct Speaker invite in #live_updates (auto-assigns Speaker)."""
         # Defer FIRST — before any DB/role work — so a slow Supabase read can
         # never let the interaction time out ("application did not respond").
         await interaction.response.defer(ephemeral=True)
@@ -740,34 +634,29 @@ class AdminCog(commands.Cog):
                 await interaction.followup.send("Only Equity Holders can create direct invites.", ephemeral=True)
                 return
 
-            # If a channel was passed, create the invite there directly.
-            if channel is not None:
-                if isinstance(channel, discord.CategoryChannel):
-                    await interaction.followup.send("Categories can't host invites — pick a text, forum, or voice channel.", ephemeral=True)
-                    return
-                invite = await channel.create_invite(
-                    max_uses=max_uses or 0,   # 0 = unlimited
-                    max_age=0,                # 0 = never expires
-                    reason=f"Direct invite created by {interaction.user.name}",
-                )
-                stored = True
-                if self.server_config:
-                    stored = self.server_config.set_server_field(guild.id, 'speaker_invite_code', invite.code)
-                self._speaker_invite_uses[guild.id] = invite.uses or 0
-                logger.info(f"Direct invite created by {interaction.user.name}: {invite.url} (code={invite.code}, stored={stored})")
-                await interaction.followup.send(
-                    f"Direct Speaker invite created: {invite.url}\n"
-                    f"Joins via this invite auto-assign the **Speaker** role. "
-                    f"{'(Note: invite code not persisted — set SPEAKER_INVITE_CODE in env to keep it across restarts.)' if not stored else ''}",
-                    ephemeral=True,
-                )
+            # Invite lands in the default channel (#live_updates), uses capped at 10.
+            uses = max(1, min(max_uses or 10, 10))
+            target_channel = self._get_default_invite_channel(guild)
+            if target_channel is None or isinstance(target_channel, discord.CategoryChannel):
+                await interaction.followup.send("Could not resolve a valid invite channel.", ephemeral=True)
                 return
 
-            # No channel given — show the paginated channel picker (works in DMs).
-            picker = DirectInviteChannelPicker(self, guild, interaction.user.id, max_uses)
+            invite = await target_channel.create_invite(
+                max_uses=uses,   # capped at 10
+                max_age=0,       # 0 = never expires
+                reason=f"Direct invite created by {interaction.user.name}",
+            )
+
+            # Persist this invite as the active Speaker invite (runtime, no redeploy).
+            stored = True
+            if self.server_config:
+                stored = self.server_config.set_server_field(guild.id, 'speaker_invite_code', invite.code)
+            self._speaker_invite_uses[guild.id] = invite.uses or 0
+            logger.info(f"Direct invite created by {interaction.user.name}: {invite.url} (code={invite.code}, stored={stored})")
             await interaction.followup.send(
-                "Choose a channel for the direct Speaker invite:",
-                view=picker,
+                f"Direct Speaker invite created: {invite.url}\n"
+                f"Joins via this invite auto-assign the **Speaker** role. (Max {uses} uses.) "
+                f"{'(Note: invite code not persisted — set SPEAKER_INVITE_CODE in env to keep it across restarts.)' if not stored else ''}",
                 ephemeral=True,
             )
         except discord.Forbidden:
