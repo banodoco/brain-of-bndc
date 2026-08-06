@@ -565,7 +565,7 @@ def test_direct_invite_requires_equity_holders_role():
         followup=SimpleNamespace(send=AsyncMock()),
         channel=SimpleNamespace(create_invite=AsyncMock()),
     )
-    asyncio.run(cog.direct_invite.callback(cog, interaction))
+    asyncio.run(cog.direct_invite.callback(cog, interaction, interaction.channel))
     assert interaction.response.defer.called
     assert 'Equity Holders' in interaction.followup.send.call_args.args[0]
     assert not interaction.channel.create_invite.called
@@ -588,7 +588,7 @@ def test_direct_invite_creates_and_persists_invite():
         channel=channel,
     )
     cog.server_config = sc
-    asyncio.run(cog.direct_invite.callback(cog, interaction))
+    asyncio.run(cog.direct_invite.callback(cog, interaction, channel))
 
     assert channel.create_invite.called
     assert interaction.response.defer.called
@@ -613,7 +613,7 @@ def test_direct_invite_resolves_plain_user_to_member_for_role_check():
     )
     sc = SimpleNamespace(set_server_field=MagicMock(return_value=True))
     cog.server_config = sc
-    asyncio.run(cog.direct_invite.callback(cog, interaction))
+    asyncio.run(cog.direct_invite.callback(cog, interaction, interaction.channel))
     assert interaction.channel.create_invite.called  # passed the role check
 
 
@@ -635,9 +635,40 @@ def test_direct_invite_fetches_member_when_not_in_cache():
     )
     sc = SimpleNamespace(set_server_field=MagicMock(return_value=True))
     cog.server_config = sc
-    asyncio.run(cog.direct_invite.callback(cog, interaction))
+    asyncio.run(cog.direct_invite.callback(cog, interaction, interaction.channel))
     assert interaction.guild.fetch_member.called
     assert interaction.channel.create_invite.called  # passed via fetch_member
+
+
+def test_direct_invite_works_from_dm():
+    """DM invocation resolves the managed guild and creates the invite."""
+    cog = _make_cog()
+    cog._speaker_invite_uses = {}
+    cog._get_equity_holders_role_id = lambda gid: 999
+    cog._get_default_invite_channel = lambda guild: None  # fall to first postable text
+    cog._is_speaker_management_enabled = lambda gid: True
+    eq_member = SimpleNamespace(id=1, name='admin', roles=[SimpleNamespace(id=999)])
+    channel = SimpleNamespace(
+        create_invite=AsyncMock(return_value=SimpleNamespace(code='x', url='u', uses=0)),
+        permissions_for=lambda me: SimpleNamespace(create_instant_invite=True),
+    )
+    guild = SimpleNamespace(id=456, text_channels=[channel],
+                            get_member=lambda uid: eq_member,
+                            fetch_member=AsyncMock(return_value=eq_member))
+    cog.bot.guilds = [guild]  # DM: no interaction.guild, bot resolves the managed guild
+    interaction = SimpleNamespace(
+        user=SimpleNamespace(id=1, name='admin'),
+        guild_id=None,  # DM context
+        guild=None,
+        response=SimpleNamespace(defer=AsyncMock(), send_message=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+        channel=None,
+    )
+    sc = SimpleNamespace(set_server_field=MagicMock(return_value=True))
+    cog.server_config = sc
+    asyncio.run(cog.direct_invite.callback(cog, interaction, channel))
+    assert channel.create_invite.called  # invite created via the resolved guild
+    assert sc.set_server_field.called
 
 
 class _FakeGatingDB:
