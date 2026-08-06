@@ -2215,6 +2215,48 @@ class DatabaseHandler:
             logger.error(f"Error in update_message_content for message {message_id}: {e}", exc_info=True)
             return False
 
+    def soft_delete_user_messages(self, author_id: int, guild_id: int, dry_run: bool = True) -> Optional[int]:
+        """Set is_deleted=True on a user's discord_messages rows in a guild.
+
+        The public hivemind corpus (message_feed / unified_feed views) filters on
+        is_deleted=false, so flagging rows hides them from the public endpoint
+        without touching Discord or removing the rows. Returns the number of
+        messages flagged (or that would be flagged on a dry run), or None on error.
+        """
+        if not self.storage_handler or not self.storage_handler.supabase_client:
+            logger.error("Supabase client not initialized for soft_delete_user_messages")
+            return None
+        if not self._gate_check(guild_id):
+            return None
+        try:
+            client = self.storage_handler.supabase_client
+            count_resp = (
+                client.table('discord_messages')
+                .select('message_id', count='exact')
+                .eq('author_id', author_id)
+                .eq('guild_id', guild_id)
+                .eq('is_deleted', False)
+                .execute()
+            )
+            count = count_resp.count or 0
+            if dry_run or count == 0:
+                return count
+            (
+                client.table('discord_messages')
+                .update({
+                    'is_deleted': True,
+                    'synced_at': datetime.now(timezone.utc).isoformat(),
+                })
+                .eq('author_id', author_id)
+                .eq('guild_id', guild_id)
+                .eq('is_deleted', False)
+                .execute()
+            )
+            return count
+        except Exception as e:
+            logger.error(f"Error soft-deleting messages for user {author_id} in guild {guild_id}: {e}", exc_info=True)
+            return None
+
     # ========== Shared Posts Tracking ==========
     
     def record_shared_post(

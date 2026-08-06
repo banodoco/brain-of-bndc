@@ -560,7 +560,7 @@ def test_direct_invite_requires_equity_holders_role():
     cog._get_equity_holders_role_id = lambda gid: 999
     interaction = SimpleNamespace(
         user=SimpleNamespace(id=1, name='x', roles=[]),  # not equity holder
-        guild_id=456, guild=SimpleNamespace(id=456),
+        guild_id=456, guild=SimpleNamespace(id=456, get_member=lambda uid: None, fetch_member=AsyncMock(return_value=None)),
         response=SimpleNamespace(defer=AsyncMock(), send_message=AsyncMock()),
         followup=SimpleNamespace(send=AsyncMock()),
         channel=SimpleNamespace(create_invite=AsyncMock()),
@@ -582,7 +582,7 @@ def test_direct_invite_creates_and_persists_invite():
     sc = SimpleNamespace(set_server_field=MagicMock(return_value=True))
     interaction = SimpleNamespace(
         user=SimpleNamespace(id=1, name='admin', roles=[eq_role]),
-        guild_id=456, guild=SimpleNamespace(id=456),
+        guild_id=456, guild=SimpleNamespace(id=456, get_member=lambda uid: None, fetch_member=AsyncMock(return_value=None)),
         response=SimpleNamespace(defer=AsyncMock(), send_message=AsyncMock()),
         followup=SimpleNamespace(send=AsyncMock()),
         channel=channel,
@@ -595,6 +595,49 @@ def test_direct_invite_creates_and_persists_invite():
     assert sc.set_server_field.called
     assert cog._speaker_invite_uses[456] == 0
     assert 'https://discord.gg/abc123' in interaction.followup.send.call_args.args[0]
+
+
+def test_direct_invite_resolves_plain_user_to_member_for_role_check():
+    """interaction.user may be a plain User (no .roles) — resolve via guild.get_member."""
+    cog = _make_cog()
+    cog._speaker_invite_uses = {}
+    cog._get_equity_holders_role_id = lambda gid: 999
+    cog._get_default_invite_channel = lambda guild: None
+    eq_member = SimpleNamespace(id=1, name='admin', roles=[SimpleNamespace(id=999)])
+    interaction = SimpleNamespace(
+        user=SimpleNamespace(id=1, name='admin'),  # plain User, no roles attr
+        guild_id=456, guild=SimpleNamespace(id=456, get_member=lambda uid: eq_member),
+        response=SimpleNamespace(defer=AsyncMock(), send_message=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+        channel=SimpleNamespace(create_invite=AsyncMock(return_value=SimpleNamespace(code='x', url='u', uses=0))),
+    )
+    sc = SimpleNamespace(set_server_field=MagicMock(return_value=True))
+    cog.server_config = sc
+    asyncio.run(cog.direct_invite.callback(cog, interaction))
+    assert interaction.channel.create_invite.called  # passed the role check
+
+
+def test_direct_invite_fetches_member_when_not_in_cache():
+    """Member not cached -> fetch_member fallback resolves the role check."""
+    cog = _make_cog()
+    cog._speaker_invite_uses = {}
+    cog._get_equity_holders_role_id = lambda gid: 999
+    cog._get_default_invite_channel = lambda guild: None
+    eq_member = SimpleNamespace(id=1, name='admin', roles=[SimpleNamespace(id=999)])
+    interaction = SimpleNamespace(
+        user=SimpleNamespace(id=1, name='admin'),
+        guild_id=456,
+        guild=SimpleNamespace(id=456, get_member=lambda uid: None,
+                              fetch_member=AsyncMock(return_value=eq_member)),
+        response=SimpleNamespace(defer=AsyncMock(), send_message=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+        channel=SimpleNamespace(create_invite=AsyncMock(return_value=SimpleNamespace(code='x', url='u', uses=0))),
+    )
+    sc = SimpleNamespace(set_server_field=MagicMock(return_value=True))
+    cog.server_config = sc
+    asyncio.run(cog.direct_invite.callback(cog, interaction))
+    assert interaction.guild.fetch_member.called
+    assert interaction.channel.create_invite.called  # passed via fetch_member
 
 
 class _FakeGatingDB:

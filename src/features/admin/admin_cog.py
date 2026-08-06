@@ -587,6 +587,7 @@ class AdminCog(commands.Cog):
         return current_uses > cached
 
     @app_commands.command(name="direct_invite", description="Create a direct Speaker invite (Equity Holders only)")
+    @app_commands.guild_only()
     @app_commands.describe(
         channel="Dropdown of all channels — where the invite lands (default: #live_updates)",
         max_uses="Optional max uses (omit for unlimited)",
@@ -600,7 +601,21 @@ class AdminCog(commands.Cog):
         await interaction.response.defer(ephemeral=True)
         try:
             equity_holder_id = self._get_equity_holders_role_id(interaction.guild_id)
-            if equity_holder_id and equity_holder_id not in (r.id for r in interaction.user.roles):
+            # interaction.user can be a plain User (no .roles), and the member may
+            # not be in the bot's cache for a 22k-member guild — resolve via the
+            # cache first, then fetch_member (API) as a fallback so legit members
+            # are never denied for a cache miss.
+            user = interaction.user
+            if interaction.guild is not None:
+                member = interaction.guild.get_member(user.id)
+                if member is None:
+                    try:
+                        member = await interaction.guild.fetch_member(user.id)
+                    except discord.HTTPException:
+                        member = None
+                user = member or user
+            role_ids = {r.id for r in getattr(user, 'roles', ())}
+            if equity_holder_id and equity_holder_id not in role_ids:
                 await interaction.followup.send("Only Equity Holders can create direct invites.", ephemeral=True)
                 return
 
@@ -1617,6 +1632,67 @@ class AdminCog(commands.Cog):
         except Exception as e:
             logger.error(f"Error in delete_user_messages for user {user_id}: {e}", exc_info=True)
             await interaction.followup.send(f"Error: {str(e)}", ephemeral=True)
+
+    @app_commands.command(
+        name="remove-from-hivemind",
+        description="Remove your messages from the public hivemind knowledge corpus (does NOT delete anything from Discord).",
+    )
+    @app_commands.describe(
+        dry_run="Preview how many messages would be removed without actually removing them"
+    )
+    async def remove_from_hivemind(self, interaction: discord.Interaction, dry_run: bool = True):
+        """Soft-delete the caller's own messages from the public hivemind corpus.
+
+        Flips discord_messages.is_deleted=true for the caller's messages in this
+        guild, which hides them from the public message_feed/unified_feed views.
+        Discord messages are left untouched.
+        """
+        if not self.db_handler:
+            await interaction.response.send_message("Database connection is unavailable. Please try again later.", ephemeral=True)
+            return
+
+        if interaction.guild_id is None:
+            await interaction.response.send_message("Please run this command inside the server.", ephemeral=True)
+            return
+
+        user_id = interaction.user.id
+        guild_id = interaction.guild_id
+
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            count = await asyncio.to_thread(
+                self.db_handler.soft_delete_user_messages,
+                user_id,
+                guild_id,
+                dry_run,
+            )
+        except Exception as e:
+            logger.error(f"Error in remove_from_hivemind for user {user_id}: {e}", exc_info=True)
+            await interaction.followup.send(f"Something went wrong: {str(e)}", ephemeral=True)
+            return
+
+        if count is None:
+            await interaction.followup.send("Couldn't reach the database — please try again later.", ephemeral=True)
+            return
+
+        if dry_run:
+            desc = (
+                f"**{count}** of your messages would be removed from the public hivemind knowledge corpus.\n\n"
+                f"Re-run with `dry_run: False` to remove them.\n"
+                f"This does **not** delete anything from Discord."
+            )
+            color = discord.Color.orange()
+        else:
+            desc = (
+                f"Removed **{count}** of your messages from the public hivemind knowledge corpus.\n\n"
+                f"Your messages still exist in Discord. An admin can restore them if this was a mistake."
+            )
+            color = discord.Color.green()
+            logger.info(f"User {user_id} soft-deleted {count} messages from hivemind corpus (guild {guild_id})")
+
+        embed = discord.Embed(title="Remove from Hivemind", description=desc, color=color)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 async def setup(bot: commands.Bot):
     """Sets up the AdminCog."""
