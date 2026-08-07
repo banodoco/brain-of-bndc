@@ -4650,25 +4650,28 @@ class TopicEditor:
         embed.add_field(name="summary", value="\n".join(summary_lines)[:1024], inline=True)
 
         # --- field: model & cost ---
-        cost = updates.get("cost_usd")
+        # Report the real billed cost (cache-adjusted) rather than the
+        # conservative raw estimate; fall back to the raw number only when the
+        # adjusted figure couldn't be computed (see
+        # `_estimate_cache_adjusted_cost_usd`). `cost_usd` is already the
+        # cumulative figure, so a separate "cumulative cost" line is dropped as
+        # redundant.
+        cache_adjusted = metadata.get("estimated_cache_adjusted_cost_usd")
+        cost = cache_adjusted if isinstance(cache_adjusted, (int, float)) else updates.get("cost_usd")
         cost_str = f"${cost:.4f}" if isinstance(cost, (int, float)) else "n/a"
         model_lines = [
             f"model: `{updates.get('model') or 'n/a'}`",
             f"tokens in/out: `{updates.get('input_tokens', 0)}` / `{updates.get('output_tokens', 0)}`",
             f"cumulative tokens: `{metadata.get('cumulative_tokens', updates.get('input_tokens', 0) + updates.get('output_tokens', 0))}`",
             f"cost: `{cost_str}`",
-            f"cumulative cost: `{self._format_cost(metadata.get('cumulative_cost_usd'))}`",
             f"latency: `{updates.get('latency_ms', 0)} ms`",
         ]
         cache_hit_pct = updates.get("cache_hit_pct")
-        cache_adjusted = metadata.get("estimated_cache_adjusted_cost_usd")
         if isinstance(cache_hit_pct, (int, float)) and cache_hit_pct >= 0:
             model_lines.append(
                 f"cache hit: `{cache_hit_pct:.1f}%` "
                 f"(hit=`{updates.get('cache_hit_tokens', 0)}` miss=`{updates.get('cache_miss_tokens', 0)}`)"
             )
-        if isinstance(cache_adjusted, (int, float)):
-            model_lines.append(f"cost (cache-adjusted): `{self._format_cost(cache_adjusted)}`")
         embed.add_field(name="model & cost", value="\n".join(model_lines)[:1024], inline=True)
 
         # --- field: input context (time range + channel coverage) ---
