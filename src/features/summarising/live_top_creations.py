@@ -82,6 +82,10 @@ class LiveTopCreations:
             return {"status": "skipped", "reason": "no_top_gens_channel"}
         art_channel_id = self._resolve_art_channel_id(guild_id)
         checkpoint_key = self._checkpoint_key(guild_id, live_channel_id)
+        self.logger.info(
+            "[LiveTopCreations] %s: run start trigger=%s guild=%s live_channel=%s checkpoint_key=%s",
+            self.environment, trigger, guild_id, live_channel_id, checkpoint_key,
+        )
 
         checkpoint = await self._call_db(
             self.db.get_live_top_creation_checkpoint, checkpoint_key,

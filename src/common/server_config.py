@@ -26,9 +26,21 @@ def _int_or_none(val) -> Optional[int]:
 class ServerConfig:
     """Per-server configuration with DB-backed enablement and write gating."""
 
-    def __init__(self, supabase_client=None):
+    def __init__(self, supabase_client=None, configured_guild_id: Optional[int] = None):
         self._supabase = supabase_client
         self._bndc_guild_id = _int_or_none(os.getenv('GUILD_ID'))
+        # Deployment-bound guild (GUILD_ID, falling back to DEV_GUILD_ID). This is
+        # the canonical target for single-guild features; guild resolution prefers
+        # it over whatever row PostgREST happens to return first.
+        self._configured_guild_id = configured_guild_id
+        if self._configured_guild_id is None:
+            for env_name in ('GUILD_ID', 'DEV_GUILD_ID'):
+                parsed = _int_or_none(os.getenv(env_name))
+                if parsed is not None:
+                    self._configured_guild_id = parsed
+                    break
+        # Warn once when resolution must fall back to DB order due to ambiguity.
+        self._warned_ambiguous_guilds = False
 
         # Caches (populated by refresh())
         self._servers: Dict[int, dict] = {}          # guild_id -> server_config row
@@ -72,16 +84,43 @@ class ServerConfig:
         return self._servers.get(guild_id)
 
     def get_enabled_servers(self, require_write: bool = False) -> List[dict]:
-        """Return enabled servers, optionally limited to writable ones."""
+        """Return enabled servers, optionally limited to writable ones.
+
+        Sorted by ``guild_id`` so iteration order is deterministic across runs
+        and callers. PostgREST returns unordered rows without an ``ORDER BY``,
+        so a stable sort here is what keeps ``get_first_server_with_field`` /
+        ``get_default_guild_id`` selection repeatable.
+        """
         self._maybe_refresh()
-        return [
+        servers = [
             s for s in self._servers.values()
             if self.is_guild_enabled(s.get('guild_id'), require_write=require_write)
         ]
+        return sorted(servers, key=lambda s: int(s.get('guild_id') or 0))
+
+    def _validated_configured_guild_id(self, *, require_write: bool = False) -> Optional[int]:
+        """Return the deployment-bound guild (GUILD_ID/DEV_GUILD_ID) if it is
+        present in server_config and passes the enabled (+ write) gate, else None."""
+        if self._configured_guild_id is None:
+            return None
+        if self.is_guild_enabled(self._configured_guild_id, require_write=require_write):
+            return self._configured_guild_id
+        return None
 
     def get_first_server_with_field(self, field: str, require_write: bool = False) -> Optional[dict]:
-        """Return the first enabled server that has a non-null field value."""
-        for server in self.get_enabled_servers(require_write=require_write):
+        """Return the first enabled server that has a non-null field value.
+
+        The deployment-bound guild (GUILD_ID/DEV_GUILD_ID) is preferred when it
+        carries the field; otherwise selection is deterministic by ``guild_id``.
+        """
+        servers = self.get_enabled_servers(require_write=require_write)
+        configured = self._validated_configured_guild_id(require_write=require_write)
+
+        def sort_key(server: dict) -> tuple:
+            gid = int(server.get('guild_id') or 0)
+            return (0 if gid == configured else 1, gid)
+
+        for server in sorted(servers, key=sort_key):
             if server.get(field) is not None:
                 return server
         return None
@@ -89,18 +128,39 @@ class ServerConfig:
     def get_default_guild_id(self, *, require_write: bool = False, field: Optional[str] = None) -> Optional[int]:
         """Return a default guild id from DB config.
 
-        If field is provided, prefer the first enabled server with that field populated.
-        Otherwise return the first enabled server.
+        If ``field`` is provided, prefer the first enabled server with that field
+        populated (deterministic ``guild_id`` order). Otherwise prefer the
+        deployment-bound guild (GUILD_ID/DEV_GUILD_ID) when it passes the
+        enabled/write gate, falling back to the first enabled server.
         """
-        server = self.get_first_server_with_field(field, require_write=require_write) if field else None
-        if server is None:
-            enabled = self.get_enabled_servers(require_write=require_write)
-            server = enabled[0] if enabled else None
-        return int(server['guild_id']) if server else None
+        if field is not None:
+            server = self.get_first_server_with_field(field, require_write=require_write)
+            return int(server['guild_id']) if server else None
+
+        configured = self._validated_configured_guild_id(require_write=require_write)
+        if configured is not None:
+            return configured
+
+        enabled = self.get_enabled_servers(require_write=require_write)
+        if not enabled:
+            return None
+        if len(enabled) > 1 and not self._warned_ambiguous_guilds:
+            self._warned_ambiguous_guilds = True
+            logger.warning(
+                "ServerConfig: %d enabled%s guilds and deployment-bound guild "
+                "(configured=%s) is not valid; selecting guild_id=%s by lowest id — "
+                "bind GUILD_ID to the intended guild to make this explicit",
+                len(enabled),
+                " writable" if require_write else "",
+                self._configured_guild_id,
+                enabled[0].get('guild_id'),
+            )
+        return int(enabled[0]['guild_id'])
 
     def resolve_guild_id(self, explicit: Optional[int] = None, *,
                          require_write: bool = False) -> Optional[int]:
-        """Canonical guild_id resolution: explicit > DB default > BNDC env fallback."""
+        """Canonical guild_id resolution:
+        explicit > deployment-bound (GUILD_ID, validated) > DB default > BNDC env fallback."""
         if explicit:
             return int(explicit)
         return self.get_default_guild_id(require_write=require_write) or self._bndc_guild_id
