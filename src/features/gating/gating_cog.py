@@ -118,7 +118,8 @@ Use FEEDBACK for: an attempt at an intro that shows effort but is too vague to a
 generic interest statements without specifics, or a couple of buzzwords with no \
 substance. Write a warm 2-3 sentence reply. Welcome them, then ask for something \
 concrete: what tools they use, what they're building, a link to their work. Frame it as \
-"we'd love to know more" not "you failed."
+"we'd love to know more" not "you failed." Point them to {gate_channel} for how to \
+write a proper intro.
 
 DELETE
 (short, friendly note shown briefly before their message is removed)
@@ -126,7 +127,8 @@ DELETE
 Use DELETE for messages that are completely off-topic — not an intro and not a support \
 question: spam, ads, bare greetings ("hi", emoji), generic one-liners that say nothing \
 specific, chit-chat, or replies that just thank or acknowledge someone. The note is \
-shown briefly and then deleted; keep it short.
+shown briefly and then deleted; keep it short. Tell them they can see how to make a \
+proper intro in {gate_channel}.
 
 REDIRECT
 (short note pointing them to {support_channel}, shown briefly before their message is removed)
@@ -334,6 +336,8 @@ class GatingCog(commands.Cog):
             cfg = self._get_guild_config(message.guild.id)
             help_cid = (cfg or {}).get('help_channel_id') or DEFAULT_HELP_CHANNEL_ID
             support_mention = f"<#{help_cid}>"
+            gate_cid = (cfg or {}).get('gate_channel_id')
+            gate_mention = f"<#{gate_cid}>" if gate_cid else "the become-a-speaker channel"
 
             context_lines = [f"- {mid}: {content[:300]}" for mid, content in (history or [])]
             context = "\n".join(context_lines) or "(none)"
@@ -342,6 +346,7 @@ class GatingCog(commands.Cog):
                 "system_prompt": _INTRO_REVIEW_PROMPT.format(
                     bot_voice=BOT_VOICE,
                     support_channel=support_mention,
+                    gate_channel=gate_mention,
                 ),
                 "messages": [{
                     "role": "user",
