@@ -113,7 +113,10 @@ def _validate_grounding(actions, target_channel_id: int, *, logger) -> None:
     def _msg_in_target_channel(msg) -> bool:
         return str(msg.get("channel_id")) == target_str
 
-    # Target-channel find_messages with nonempty, target-channel results.
+    # Target-channel find_messages with nonempty, ALL-target-channel results.
+    # A result that mixes channels (or any non-dict message) is REJECTED, not
+    # filtered to the target subset — a mixed result cannot be trusted to ground
+    # a target-channel reply.
     find_results = []
     for a in read_actions:
         if a.get("tool") != "find_messages":
@@ -125,9 +128,16 @@ def _validate_grounding(actions, target_channel_id: int, *, logger) -> None:
         if res.get("success") is not True:
             continue
         msgs = res.get("messages") or []
-        target_msgs = [m for m in msgs if _msg_in_target_channel(m)]
-        if target_msgs:
-            find_results.append((a, target_msgs))
+        if not msgs:
+            continue
+        if not all(isinstance(m, dict) and _msg_in_target_channel(m) for m in msgs):
+            logger.error(
+                "find_messages on channel %s returned a mixed/wrong-channel or "
+                "malformed result (%d messages); refusing to post",
+                target_channel_id, len(msgs),
+            )
+            raise SystemExit(1)
+        find_results.append((a, msgs))
 
     if not find_results:
         logger.error(
@@ -158,9 +168,12 @@ def _validate_grounding(actions, target_channel_id: int, *, logger) -> None:
             continue
         inspected_id = str(a.get("input", {}).get("message_id", ""))
         res_msg = res.get("message") or {}
+        if not isinstance(res_msg, dict):
+            continue
         if (
             inspected_id in known_message_ids
             and str(res_msg.get("channel_id")) == target_str
+            and str(res_msg.get("message_id", "")) == inspected_id
         ):
             inspected_ok.append((a, inspected_id))
 
@@ -347,7 +360,9 @@ def _make_rest_send(channel_id: int, *, nonce_seed: str):
                             header_delay = resp.headers.get("Retry-After")
                             if header_delay:
                                 try:
-                                    retry_after = float(header_delay)
+                                    retry_after = max(
+                                        retry_after, float(header_delay)
+                                    )
                                 except (TypeError, ValueError):
                                     pass
                             logger.warning("Discord 429, waiting full %.1fs", retry_after)
@@ -414,6 +429,18 @@ async def _run(message_id: int, dry_run: bool, save_reply: str = "", post_artifa
             raise SystemExit(f"Artifact file not found: {post_artifact}")
         with open(post_artifact, "r", encoding="utf-8") as fh:
             artifact = json.load(fh)
+        # Strict shape validation: the artifact must be a dict with list-typed
+        # replies/actions and string replies — otherwise a malformed artifact
+        # (e.g. replies as a JSON string) could be iterated character-by-character
+        # and bypass the fallback/grounding gates.
+        if not isinstance(artifact, dict):
+            raise SystemExit("Artifact is not a JSON object; refusing to post")
+        raw_replies = artifact.get("replies")
+        raw_actions = artifact.get("actions")
+        if not isinstance(raw_replies, list) or not isinstance(raw_actions, list):
+            raise SystemExit("Artifact replies/actions must be JSON arrays; refusing to post")
+        if not all(isinstance(r, str) for r in raw_replies):
+            raise SystemExit("Artifact replies must all be strings; refusing to post")
         if str(artifact.get("message_id")) != str(message_id):
             raise SystemExit(
                 f"Artifact message_id {artifact.get('message_id')} != requested {message_id}"
@@ -422,14 +449,14 @@ async def _run(message_id: int, dry_run: bool, save_reply: str = "", post_artifa
             raise SystemExit(
                 f"Artifact channel_id {artifact.get('channel_id')} != stored row channel {channel_id}"
             )
-        replies = [r for r in artifact.get("replies", []) if r and r.strip()]
+        replies = [r for r in raw_replies if r and r.strip()]
         if not replies:
             raise SystemExit("Artifact contains no nonempty replies")
         failure_replies = [r for r in replies if _contains_fallback(r)]
         if failure_replies:
             raise SystemExit(f"Artifact contains a fallback/failure reply; refusing to post: {failure_replies!r}")
         try:
-            _validate_grounding(artifact.get("actions", []), channel_id, logger=logger)
+            _validate_grounding(raw_actions, channel_id, logger=logger)
         except SystemExit:
             logger.error("Artifact failed grounding revalidation; refusing to post")
             raise
