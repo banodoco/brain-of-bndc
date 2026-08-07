@@ -23,6 +23,7 @@ Usage:
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -75,6 +76,100 @@ from src.features.admin_chat.admin_chat_cog import _ADMIN_FALLBACK_REPLY_LINES a
 def _contains_fallback(reply: str) -> bool:
     """True if a reply is exactly a canonical fallback line or contains one."""
     return any(line in reply for line in _FALLBACK_REPLY_LINES)
+
+
+def _validate_grounding(actions, target_channel_id: int, *, logger) -> None:
+    """Fail-closed, target-specific grounding gate for a "deep DB check" replay.
+
+    To guarantee the reply is grounded in real evidence FROM THE TARGET CHANNEL
+    (not a trivial success and not evidence from an unrelated channel), require:
+      - >=1 find_messages on the target channel with nonempty returned messages
+        whose channel_id matches the target;
+      - >=1 successful inspect_message whose inspected message_id is one of the
+        messages returned by those target-channel searches, and whose result
+        reports the same target channel.
+    Forbid find_messages(live=true) and any reply-only turn. A single unrelated
+    exploratory failure (e.g. a wrong query_table column) is tolerated; zero real
+    target-channel evidence is not.
+    """
+    read_actions = [
+        a for a in (actions or [])
+        if a.get("tool") not in {"reply", "end_turn"}
+    ]
+    if not read_actions:
+        logger.error("Turn performed NO read actions; refusing to post a reply-only turn")
+        raise SystemExit(1)
+
+    live_uses = [
+        a for a in read_actions
+        if a.get("tool") == "find_messages" and a.get("input", {}).get("live")
+    ]
+    if live_uses:
+        logger.error("Turn used find_messages(live=true); refusing to post")
+        raise SystemExit(1)
+
+    target_str = str(target_channel_id)
+
+    def _msg_in_target_channel(msg) -> bool:
+        return str(msg.get("channel_id")) == target_str
+
+    # Target-channel find_messages with nonempty, target-channel results.
+    find_results = []
+    for a in read_actions:
+        if a.get("tool") != "find_messages":
+            continue
+        inp = a.get("input", {})
+        res = a.get("result", {})
+        if str(inp.get("channel_id", "")) != target_str:
+            continue
+        if res.get("success") is not True:
+            continue
+        msgs = res.get("messages") or []
+        target_msgs = [m for m in msgs if _msg_in_target_channel(m)]
+        if target_msgs:
+            find_results.append((a, target_msgs))
+
+    if not find_results:
+        logger.error(
+            "Turn had no find_messages on channel %s with nonempty target-channel "
+            "results; refusing to post (reply would be ungrounded). find_messages "
+            "calls=%d",
+            target_channel_id,
+            sum(1 for a in read_actions if a.get("tool") == "find_messages"),
+        )
+        raise SystemExit(1)
+
+    # The union of target-channel message ids the model could have inspected.
+    known_message_ids = {
+        str(m.get("message_id"))
+        for _, msgs in find_results
+        for m in msgs
+        if m.get("message_id")
+    }
+
+    # A successful inspect_message whose input id is a known target-channel
+    # message and whose result confirms the same channel.
+    inspected_ok = []
+    for a in read_actions:
+        if a.get("tool") != "inspect_message":
+            continue
+        res = a.get("result", {})
+        if res.get("success") is not True:
+            continue
+        inspected_id = str(a.get("input", {}).get("message_id", ""))
+        res_msg = res.get("message") or {}
+        if (
+            inspected_id in known_message_ids
+            and str(res_msg.get("channel_id")) == target_str
+        ):
+            inspected_ok.append((a, inspected_id))
+
+    if not inspected_ok:
+        logger.error(
+            "Turn had no successful inspect_message on a target-channel message; "
+            "refusing to post"
+        )
+        raise SystemExit(1)
 
 
 def _restricted_tools():
@@ -180,7 +275,7 @@ def _make_stub_bot(db_handler, bot_user_id: int) -> SimpleNamespace:
     return bot
 
 
-def _make_rest_send(channel_id: int, nonce_seed: str = ""):
+def _make_rest_send(channel_id: int, *, nonce_seed: str):
     """channel.send() that posts to Discord REST API with retries + safety.
 
     - Idempotent: each flattened reply chunk gets a stable nonce derived from the
@@ -293,14 +388,15 @@ async def _post_reply(send, message_id: int, reply: str) -> None:
                 logger.info("Posted reply chunk (len %d)", len(chunk))
 
 
-async def _run(message_id: int, dry_run: bool) -> None:
+async def _run(message_id: int, dry_run: bool, save_reply: str = "", post_artifact: str = "") -> None:
+    # Load the DB row and fail closed on identity BEFORE branching: the post
+    # path must also validate the configured-admin author and target channel.
     row = _load_message(message_id)
     channel_id = row["channel_id"]
     author_id = row["author_id"]
     guild_id = row.get("guild_id")
     content = row["content"] or ""
 
-    # Fail closed on identity: only the configured admin may be replayed.
     admin_ids = _configured_admin_ids()
     if author_id not in admin_ids:
         raise SystemExit(
@@ -308,6 +404,45 @@ async def _run(message_id: int, dry_run: bool) -> None:
             f"(ADMIN_USER_ID/ADMIN_CHAT_ALLOWED_USER_IDS = {sorted(admin_ids)}). "
             f"This script only replays admin chat turns."
         )
+
+    # Post mode: load a previously saved + approved artifact and post EXACTLY
+    # those replies without re-running the model. The artifact is re-validated
+    # (channel match, admin author, fallback lines, target-specific grounding)
+    # so a hand-edited file cannot bypass the fail-closed gates.
+    if post_artifact:
+        if not os.path.exists(post_artifact):
+            raise SystemExit(f"Artifact file not found: {post_artifact}")
+        with open(post_artifact, "r", encoding="utf-8") as fh:
+            artifact = json.load(fh)
+        if str(artifact.get("message_id")) != str(message_id):
+            raise SystemExit(
+                f"Artifact message_id {artifact.get('message_id')} != requested {message_id}"
+            )
+        if str(artifact.get("channel_id")) != str(channel_id):
+            raise SystemExit(
+                f"Artifact channel_id {artifact.get('channel_id')} != stored row channel {channel_id}"
+            )
+        replies = [r for r in artifact.get("replies", []) if r and r.strip()]
+        if not replies:
+            raise SystemExit("Artifact contains no nonempty replies")
+        failure_replies = [r for r in replies if _contains_fallback(r)]
+        if failure_replies:
+            raise SystemExit(f"Artifact contains a fallback/failure reply; refusing to post: {failure_replies!r}")
+        try:
+            _validate_grounding(artifact.get("actions", []), channel_id, logger=logger)
+        except SystemExit:
+            logger.error("Artifact failed grounding revalidation; refusing to post")
+            raise
+        if dry_run:
+            print("\n".join(f"[dry-run-from-artifact] {r}" for r in replies))
+            logger.info("Dry run (artifact): would post %d reply message(s) to channel %s",
+                        len(replies), channel_id)
+            return
+        send = _make_rest_send(channel_id, nonce_seed=str(message_id))
+        for reply in replies:
+            await _post_reply(send, message_id, reply)
+        logger.info("Posted %d reply message(s) from artifact to channel %s", len(replies), channel_id)
+        return
 
     bot_user_id = int(os.getenv("BOT_USER_ID", "0"))
     if not bot_user_id:
@@ -385,44 +520,29 @@ async def _run(message_id: int, dry_run: bool) -> None:
         )
         raise SystemExit(1)
 
-    # Fail-closed gate for a "deep DB check" replay: the turn must have performed
-    # at least one non-reply read and at least one read must have SUCCEEDED. A
-    # reply-only turn (no DB reads) or a turn whose reads all failed (e.g. "I
-    # couldn't retrieve the messages") is a failure, not a success — do not post
-    # it. A single exploratory call that hits a bad column (e.g. a wrong
-    # query_table filter) does NOT invalidate an otherwise-grounded reply as long
-    # as the other reads returned real data.
-    read_actions = [
-        a for a in (result.actions or [])
-        if a.get("tool") not in {"reply", "end_turn"}
-    ]
-    if not read_actions:
-        logger.error("Turn performed NO read actions; refusing to post a reply-only turn")
-        raise SystemExit(1)
-    successful_reads = [
-        a for a in read_actions
-        if a.get("result", {}).get("success") is True
-    ]
-    if not successful_reads:
-        logger.error(
-            "Turn performed %d read action(s) but none succeeded; refusing to post",
-            len(read_actions),
-        )
-        raise SystemExit(1)
-    live_uses = [
-        a for a in read_actions
-        if a.get("tool") == "find_messages" and a.get("input", {}).get("live")
-    ]
-    if live_uses:
-        logger.error("Turn used find_messages(live=true); refusing to post")
-        raise SystemExit(1)
+    # Fail-closed, target-specific grounding gate (shared with post-artifact).
+    _validate_grounding(result.actions, channel_id, logger=logger)
+
+    # Persist the approved artifact so a later live post uses EXACTLY this reply
+    # (the model is not re-run; dry-run and post cannot diverge).
+    artifact = {
+        "message_id": message_id,
+        "channel_id": channel_id,
+        "replies": replies,
+        "actions": result.actions or [],
+    }
+
+    if save_reply:
+        with open(save_reply, "w", encoding="utf-8") as fh:
+            json.dump(artifact, fh, ensure_ascii=False, indent=2)
+        logger.info("Saved approved reply artifact to %s", save_reply)
 
     if dry_run:
         print("\n".join(f"[dry-run] {r}" for r in replies))
         logger.info("Dry run: would post %d reply message(s) to channel %s", len(replies), channel_id)
         return
 
-    send = _make_rest_send(channel_id)
+    send = _make_rest_send(channel_id, nonce_seed=str(message_id))
     for reply in replies:
         await _post_reply(send, message_id, reply)
 
@@ -433,8 +553,19 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Retrigger a dropped admin-chat turn")
     parser.add_argument("message_id", type=int, help="Discord message_id to replay")
     parser.add_argument("--dry-run", action="store_true", help="Print the reply without posting")
+    parser.add_argument(
+        "--save-reply", metavar="PATH",
+        help="Also save the approved reply artifact (JSON) to PATH",
+    )
+    parser.add_argument(
+        "--post-artifact", metavar="PATH",
+        help="Post a previously saved artifact (JSON) without re-running the model",
+    )
     args = parser.parse_args()
-    asyncio.run(_run(args.message_id, args.dry_run))
+    if args.dry_run and args.post_artifact:
+        # Honor dry-run in artifact mode (preview the artifact instead of posting).
+        pass
+    asyncio.run(_run(args.message_id, args.dry_run, args.save_reply, args.post_artifact))
 
 
 if __name__ == "__main__":
