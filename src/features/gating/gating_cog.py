@@ -398,12 +398,12 @@ class GatingCog(commands.Cog):
 
             if action == 'KEEP':
                 if body:
-                    await message.reply(body, mention_author=True, delete_after=300)
+                    await message.reply(body, mention_author=True, delete_after=60)
                 logger.info(f"GatingCog: intro reviewer kept {message.author}: {body[:200] if body else '(no body)'}")
 
             elif action == 'FEEDBACK':
                 if body:
-                    await message.reply(body, mention_author=True, delete_after=300)
+                    await message.reply(body, mention_author=True, delete_after=60)
                 logger.info(f"GatingCog: intro reviewer sent feedback to {message.author}: {body[:200] if body else '(no body)'}")
 
             elif action == 'DELETE':
