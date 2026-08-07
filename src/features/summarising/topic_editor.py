@@ -5024,18 +5024,26 @@ class TopicEditor:
                             batch,
                             topic_id,
                         )
+                        # _send_file_url_batch returns one entry per unit, aligned by
+                        # index: all units delivered in the single batch message share
+                        # that one message id, units sent via per-URL fallback get their
+                        # own id, and undelivered units are None. Mark each outbox row
+                        # from that alignment — a 2+-file batch must not leave the 2nd
+                        # file "failed" just because one message carried the whole batch.
                         self._mark_outbox_units(
                             topic_id, guild_id, batch_orig_indices,
                             [
                                 {
-                                    "status": "sent" if i < len(batch_sent_ids) and batch_sent_ids[i] is not None else "failed",
-                                    "discord_message_id": batch_sent_ids[i] if i < len(batch_sent_ids) else None,
+                                    "status": "sent" if batch_sent_ids[i] is not None else "failed",
+                                    "discord_message_id": batch_sent_ids[i],
                                     "error": batch_error,
                                 }
                                 for i in range(len(batch))
                             ],
                         )
-                        sent_ids.extend(batch_sent_ids)
+                        for mid in batch_sent_ids:
+                            if mid is not None and mid not in sent_ids:
+                                sent_ids.append(mid)
                         publish_traces.extend(batch_traces)
                         if batch_error:
                             error = batch_error
@@ -5046,7 +5054,7 @@ class TopicEditor:
                                 batch_error,
                                 trace=batch_traces[-1] if batch_traces else None,
                             )
-                        if not batch_sent_ids:
+                        if not any(batch_sent_ids):
                             had_failure = True
                             self._record_publish_media_failure(
                                 publish_diagnostics,
@@ -5318,34 +5326,40 @@ class TopicEditor:
         channel: Any,
         units: Sequence[Dict[str, Any]],
         topic_id: str,
-    ) -> Tuple[List[int], Optional[str], List[Dict[str, str]]]:
+    ) -> Tuple[List[Optional[int]], Optional[str], List[Dict[str, str]]]:
         """Download Discord-hosted media URLs and upload them as Discord files.
 
         Consecutive media units belong to the same document block, so this
         batches them into one Discord message when possible. If the batch upload
         fails, each media item falls back to its original URL so publishing can
         continue.
+
+        Returns ``sent_ids`` aligned per unit (``len == len(units)``): the
+        message id that delivered unit ``i``, or None if it was not delivered.
+        A successful batch puts every unit in one message, so every entry then
+        shares that single message id — the caller's per-unit outbox marking
+        depends on this 1:1 alignment.
         """
         if not units:
             return [], None, []
 
         from src.common.external_media import sanitise_url_for_logs
 
-        sent_ids: List[int] = []
+        sent_ids: List[Optional[int]] = [None] * len(units)
         traces: List[Dict[str, str]] = []
         temp_paths: List[str] = []
-        handles: List[Any] = []
+        handles: List[Tuple[int, Any]] = []
         error: Optional[str] = None
 
         try:
-            for unit in units:
+            for idx, unit in enumerate(units):
                 source_url = unit.get("source_url") or unit.get("fallback_url") or ""
                 safe_url = sanitise_url_for_logs(source_url)
                 try:
                     file_path, filename = await self._download_publish_media_url(source_url, unit)
                     temp_paths.append(file_path)
                     handle = open(file_path, "rb")
-                    handles.append(handle)
+                    handles.append((idx, handle))
                     traces.append({
                         "url": safe_url,
                         "status": "downloaded",
@@ -5364,7 +5378,7 @@ class TopicEditor:
                         sent = await channel.send(source_url)
                         mid = getattr(sent, "id", None)
                         if mid is not None:
-                            sent_ids.append(int(mid))
+                            sent_ids[idx] = int(mid)
                     except Exception as fallback_exc:
                         error = str(fallback_exc)
                         traces.append({
@@ -5379,13 +5393,15 @@ class TopicEditor:
 
             files = [
                 discord.File(handle, filename=os.path.basename(getattr(handle, "name", "")) or None)
-                for handle in handles
+                for _, handle in handles
             ]
             try:
                 sent = await channel.send(files=files)
                 mid = getattr(sent, "id", None)
                 if mid is not None:
-                    sent_ids.append(int(mid))
+                    # One message carries the whole batch — every downloaded unit shares it.
+                    for idx, _ in handles:
+                        sent_ids[idx] = int(mid)
                 for trace in traces:
                     if trace.get("action") == "queued_file_upload":
                         trace["action"] = "files_sent"
@@ -5396,14 +5412,17 @@ class TopicEditor:
                     topic_id,
                     exc,
                 )
-                for unit in units:
+                for idx, unit in enumerate(units):
+                    if sent_ids[idx] is not None:
+                        # Already delivered via a per-unit fallback — don't double-post.
+                        continue
                     source_url = unit.get("source_url") or unit.get("fallback_url") or ""
                     safe_url = sanitise_url_for_logs(source_url)
                     try:
                         sent = await channel.send(source_url)
                         mid = getattr(sent, "id", None)
                         if mid is not None:
-                            sent_ids.append(int(mid))
+                            sent_ids[idx] = int(mid)
                     except Exception as fallback_exc:
                         error = str(fallback_exc)
                         traces.append({

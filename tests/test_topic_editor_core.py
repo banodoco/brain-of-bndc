@@ -1,4 +1,6 @@
 import asyncio
+import os
+import tempfile
 from datetime import date
 from types import SimpleNamespace
 
@@ -1947,3 +1949,76 @@ class TestOutboxUpsertPreservesSentRows:
         assert result == 1
         assert ("upsert", 1, "topic_id,unit_index") in calls
         assert not any(c[0] == "delete" for c in calls), "must not delete prior rows"
+
+
+class TestSendFileUrlBatchAlignment:
+    """Regression: a multi-file batch posts once and must mark every unit sent.
+
+    Previously ``_send_file_url_batch`` returned one message id for the whole
+    batch, so ``_publish_topic`` marked only the first unit "sent" and the rest
+    "failed" (the file was actually attached, but the outbox said otherwise).
+    The next run's publish-backlog retry then re-posted the "failed" files as
+    bare duplicate messages in #live_updates. Sent ids must now be aligned per
+    unit so every unit in the batch shares the single message id.
+    """
+
+    class _FakeChannel:
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, *args, **kwargs):
+            self.sent.append((args, kwargs))
+            return SimpleNamespace(id=9001)
+
+    def _make_editor(self, *, download=None):
+        editor = TopicEditor.__new__(TopicEditor)
+
+        async def _fake_download(source_url, unit):
+            fd, path = tempfile.mkstemp(suffix=".mp4")
+            os.close(fd)
+            with open(path, "wb") as fh:
+                fh.write(b"fake-media-bytes")
+            return path, "fake.mp4"
+
+        editor._download_publish_media_url = download or _fake_download
+        return editor
+
+    def test_two_file_batch_single_message_aligns_both_units_to_same_id(self):
+        editor = self._make_editor()
+        channel = self._FakeChannel()
+        units = [
+            {"send_kind": "file_url", "source_url": "https://cdn.example/1.mp4", "filename": "1.mp4"},
+            {"send_kind": "file_url", "source_url": "https://cdn.example/2.mp4", "filename": "2.mp4"},
+        ]
+        sent_ids, error, traces = asyncio.run(editor._send_file_url_batch(channel, units, "topic-1"))
+        assert error is None
+        # Both units delivered in the one batch message → aligned to the same id.
+        assert sent_ids == [9001, 9001]
+        assert len(channel.sent) == 1
+        assert len(channel.sent[0][1]["files"]) == 2
+        assert all(t.get("action") == "files_sent" for t in traces)
+
+    def test_empty_batch_returns_empty_sent_ids(self):
+        editor = self._make_editor()
+        sent_ids, error, traces = asyncio.run(
+            editor._send_file_url_batch(self._FakeChannel(), [], "topic-1")
+        )
+        assert sent_ids == []
+        assert error is None
+        assert traces == []
+
+    def test_download_failure_falls_back_per_unit_with_aligned_ids(self):
+        async def _fail_download(source_url, unit):
+            raise RuntimeError("download boom")
+
+        editor = self._make_editor(download=_fail_download)
+        channel = self._FakeChannel()
+        units = [
+            {"send_kind": "file_url", "source_url": "https://cdn.example/1.mp4", "filename": "1.mp4"},
+            {"send_kind": "file_url", "source_url": "https://cdn.example/2.mp4", "filename": "2.mp4"},
+        ]
+        sent_ids, error, traces = asyncio.run(editor._send_file_url_batch(channel, units, "topic-1"))
+        assert error == "download boom"
+        # Each unit fell back to a URL message of its own — still 1:1 aligned.
+        assert sent_ids == [9001, 9001]
+        assert len(channel.sent) == 2
