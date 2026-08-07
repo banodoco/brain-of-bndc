@@ -407,13 +407,13 @@ class GatingCog(commands.Cog):
                 logger.info(f"GatingCog: intro reviewer sent feedback to {message.author}: {body[:200] if body else '(no body)'}")
 
             elif action == 'DELETE':
-                await self._delete_off_topic(message, body, hint_seconds=15)
+                await self._delete_off_topic(message, body)
                 logger.info(f"GatingCog: intro reviewer deleted off-topic msg from {message.author}: {body[:200] if body else '(no body)'}")
 
             elif action == 'REDIRECT':
                 # Support question — delete it and leave a pointer to #support
-                # visible a little longer so they actually see the link.
-                await self._delete_off_topic(message, body, hint_seconds=60)
+                # visible long enough for them to actually see the link.
+                await self._delete_off_topic(message, body)
                 logger.info(f"GatingCog: intro reviewer redirected support query from {message.author}: {body[:200] if body else '(no body)'}")
 
             else:
@@ -421,7 +421,7 @@ class GatingCog(commands.Cog):
         except Exception as e:
             logger.error(f"GatingCog: failed to review intro from {message.author}: {e}", exc_info=True)
 
-    async def _delete_off_topic(self, message, body: str, hint_seconds: int = 15) -> None:
+    async def _delete_off_topic(self, message, body: str, hint_seconds: int = 60) -> None:
         """Delete a message and leave a short, expiring note for the author."""
         self._pending_messages.pop(message.id, None)
         member_id = message.author.id
