@@ -4,6 +4,7 @@ Pure-logic + mocked-Discord tests following the style of test_gating_intro_post.
 No live Discord or Supabase required.
 """
 import asyncio
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -249,6 +250,32 @@ def test_apply_perms_community_does_not_manage_view():
 # ═══════════════════════════════════════════════════════════════════
 # db_handler member status
 # ═══════════════════════════════════════════════════════════════════
+
+async def _hang():
+    await asyncio.sleep(100)
+
+
+def test_run_async_in_thread_hung_coro_times_out_in_async_context():
+    """A hung coroutine must raise TimeoutError, not deadlock the executor.
+
+    Regression for the live-update stall: relying on future.result(timeout=...)
+    alone deadlocks because the `with ThreadPoolExecutor()` exit blocks on
+    shutdown(wait=True) while the hung thread never finishes.
+    """
+    db = _make_db()
+    start = time.monotonic()
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(db._run_async_in_thread(_hang(), timeout=0.5))
+    assert time.monotonic() - start < 5, "hung coro blocked instead of timing out"
+
+
+def test_run_async_in_thread_hung_coro_times_out_in_sync_context():
+    db = _make_db()
+    start = time.monotonic()
+    with pytest.raises(asyncio.TimeoutError):
+        db._run_async_in_thread(_hang(), timeout=0.5)
+    assert time.monotonic() - start < 5, "hung coro blocked instead of timing out"
+
 
 def _make_db(rows=None):
     """DatabaseHandler with a mocked supabase chain that returns `rows` from execute()."""

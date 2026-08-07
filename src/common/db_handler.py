@@ -74,22 +74,35 @@ class DatabaseHandler:
             logger.error(f"Database initialization error: {e}")
             raise
 
-    def _run_async_in_thread(self, coro):
-        """Helper to run async operations from sync context."""
+    def _run_async_in_thread(self, coro, timeout: float = 30.0):
+        """Helper to run async operations from sync context.
+
+        The timeout is applied INSIDE the worker thread (via ``asyncio.wait_for``)
+        so a hung coroutine can never keep the executor's ``shutdown(wait=True)``
+        blocked forever. Relying only on ``future.result(timeout=...)`` deadlocks:
+        the ``TimeoutError`` is raised, but the ``with ThreadPoolExecutor()`` exit
+        then waits for the thread to finish — which never happens for a hung call.
+        """
         if not inspect.isawaitable(coro):
             return coro
         try:
-            # Check if we're already in an async context
             try:
                 asyncio.get_running_loop()
-                # We're in an async context - need to run in a separate thread
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    future = executor.submit(asyncio.run, coro)
-                    return future.result(timeout=30)
             except RuntimeError:
-                # Not in an async context, safe to use asyncio.run
-                return asyncio.run(coro)
+                # Not in an async context — run on a fresh loop, still time-bounded
+                # so a hung call can't block the calling thread forever.
+                return asyncio.run(asyncio.wait_for(coro, timeout=timeout))
+            # We're in an async context — run in a separate thread.
+            import concurrent.futures
+
+            async def _bounded() -> Any:
+                return await asyncio.wait_for(coro, timeout=timeout)
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(asyncio.run, _bounded())
+                # Slightly larger than the inner timeout so the inner timeout fires
+                # first; the outer is just a safety net.
+                return future.result(timeout=timeout + 5)
         except Exception as e:
             logger.error(f"Error running async operation: {e}", exc_info=True)
             raise
