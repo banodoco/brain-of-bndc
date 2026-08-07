@@ -9,6 +9,12 @@ may send:
   - community → Speaker only (all topical channels)
   - appeal    → Speaker + Moderated (moderation / appeal channel)
 
+View (read) access is managed only where the model says so — see
+`_VIEW_ROLE_ALLOWED`. The gate channel ('bot' mode) must be readable by Newbie
+and Speaker so they can see the pinned onboarding / welcome message; their
+`view_channel` is enforced to True while @everyone and Moderated are left to
+manual setup. All other modes do not manage view at all.
+
 Moderated is denied everywhere except `appeal`.
 
 IMPORTANT (Discord permission semantics): for a member holding multiple roles,
@@ -53,23 +59,39 @@ _MODE_ROLE_ALLOWED = {
     'appeal':    {'everyone': False, 'newbie': False, 'speaker': True,  'moderated': True},
 }
 
+# Per-channel posting mode -> view_channel value the bot enforces for each role.
+# `None` (or an absent role) means the bot leaves that role's view overwrite to
+# manual setup. The gate channel is 'bot' mode: only the bot posts there, but
+# Newbie and Speaker must be able to read the pinned onboarding / welcome
+# message, so their view is enforced to True. @everyone and Moderated are not
+# managed — the welcome message is public, so @everyone already sees it via the
+# default overwrite.
+_VIEW_ROLE_ALLOWED = {
+    'bot': {'newbie': True, 'speaker': True},
+}
+
 VALID_MODES = frozenset(_MODE_ROLE_ALLOWED.keys())
 ROLE_KEYS = ('everyone', 'newbie', 'speaker', 'moderated')
 
 
 def _expected_values(mode: str, role_key: str) -> dict:
-    """Return the expected SEND_PERMS values for a role in a channel mode.
+    """Return the expected permission values for a role in a channel mode.
 
     Args:
         mode: 'bot', 'newbie', 'community', or 'appeal'.
         role_key: 'everyone', 'newbie', 'speaker', or 'moderated'.
 
     Returns:
-        Dict mapping each SEND_PERMS attr to True/False.
+        Dict mapping each SEND_PERMS attr to True/False, plus `view_channel`
+        when the mode manages view for that role (see `_VIEW_ROLE_ALLOWED`).
     """
     allowed = _MODE_ROLE_ALLOWED.get(mode, _MODE_ROLE_ALLOWED['community'])
     can_send = allowed.get(role_key, False)
-    return {p: can_send for p in SEND_PERMS}
+    expected = {p: can_send for p in SEND_PERMS}
+    view = _VIEW_ROLE_ALLOWED.get(mode, {}).get(role_key)
+    if view is not None:
+        expected['view_channel'] = view
+    return expected
 
 
 def pin_allowed(mode: str, role_key: str, *, is_forum: bool) -> bool:

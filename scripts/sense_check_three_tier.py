@@ -195,6 +195,22 @@ async def on_ready():
             special_bad.append(f"channel {cid}: expected {expected}, got {actual}")
     check(not special_bad, "Special-channel modes correct (gate=bot, intro/grants/help=newbie, moderation=appeal)" + (f" — {special_bad}" if special_bad else ""))
 
+    # ── Check 9: gate channel readable by Newbie + Speaker ──
+    # The gate channel pins the onboarding / welcome message. Nobody may post
+    # there (bot mode), but Newbie and Speaker must be able to read it.
+    gate_cid = resolve_channel_id(db, TARGET_GUILD_ID, 'gate_channel_id', 'GATE_CHANNEL_ID')
+    view_bad = []
+    if gate_cid is not None:
+        gate_ch = next((c for c in channels if c.id == gate_cid), None)
+        if gate_ch is None:
+            view_bad.append("gate channel not found in guild")
+        else:
+            for role_key, role in (('newbie', newbie_role), ('speaker', speaker_role)):
+                ow = gate_ch.overwrites_for(role)
+                if ow.view_channel is not True:
+                    view_bad.append(f"#{gate_ch.name} {role_key}.view_channel expected True, got {ow.view_channel}")
+    check(not view_bad, "Gate channel readable by Newbie + Speaker (view_channel=True)" + (f" — {view_bad}" if view_bad else ""))
+
     # ── Check 5 & 6: moderated role state + DB status match ──
     # Bulk-fetch member statuses once (paged) — per-member queries hang at ~22k members.
     status_map = db.get_guild_member_statuses(TARGET_GUILD_ID)

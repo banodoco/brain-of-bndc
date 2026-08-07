@@ -37,9 +37,24 @@ def test_everyone_always_denied_in_every_mode():
         assert all(v is False for v in values.values())
 
 
-def test_bot_mode_nobody_posts():
+def test_bot_mode_nobody_posts_but_newbie_and_speaker_can_view():
+    # Gate channel ('bot' mode): nobody may send, but Newbie + Speaker must be
+    # able to read the pinned onboarding / welcome message.
     for role_key in ROLE_KEYS:
-        assert all(v is False for v in _expected_values('bot', role_key).values())
+        values = _expected_values('bot', role_key)
+        for send_perm in SEND_PERMS:
+            assert values[send_perm] is False
+    assert _expected_values('bot', 'newbie').get('view_channel') is True
+    assert _expected_values('bot', 'speaker').get('view_channel') is True
+    # @everyone and Moderated are left to manual view setup on the gate channel.
+    assert 'view_channel' not in _expected_values('bot', 'everyone')
+    assert 'view_channel' not in _expected_values('bot', 'moderated')
+
+
+def test_non_bot_modes_do_not_manage_view():
+    for mode in ('newbie', 'community', 'appeal'):
+        for role_key in ROLE_KEYS:
+            assert 'view_channel' not in _expected_values(mode, role_key)
 
 
 def test_newbie_mode_newbie_and_speaker_can_post():
@@ -68,7 +83,10 @@ def test_unknown_mode_falls_back_to_community():
 def test_expected_values_cover_all_send_perms():
     for mode in VALID_MODES:
         for role_key in ROLE_KEYS:
-            assert set(_expected_values(mode, role_key).keys()) == set(SEND_PERMS)
+            values = _expected_values(mode, role_key)
+            assert set(SEND_PERMS) <= set(values.keys())
+            # Only the managed view_channel may appear beyond SEND_PERMS.
+            assert set(values.keys()) - set(SEND_PERMS) <= {'view_channel'}
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -190,6 +208,33 @@ def test_apply_perms_fixes_pin_only_drift_and_is_idempotent():
     # Second pass: state now matches expected — no further API calls.
     changed2, api_calls2 = asyncio.run(apply_perms_to_channel(forum, roles, 'community'))
     assert changed2 is False and api_calls2 == 0
+
+
+def test_apply_perms_grants_view_to_newbie_and_speaker_on_bot_mode_gate():
+    from src.common.speaker_perms import apply_perms_to_channel
+    roles = _make_tier_roles()
+    gate = _make_perm_channel(discord.ChannelType.text)
+
+    changed, api_calls = asyncio.run(apply_perms_to_channel(gate, roles, 'bot'))
+    assert changed is True and api_calls == 4  # all four roles rewritten (send denied)
+
+    assert _overwrite_for_role(gate, 1).view_channel is True  # newbie
+    assert _overwrite_for_role(gate, 2).view_channel is True  # speaker
+    # @everyone and Moderated view are not managed on the gate channel.
+    assert _overwrite_for_role(gate, 0).view_channel is None
+    assert _overwrite_for_role(gate, 3).view_channel is None
+    # Nobody may post in bot mode.
+    for role_id in (0, 1, 2, 3):
+        assert _overwrite_for_role(gate, role_id).send_messages is False
+
+
+def test_apply_perms_community_does_not_manage_view():
+    from src.common.speaker_perms import apply_perms_to_channel
+    roles = _make_tier_roles()
+    text = _make_perm_channel(discord.ChannelType.text)
+    asyncio.run(apply_perms_to_channel(text, roles, 'community'))
+    for role_id in (0, 1, 2, 3):
+        assert _overwrite_for_role(text, role_id).view_channel is None
 
 
 # ═══════════════════════════════════════════════════════════════════

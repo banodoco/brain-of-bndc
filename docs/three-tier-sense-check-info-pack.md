@@ -31,6 +31,7 @@ with exactly one tier role per non-staff member, and @everyone denied send in
 - Moderation channel is postable by **Moderated + Speaker** (publicly readable by all).
 - **`can_message_bot` is revoked on moderation**, restored on unmute.
 - Newbie tier can post in: **#introductions, grants forum, help/support** (reads everywhere else).
+- **Gate channel (`bot` mode) is read-only but readable by Newbie + Speaker** — the pinned onboarding / welcome message must stay visible to them, so the bot enforces `view_channel=True` for those two roles there (see `_VIEW_ROLE_ALLOWED` in `speaker_perms.py`).
 
 ## 3. Permission model
 
