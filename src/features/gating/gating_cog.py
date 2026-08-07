@@ -108,8 +108,9 @@ KEEP
 
 Use KEEP for: a real introduction with substance — they say something specific about \
 who they are or what they do. Write a brief personal reply (1-2 sentences) referencing \
-something from their intro. If they shared no links or media, encourage them to share \
-their work without making it sound required.
+something from their intro. If they shared no links or media, gently encourage them to \
+share their work — it helps people understand their style, approach, or what they're \
+into. Do not promise feedback, reactions, or anything in return for sharing.
 
 FEEDBACK
 (reply to post in the channel)
