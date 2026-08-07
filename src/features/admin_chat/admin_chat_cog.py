@@ -1430,18 +1430,27 @@ class AdminChatCog(commands.Cog):
         source = "DM" if is_dm else f"#{getattr(message.channel, 'name', 'unknown')}"
         logger.info(f"[AdminChat] Received from admin in {source}: {content[:50]}...")
 
-        if not self._claim_admin_chat_message(message):
-            logger.info(f"[AdminChat] Skipping already-claimed message {message.id}")
+        # Abort is terminal on every replica: request the local abort (if the
+        # agent is busy in this process) and use the claim only to gate the
+        # acknowledgement. An idle replica must never claim an abort message and
+        # run it through agent.chat as a normal turn.
+        if self._is_abort(content):
+            if self._busy.get(user_id) and self.agent:
+                self.agent.request_abort(user_id)
+                logger.info(f"[AdminChat] Abort requested by user {user_id}")
+            if self._claim_admin_chat_message(message):
+                await message.add_reaction("\u23f9\ufe0f")
             return
 
         if self._busy.get(user_id):
-            if self._is_abort(content):
-                if self.agent:
-                    self.agent.request_abort(user_id)
-                    logger.info(f"[AdminChat] Abort requested by user {user_id}")
-                await message.add_reaction("\u23f9\ufe0f")
-                return
+            # Defer the claim: the message is queued and will be re-entered via
+            # on_message when the busy turn drains. If we claimed here, the replay
+            # would fail the claim check ("already-claimed") and drop the message.
             self._pending_messages[user_id] = message
+            return
+
+        if not self._claim_admin_chat_message(message):
+            logger.info(f"[AdminChat] Skipping already-claimed message {message.id}")
             return
 
         try:
@@ -1791,11 +1800,15 @@ class AdminChatCog(commands.Cog):
                 await message.channel.send("Sorry, something went wrong on my side. Try again in a moment.")
             except Exception:
                 logger.exception("[AdminChat] Failed to send neutral error message")
-
-        pending = self._pending_messages.pop(user_id, None)
-        if pending:
-            logger.info(f"[AdminChat] Processing queued message from {user_id}")
-            await self.on_message(pending)
+        finally:
+            # Drain the pending queue on every exit path — successful replies,
+            # silent tool-only turns (replies=None early return), and exceptions.
+            # Previously a tool-only turn returned before this drain, stranding
+            # any message queued while it ran.
+            pending = self._pending_messages.pop(user_id, None)
+            if pending:
+                logger.info(f"[AdminChat] Processing queued message from {user_id}")
+                await self.on_message(pending)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):

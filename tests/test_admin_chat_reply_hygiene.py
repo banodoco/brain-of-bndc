@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -1317,3 +1319,211 @@ class TestReverseLookupViaToThread:
         assert len(reverse_calls) == 1, (
             f"Expected 1 reverse-lookup call via db_handler, "
             f"got {len(reverse_calls)}")
+
+
+def _run_busy_then_second(
+    monkeypatch,
+    *,
+    chat_results,
+    second_content="<@777> second",
+):
+    """Simulate the prod incident: message 1 starts a busy turn; while it is
+    in-flight (blocked inside agent.chat), message 2 arrives and is queued.
+    Message 1's turn then completes and its finally-drain must replay message 2
+    through on_message so it is claimed and processed (not dropped).
+
+    Returns (cog, db, chat_calls, msg1, msg2, pending_after).
+    """
+    cog, db, calls = _build_cog(monkeypatch)
+    cog._allowed_admin_chat_user_ids.add(999)
+
+    chat_entered = asyncio.Event()
+    release = asyncio.Event()
+    chat_calls = []
+
+    async def _fake_chat(**kwargs):
+        chat_calls.append(kwargs)
+        if len(chat_calls) == 1:
+            chat_entered.set()
+            await release.wait()
+        result = chat_results[len(chat_calls) - 1]
+        return result
+
+    cog.agent.chat = AsyncMock(side_effect=_fake_chat)
+
+    msg1 = _make_mock_message(
+        content="<@777> first",
+        author_id=999,
+        message_id=1001,
+        mentions=[SimpleNamespace(id=777)],
+    )
+    msg2 = _make_mock_message(
+        content=second_content,
+        author_id=999,
+        message_id=1002,
+        mentions=[SimpleNamespace(id=777)],
+    )
+    return cog, db, chat_calls, msg1, msg2, chat_entered, release
+
+
+class TestBusyQueueReplayNotDropped:
+    """Regression (prod incident 2026-08-06 23:17 UTC): an admin message that
+    arrives while the agent is busy was claimed at receipt, queued as pending,
+    and then the drain replay hit the already-existing claim and silently
+    dropped it ('Skipping already-claimed message'). The claim must be deferred
+    until the message is actually processed, so the queued replay can claim it.
+    The drain must also run after tool-only turns and exceptions (finally), and
+    abort must be terminal on every replica (claim gates only the ack).
+    """
+
+    @pytest.mark.asyncio
+    async def test_busy_turn_drains_queued_message_via_finally(self, monkeypatch):
+        cog, db, chat_calls, msg1, msg2, chat_entered, release = _run_busy_then_second(
+            monkeypatch,
+            chat_results=[
+                AdminChatResult(replies=["first ok"], actions=[]),
+                AdminChatResult(replies=["second ok"], actions=[]),
+            ],
+        )
+
+        # Start msg1's turn; it blocks inside agent.chat (busy=True).
+        task = asyncio.create_task(cog._handle_admin_message(msg1))
+        await asyncio.wait_for(chat_entered.wait(), timeout=2)
+
+        # msg2 arrives while busy → queued, NOT claimed at receipt.
+        await cog._handle_admin_message(msg2)
+        assert cog._pending_messages.get(999) is msg2
+        claim_keys = [c.kwargs.get('event_key') for c in db.try_claim_bot_event.call_args_list]
+        assert "admin_chat_message:1002" not in claim_keys, (
+            f"msg2 must not be claimed at receipt; claims so far: {claim_keys}")
+
+        # Release msg1's turn → its finally-drain replays msg2 → processed.
+        release.set()
+        await asyncio.wait_for(task, timeout=2)
+
+        assert len(chat_calls) == 2, f"msg2 was dropped: {len(chat_calls)} chat calls"
+        assert 999 not in cog._pending_messages
+        # msg2 was claimed when actually processed.
+        claim_keys = [c.kwargs.get('event_key') for c in db.try_claim_bot_event.call_args_list]
+        assert "admin_chat_message:1002" in claim_keys
+        msg2.channel.send.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_tool_only_turn_still_drains_pending(self, monkeypatch):
+        """A tool-only turn (replies=None) early-returns after agent.chat; the
+        pending queue must still be drained via finally."""
+        cog, db, chat_calls, msg1, msg2, chat_entered, release = _run_busy_then_second(
+            monkeypatch,
+            chat_results=[
+                AdminChatResult(replies=None, actions=[{"tool": "query_table", "input": {}, "result": {"success": True}}]),
+                AdminChatResult(replies=["second ok"], actions=[]),
+            ],
+        )
+
+        task = asyncio.create_task(cog._handle_admin_message(msg1))
+        await asyncio.wait_for(chat_entered.wait(), timeout=2)
+
+        await cog._handle_admin_message(msg2)
+        assert cog._pending_messages.get(999) is msg2
+
+        release.set()
+        await asyncio.wait_for(task, timeout=2)
+
+        assert len(chat_calls) == 2, f"tool-only turn left msg2 stranded: {len(chat_calls)}"
+        assert 999 not in cog._pending_messages
+        claim_keys = [c.kwargs.get('event_key') for c in db.try_claim_bot_event.call_args_list]
+        assert "admin_chat_message:1002" in claim_keys
+        msg2.channel.send.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_abort_terminal_every_replica_claim_gates_ack(self, monkeypatch):
+        """'stop' while busy requests abort locally; an idle replica must NOT
+        claim it and run it through agent.chat as a normal turn. Only one
+        replica acknowledges."""
+        busy_cog, busy_db, _ = _build_cog(monkeypatch)
+        busy_cog._allowed_admin_chat_user_ids.add(999)
+        busy_cog._busy[999] = True
+
+        idle_cog, idle_db, _ = _build_cog(monkeypatch)
+        idle_cog._allowed_admin_chat_user_ids.add(999)
+
+        # Shared claim store across the two "replicas".
+        claimed = set()
+
+        def _shared_claim(**kwargs):
+            key = kwargs['event_key']
+            if key in claimed:
+                return False
+            claimed.add(key)
+            return True
+
+        busy_db.try_claim_bot_event.side_effect = _shared_claim
+        idle_db.try_claim_bot_event.side_effect = _shared_claim
+
+        msg = _make_mock_message(
+            content="<@777> stop",
+            author_id=999,
+            mentions=[SimpleNamespace(id=777)],
+        )
+
+        await busy_cog._handle_admin_message(msg)
+        await idle_cog._handle_admin_message(msg)
+
+        # Busy replica requested the local abort.
+        assert busy_cog.agent.request_abort.call_count == 1
+        # Idle replica must not run "stop" as a chat turn.
+        idle_cog.agent.chat.assert_not_called()
+        # Exactly one replica claimed/acked.
+        assert len(claimed) == 1
+
+    @pytest.mark.asyncio
+    async def test_busy_busy_replicas_only_one_claim_wins(self, monkeypatch):
+        """Two replicas both busy with the same message: both queue it without
+        claiming; when both drain, only one claim insert succeeds (unique
+        message_id), so exactly one processes and the other skips."""
+        claimed = set()
+
+        def _shared_claim(**kwargs):
+            key = kwargs['event_key']
+            if key in claimed:
+                return False
+            claimed.add(key)
+            return True
+
+        cogs = []
+        for _ in range(2):
+            cog, db, _ = _build_cog(monkeypatch)
+            cog._allowed_admin_chat_user_ids.add(999)
+            db.try_claim_bot_event.side_effect = _shared_claim
+            cog.agent.chat.return_value = AdminChatResult(replies=["ok"], actions=[])
+            cogs.append((cog, db))
+
+        msg = _make_mock_message(
+            content="<@777> hello",
+            author_id=999,
+            mentions=[SimpleNamespace(id=777)],
+        )
+
+        for cog, _ in cogs:
+            await cog._handle_admin_message(msg)
+
+        assert len(claimed) == 1
+        processed = [cog.agent.chat.call_count > 0 for cog, _ in cogs]
+        assert sum(processed) == 1
+
+    @pytest.mark.asyncio
+    async def test_not_busy_message_still_claimed_and_processed(self, monkeypatch):
+        cog, db, calls = _build_cog(monkeypatch)
+        cog._allowed_admin_chat_user_ids.add(999)
+        cog.agent.chat.return_value = AdminChatResult(replies=["ok"], actions=[])
+
+        msg = _make_mock_message(
+            content="<@777> hello",
+            author_id=999,
+            mentions=[SimpleNamespace(id=777)],
+        )
+
+        await cog._handle_admin_message(msg)
+
+        db.try_claim_bot_event.assert_called_once()
+        cog.agent.chat.assert_called_once()
