@@ -20,7 +20,51 @@ RECONCILE_HISTORY_LIMIT = 100
 RECONCILE_HISTORY_HOURS = 1
 STAMP_INLINE_RETRIES = 1
 
-# ── Prompt used by Haiku to review new introductions ──
+# ── Intro review routing ──
+# Primary + fallback LLM routes used to review new introductions, tried in
+# failover order. DeepSeek is primary: it's cheap and fast for this small
+# classification. The fallback covers transient DeepSeek outages.
+INTRO_REVIEW_PRIMARY_CLIENT = "deepseek"
+INTRO_REVIEW_PRIMARY_MODEL = "deepseek-v4-flash"
+INTRO_REVIEW_FALLBACK_CLIENT = "openai"
+INTRO_REVIEW_FALLBACK_MODEL = "gpt-4o-mini"
+
+
+def _intro_review_routes() -> list[tuple[str, str]]:
+    """Return the configured intro-review routes in failover order.
+
+    Env vars INTRO_REVIEW_PRIMARY_CLIENT/MODEL and
+    INTRO_REVIEW_FALLBACK_CLIENT/MODEL override the defaults. Duplicate routes
+    are dropped so a misconfigured env doesn't retry the same client twice.
+    """
+    configured = (
+        (
+            os.getenv("INTRO_REVIEW_PRIMARY_CLIENT"),
+            os.getenv("INTRO_REVIEW_PRIMARY_MODEL"),
+            INTRO_REVIEW_PRIMARY_CLIENT,
+            INTRO_REVIEW_PRIMARY_MODEL,
+        ),
+        (
+            os.getenv("INTRO_REVIEW_FALLBACK_CLIENT"),
+            os.getenv("INTRO_REVIEW_FALLBACK_MODEL"),
+            INTRO_REVIEW_FALLBACK_CLIENT,
+            INTRO_REVIEW_FALLBACK_MODEL,
+        ),
+    )
+    routes: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for raw_client, raw_model, default_client, default_model in configured:
+        client = (raw_client or "").strip() or default_client
+        model = (raw_model or "").strip() or default_model
+        route_key = (client.casefold(), model.casefold())
+        if route_key in seen:
+            continue
+        seen.add(route_key)
+        routes.append((client, model))
+    return routes
+
+
+# ── Prompt used by the LLM reviewer for new introductions ──
 
 _INTRO_REVIEW_PROMPT = """\
 You are a friendly greeter bot for Banodoco, an open-source AI art community on Discord. \
@@ -87,7 +131,7 @@ class GatingCog(commands.Cog):
 
     Flow:
       1. on_member_join     → temp welcome ping in gate channel (auto-deleted after 5 min)
-      2. on_message          → track intro, Haiku reviews first message (DELETE / FEEDBACK / KEEP)
+      2. on_message          → track intro, LLM reviews first message (DELETE / FEEDBACK / KEEP)
       3. on_raw_reaction_add → approver reacts on any tracked message → _approve_member
       4. _approve_member     → grant Speaker role, ✅ reaction, DM the member
 
@@ -208,7 +252,7 @@ class GatingCog(commands.Cog):
             logger.error(f"GatingCog: failed to send gate welcome for {member.id}: {e}", exc_info=True)
 
     # ═══════════════════════════════════════════════════════════════
-    #  2. Member posts intro → track + Haiku review (first msg only)
+    #  2. Member posts intro → track + LLM review (first msg only)
     # ═══════════════════════════════════════════════════════════════
 
     @commands.Cog.listener()
@@ -246,21 +290,19 @@ class GatingCog(commands.Cog):
             logger.info(f"GatingCog: tracked intro from {message.author} (msg {message.id})")
         self._pending_messages[message.id] = message.author.id
 
-        # Haiku review on first message only
+        # LLM review on first message only
         if not existing:
             asyncio.create_task(self._review_intro(message))
 
     async def _review_intro(self, message: discord.Message):
-        """Ask Haiku to review an intro: DELETE / FEEDBACK / KEEP."""
+        """Ask the configured LLM routes to review an intro: DELETE / FEEDBACK / KEEP."""
         try:
             has_url = bool(re.search(r'https?://\S+', message.content))
             has_media = bool(message.attachments)
 
-            response = await get_llm_response(
-                client_name="claude",
-                model="claude-opus-4-6",
-                system_prompt=_INTRO_REVIEW_PROMPT.format(bot_voice=BOT_VOICE),
-                messages=[{
+            request = {
+                "system_prompt": _INTRO_REVIEW_PROMPT.format(bot_voice=BOT_VOICE),
+                "messages": [{
                     "role": "user",
                     "content": (
                         f"Introduction from {message.author.display_name}:\n\n"
@@ -269,22 +311,46 @@ class GatingCog(commands.Cog):
                         f"Has media attachments: {has_media}"
                     ),
                 }],
-                max_tokens=300,
-            )
+                "max_tokens": 300,
+            }
+            last_error: Exception | None = None
+            for client_name, model in _intro_review_routes():
+                try:
+                    route_request = dict(request)
+                    if client_name.casefold() == "deepseek":
+                        # Small classification task — DeepSeek reasoning can
+                        # consume the whole 300-token budget and return no text.
+                        route_request["thinking_enabled"] = False
+                    response = await get_llm_response(
+                        client_name=client_name,
+                        model=model,
+                        **route_request,
+                    )
+                    if not response.strip():
+                        raise RuntimeError("empty intro review response")
+                    break
+                except Exception as e:
+                    last_error = e
+                    logger.warning(
+                        "GatingCog: intro review route %s/%s failed for %s: %s",
+                        client_name, model, message.author, e,
+                    )
+            else:
+                raise RuntimeError("all intro review routes failed") from last_error
 
             response = response.strip()
             action = response.split('\n')[0].strip().upper()
             body = '\n'.join(response.split('\n')[1:]).strip()
 
-            # Guard: member may have been approved while Haiku was thinking
+            # Guard: member may have been approved while the reviewer was working
             if message.id not in self._pending_messages:
-                logger.info(f"GatingCog: skipping Haiku action for {message.author} (already resolved)")
+                logger.info(f"GatingCog: skipping intro review action for {message.author} (already resolved)")
                 return
 
             if action == 'KEEP':
                 if body:
                     await message.reply(body, mention_author=True, delete_after=300)
-                logger.info(f"GatingCog: Haiku welcomed {message.author}: {body[:200] if body else '(no body)'}")
+                logger.info(f"GatingCog: intro reviewer welcomed {message.author}: {body[:200] if body else '(no body)'}")
 
             elif action == 'DELETE':
                 self._pending_messages.pop(message.id, None)
@@ -301,15 +367,15 @@ class GatingCog(commands.Cog):
                         await hint.delete()
                 except Exception as e:
                     logger.error(f"GatingCog: failed to delete intro from {message.author}: {e}")
-                logger.info(f"GatingCog: Haiku deleted intro from {message.author}: {body[:200] if body else '(no body)'}")
+                logger.info(f"GatingCog: intro reviewer deleted intro from {message.author}: {body[:200] if body else '(no body)'}")
 
             elif action == 'FEEDBACK':
                 if body:
                     await message.reply(body, mention_author=True, delete_after=300)
-                logger.info(f"GatingCog: Haiku sent feedback to {message.author}: {body[:200] if body else '(no body)'}")
+                logger.info(f"GatingCog: intro reviewer sent feedback to {message.author}: {body[:200] if body else '(no body)'}")
 
             else:
-                logger.warning(f"GatingCog: unexpected Haiku response for {message.author}: {response[:100]}")
+                logger.warning(f"GatingCog: unexpected intro review response for {message.author}: {response[:100]}")
         except Exception as e:
             logger.error(f"GatingCog: failed to review intro from {message.author}: {e}", exc_info=True)
 
