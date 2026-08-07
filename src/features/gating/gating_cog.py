@@ -272,8 +272,11 @@ class GatingCog(commands.Cog):
                 if hist_msg.author.id == self.bot.user.id:
                     reference = hist_msg
                     break
+            help_cid = (cfg or {}).get('help_channel_id') or DEFAULT_HELP_CHANNEL_ID
+            support_mention = f"<#{help_cid}>"
             msg = await channel.send(
-                f"Hi {member.mention}, welcome! If you'd like to speak, see the message above \U0001f446",
+                f"Hi {member.mention}, welcome! If you'd like to speak everywhere, "
+                f"see above \U0001f446 — you can also get help in {support_mention} immediately.",
                 reference=reference,
             )
             self._temp_welcomes[msg.id] = (channel.id, msg.created_at)
