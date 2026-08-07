@@ -7,6 +7,7 @@ discoverable in CI output and easy to flesh out incrementally.
 
 import asyncio
 import logging
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -706,3 +707,157 @@ def test_recovery_skips_bot_message(fresh_event_loop):
 
 # Suppress unused-import warning for shared scaffolding.
 _ = AsyncMock
+
+
+# =============================================================================
+# Approval welcome — temporary tagged post in the getting-started channel
+#
+# Ported from the codex/fix-intro-auto-moderation branch (cf3bcfb). A newly
+# approved Speaker gets "{mention}, you're now a speaker! …" posted beside the
+# persistent Getting Started content, tracked in _temp_welcomes and auto-deleted
+# after 5 minutes (native delete_after + the cleanup loop).
+# =============================================================================
+
+
+class _FakeWelcomeChannel:
+    def __init__(self, history_messages=()):
+        self.id = 20
+        self._history_messages = list(history_messages)
+        self.send = AsyncMock()
+        self.fetch_message = AsyncMock()
+
+    async def history(self, *, limit, oldest_first=False):
+        assert limit in (50, 100)
+        for message in self._history_messages:
+            yield message
+
+
+def _make_approval_cog(channel):
+    from src.features.gating.gating_cog import GatingCog
+
+    bot = SimpleNamespace(
+        db_handler=None,
+        user=SimpleNamespace(id=42),
+        guilds=[],
+        get_channel=MagicMock(return_value=channel),
+        fetch_channel=AsyncMock(return_value=channel),
+    )
+    cog = GatingCog(bot)
+    cog.db = MagicMock()
+    return cog
+
+
+def test_approval_welcome_tags_member_references_content_and_tracks_ttl(fresh_event_loop):
+    non_bot_message = SimpleNamespace(author=SimpleNamespace(id=7))
+    persistent_welcome = SimpleNamespace(author=SimpleNamespace(id=42))
+    channel = _FakeWelcomeChannel([non_bot_message, persistent_welcome])
+    sent_at = datetime.now(timezone.utc)
+    sent = SimpleNamespace(id=9001, created_at=sent_at)
+    channel.send.return_value = sent
+    cog = _make_approval_cog(channel)
+    guild = SimpleNamespace(get_channel=MagicMock(return_value=channel))
+    member = SimpleNamespace(id=77, mention='<@77>')
+
+    fresh_event_loop.run_until_complete(
+        cog._send_speaker_welcome(guild, member, {'welcome_channel_id': 20})
+    )
+
+    channel.send.assert_awaited_once()
+    call = channel.send.await_args
+    assert call.args == (
+        "<@77>, you're now a speaker! Check out the welcome message above.",
+    )
+    assert call.kwargs['reference'] is persistent_welcome
+    assert call.kwargs['delete_after'] == 300.0
+    allowed_mentions = call.kwargs['allowed_mentions']
+    assert allowed_mentions.everyone is False
+    assert allowed_mentions.users is True
+    assert allowed_mentions.roles is False
+    assert allowed_mentions.replied_user is False
+    assert cog._temp_welcomes == {9001: (20, sent_at)}
+
+
+def test_approval_welcome_is_deleted_after_five_minutes(fresh_event_loop):
+    channel = _FakeWelcomeChannel()
+    message = SimpleNamespace(delete=AsyncMock())
+    channel.fetch_message.return_value = message
+    cog = _make_approval_cog(channel)
+    cog._startup_scan_done = True
+    cog._temp_welcomes[9001] = (
+        channel.id,
+        datetime.now(timezone.utc) - timedelta(minutes=6),
+    )
+
+    fresh_event_loop.run_until_complete(cog.cleanup_temp_welcomes())
+
+    channel.fetch_message.assert_awaited_once_with(9001)
+    message.delete.assert_awaited_once_with()
+    assert cog._temp_welcomes == {}
+
+
+def test_startup_cleanup_removes_orphaned_approval_welcome(fresh_event_loop):
+    orphan = SimpleNamespace(
+        author=SimpleNamespace(id=42),
+        content="<@77>, you're now a speaker! Check out the welcome message above.",
+        created_at=datetime.now(timezone.utc) - timedelta(minutes=6),
+        delete=AsyncMock(),
+    )
+    channel = _FakeWelcomeChannel([orphan])
+    guild = SimpleNamespace(id=1, name='BNDC')
+    cog = _make_approval_cog(channel)
+    cog.bot.guilds = [guild]
+    cog._startup_scan_done = False
+    cog._get_guild_config = MagicMock(return_value={
+        'gate_channel_id': None,
+        'welcome_channel_id': channel.id,
+    })
+
+    fresh_event_loop.run_until_complete(cog.cleanup_temp_welcomes())
+
+    orphan.delete.assert_awaited_once_with()
+    assert cog._startup_scan_done is True
+
+
+def test_public_welcome_failure_does_not_block_approval_dm(fresh_event_loop):
+    channel = _FakeWelcomeChannel()
+    channel.send.side_effect = RuntimeError('discord unavailable')
+    cog = _make_approval_cog(channel)
+
+    speaker_role = SimpleNamespace(id=10)
+    member = SimpleNamespace(
+        id=77,
+        mention='<@77>',
+        display_name='New Member',
+        roles=[],
+        add_roles=AsyncMock(),
+        send=AsyncMock(),
+    )
+    guild = SimpleNamespace(
+        id=1,
+        name='BNDC',
+        get_member=MagicMock(return_value=member),
+        get_role=MagicMock(return_value=speaker_role),
+        get_channel=MagicMock(return_value=channel),
+    )
+    intro = {
+        'member_id': 77,
+        'message_id': 123,
+        'guild_id': 1,
+        'channel_id': 2,
+    }
+
+    fresh_event_loop.run_until_complete(
+        cog._approve_member(
+            guild,
+            intro,
+            {'speaker_role_id': 10, 'welcome_channel_id': 20},
+        )
+    )
+
+    member.add_roles.assert_awaited_once_with(
+        speaker_role, reason='Intro approved by community'
+    )
+    cog.db.approve_pending_intro.assert_called_once_with(123, guild_id=1)
+    member.send.assert_awaited_once_with(
+        "Hey New Member! You've been approved to speak in **BNDC**. Welcome aboard 🎉"
+    )

@@ -150,7 +150,7 @@ class GatingCog(commands.Cog):
       1. on_member_join     → temp welcome ping in gate channel (auto-deleted after 5 min)
       2. on_message          → track intro, LLM reviews every message with member context (KEEP / FEEDBACK / DELETE / REDIRECT)
       3. on_raw_reaction_add → approver reacts on any tracked message → _approve_member
-      4. _approve_member     → grant Speaker role, ✅ reaction, DM the member
+      4. _approve_member     → grant Speaker role, ✅ reaction, welcome post + DM
 
     Cleanup:
       - on_raw_message_delete  → remove from tracking, expire DB if no messages left
@@ -621,6 +621,8 @@ class GatingCog(commands.Cog):
                 except Exception as e:
                     logger.error(f"GatingCog: failed to add checkmark to {reacted_message_id}: {e}")
 
+            await self._send_speaker_welcome(guild, member, cfg)
+
             try:
                 dm_body = (
                     f"Hey {member.display_name}! You've been approved to speak in **{guild.name}**. "
@@ -647,6 +649,64 @@ class GatingCog(commands.Cog):
                 logger.error(f"GatingCog: failed to DM {member}: {e}")
         except Exception as e:
             logger.error(f"GatingCog: failed to approve {member}: {e}", exc_info=True)
+
+    # ═══════════════════════════════════════════════════════════════
+    #  Approved member welcome → 5-minute tagged post
+    # ═══════════════════════════════════════════════════════════════
+
+    async def _send_speaker_welcome(self, guild: discord.Guild, member: discord.Member,
+                                    cfg: dict):
+        """Tag an approved member beside the persistent Getting Started content."""
+        welcome_channel_id = cfg.get('welcome_channel_id')
+        if not welcome_channel_id:
+            return
+
+        channel = guild.get_channel(welcome_channel_id)
+        if not channel:
+            try:
+                channel = await self.bot.fetch_channel(welcome_channel_id)
+            except Exception as e:
+                logger.error(
+                    f"GatingCog: failed to find welcome channel {welcome_channel_id} "
+                    f"for approved member {member.id}: {e}"
+                )
+                return
+
+        reference = None
+        try:
+            async for history_message in channel.history(limit=50, oldest_first=True):
+                if history_message.author.id == self.bot.user.id:
+                    reference = history_message
+                    break
+        except Exception as e:
+            logger.warning(
+                f"GatingCog: couldn't find persistent welcome message in "
+                f"channel {welcome_channel_id}: {e}"
+            )
+
+        try:
+            sent = await channel.send(
+                f"{member.mention}, you're now a speaker! "
+                "Check out the welcome message above.",
+                reference=reference,
+                delete_after=self.TEMP_WELCOME_TTL.total_seconds(),
+                allowed_mentions=discord.AllowedMentions(
+                    everyone=False,
+                    users=True,
+                    roles=False,
+                    replied_user=False,
+                ),
+            )
+            self._temp_welcomes[sent.id] = (channel.id, sent.created_at)
+            logger.info(
+                f"GatingCog: sent temporary speaker welcome {sent.id} for {member} "
+                f"in channel {welcome_channel_id}"
+            )
+        except Exception as e:
+            logger.error(
+                f"GatingCog: failed to send speaker welcome for {member.id} "
+                f"in channel {welcome_channel_id}: {e}"
+            )
 
     # ═══════════════════════════════════════════════════════════════
     #  Message deletion → cleanup tracking
@@ -1064,6 +1124,10 @@ class GatingCog(commands.Cog):
             if deleted:
                 logger.info(f"GatingCog: cleaned up {deleted} stale intro(s) in {guild.name}")
 
+    _TEMP_WELCOME_PATTERNS = (
+        "welcome! If you'd like to speak",
+        "you're now a speaker! Check out the welcome message above.",
+    )
     TEMP_WELCOME_TTL = timedelta(minutes=5)
 
     @tasks.loop(minutes=1)
@@ -1092,25 +1156,36 @@ class GatingCog(commands.Cog):
             self._startup_scan_done = True
             for guild in self.bot.guilds:
                 cfg = self._get_guild_config(guild.id)
-                cid = cfg.get('gate_channel_id')
-                if not cid:
-                    continue
-                channel = self.bot.get_channel(cid)
-                if not channel:
-                    continue
+                channel_ids = {
+                    cfg.get('gate_channel_id'),
+                    cfg.get('welcome_channel_id'),
+                }
                 deleted = 0
-                try:
-                    async for msg in channel.history(limit=50):
-                        if (msg.author.id == self.bot.user.id
-                                and "welcome! If you'd like to speak" in msg.content
-                                and now - msg.created_at >= self.TEMP_WELCOME_TTL):
-                            try:
-                                await msg.delete()
-                                deleted += 1
-                            except discord.NotFound:
-                                pass
-                except Exception as e:
-                    logger.error(f"GatingCog: failed to scan gate channel {cid} for orphaned welcomes: {e}")
+                for cid in channel_ids:
+                    if not cid:
+                        continue
+                    channel = self.bot.get_channel(cid)
+                    if not channel:
+                        continue
+                    try:
+                        async for msg in channel.history(limit=50):
+                            is_temp_welcome = any(
+                                pattern in (msg.content or '')
+                                for pattern in self._TEMP_WELCOME_PATTERNS
+                            )
+                            if (msg.author.id == self.bot.user.id
+                                    and is_temp_welcome
+                                    and now - msg.created_at >= self.TEMP_WELCOME_TTL):
+                                try:
+                                    await msg.delete()
+                                    deleted += 1
+                                except discord.NotFound:
+                                    pass
+                    except Exception as e:
+                        logger.error(
+                            f"GatingCog: failed to scan channel {cid} "
+                            f"for orphaned welcomes: {e}"
+                        )
                 if deleted:
                     logger.info(f"GatingCog: cleaned up {deleted} orphaned welcome(s) in {guild.name}")
 
