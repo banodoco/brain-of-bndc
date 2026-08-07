@@ -104,7 +104,7 @@ Before drafting, source evidence should be normalized into an evidence shelf. Th
 
 ## Templates
 
-Start with four templates.
+Start with four templates; `generation_showcase` is a fifth for themed "generations to admire" batches.
 
 ### Creation / Release
 
@@ -130,6 +130,12 @@ Start with four templates.
 - Card 2: strongest position A.
 - Card 3: strongest position B.
 - Optional card 4: what remains unresolved.
+
+### Generation Showcase
+
+A themed "generations to admire" batch — one card per generation, each with a
+short admiring caption and that generation's media attached. Flexible count (1 to
+a handful); group by vibe/style/tool/technique when the candidates hang together.
 
 ## Agent Tools
 

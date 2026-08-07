@@ -5,7 +5,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.features.summarising.topic_editor import TopicEditor, TOPIC_EDITOR_SYSTEM_PROMPT
+from src.features.summarising.topic_editor import (
+    TOPIC_EDITOR_DRAFT_TEMPLATES,
+    TOPIC_EDITOR_SYSTEM_PROMPT,
+    TopicEditor,
+)
 from src.features.summarising.topic_editor_agentic import (
     ScenarioError,
     TopicEditorReplayDB,
@@ -84,6 +88,12 @@ def test_actor_brief_is_replay_only_in_system_prompt():
     editor = TopicEditor(db_handler=object(), llm_client=client)
     asyncio.run(editor._invoke_anthropic([]))
     assert client.messages.calls[0]["system"] == TOPIC_EDITOR_SYSTEM_PROMPT
+
+
+def test_system_prompt_includes_generation_showcase_guidance():
+    assert '"generations to admire"' in TOPIC_EDITOR_SYSTEM_PROMPT
+    assert "generation_showcase:" in TOPIC_EDITOR_SYSTEM_PROMPT
+    assert "generation_showcase" in TOPIC_EDITOR_DRAFT_TEMPLATES
 
 
 def test_replay_writes_pack_and_assessment_passes(tmp_path):

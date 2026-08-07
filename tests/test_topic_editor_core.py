@@ -7,6 +7,8 @@ from types import SimpleNamespace
 import pytest
 
 from src.features.summarising.topic_editor import (
+    TOPIC_EDITOR_DRAFT_TEMPLATES,
+    TOPIC_EDITOR_TOOLS,
     TopicEditor,
     TopicEditorDraft,
     TopicEditorDraftCard,
@@ -76,6 +78,235 @@ class TestTopicEditorDraftPrimitives:
             ),
             editor_note="Concrete model progress with visual evidence.",
         )
+
+    def _showcase_draft(self):
+        return TopicEditorDraft(
+            draft_id="draft-showcase",
+            topic_key="generations-to-admire-dreamscapes",
+            template="generation_showcase",
+            headline="Three dreamlike landscapes to admire",
+            dek="A showcase of the community's most-loved landscape generations.",
+            cards=(
+                TopicEditorDraftCard(
+                    angle="Golden-hour drift",
+                    body="A sunset valley that glows like an oil painting [1].",
+                    source_message_ids=("1506344740558475356",),
+                    media_ids=("1506344740558475356:attachment:0",),
+                ),
+                TopicEditorDraftCard(
+                    angle="Neon undergrowth",
+                    body="Bioluminescent forest floor with tight depth control [1].",
+                    source_message_ids=("1506344740558475357",),
+                    media_ids=("1506344740558475357:attachment:0",),
+                ),
+                TopicEditorDraftCard(
+                    angle="Cloud inversion",
+                    body="A sea of fog spilling over the ridgeline [1].",
+                    source_message_ids=("1506344740558475358",),
+                    media_ids=("1506344740558475358:attachment:0",),
+                ),
+            ),
+            editor_note="Community favorites that cleared the reaction bar this window.",
+        )
+
+    @staticmethod
+    def _showcase_source_metadata():
+        return {
+            "1506344740558475356": {
+                "guild_id": 123,
+                "channel_id": 456,
+                "attachments": [{"url": "https://cdn.discordapp.com/gen1.png"}],
+                "embeds": [],
+            },
+            "1506344740558475357": {
+                "guild_id": 123,
+                "channel_id": 456,
+                "attachments": [{"url": "https://cdn.discordapp.com/gen2.png"}],
+                "embeds": [],
+            },
+            "1506344740558475358": {
+                "guild_id": 123,
+                "channel_id": 456,
+                "attachments": [{"url": "https://cdn.discordapp.com/gen3.png"}],
+                "embeds": [],
+            },
+        }
+
+    @staticmethod
+    def _showcase_evidence():
+        rows = []
+        for msg_id, desc in (
+            ("1506344740558475356", "Golden-hour valley glow."),
+            ("1506344740558475357", "Bioluminescent forest floor."),
+            ("1506344740558475358", "Sea of fog over a ridgeline."),
+        ):
+            rows.append(TopicEditorEvidenceItem(
+                message_id=msg_id,
+                media=(
+                    TopicEditorEvidenceMedia(
+                        media_id=f"{msg_id}:attachment:0",
+                        kind="attachment",
+                        source_url=f"https://cdn.discordapp.com/gen{msg_id[-1]}.png",
+                        description=desc,
+                        media_ref={"message_id": msg_id, "kind": "attachment", "index": 0},
+                    ),
+                ),
+            ))
+        return rows
+
+    def test_generation_showcase_template_is_in_create_draft_schema(self):
+        assert "generation_showcase" in TOPIC_EDITOR_DRAFT_TEMPLATES
+        create_draft = next(
+            tool for tool in TOPIC_EDITOR_TOOLS if tool.get("name") == "create_draft"
+        )
+        template_enum = create_draft["input_schema"]["properties"]["template"]["enum"]
+        assert "generation_showcase" in template_enum
+
+    def test_generation_showcase_draft_validates_and_renders_media_per_card(self):
+        evidence = self._showcase_evidence()
+        source_metadata = self._showcase_source_metadata()
+
+        result = validate_topic_editor_draft(
+            self._showcase_draft(),
+            evidence,
+            source_metadata,
+            TopicEditorDraftLimits(),
+            mode="draft",
+        )
+
+        assert result.status == "valid"
+        assert result.errors == ()
+
+        # Media units must appear in card order, each bound to the generation
+        # that its own card cites — not just "some three URLs exist".
+        units = render_draft_publish_units(
+            self._showcase_draft(), source_metadata, evidence_shelf=evidence
+        )
+        media_units = [unit for unit in units if unit["kind"] == "media"]
+        assert [unit["url"] for unit in media_units] == [
+            "https://cdn.discordapp.com/gen1.png",
+            "https://cdn.discordapp.com/gen2.png",
+            "https://cdn.discordapp.com/gen3.png",
+        ]
+        assert [unit["ref"] for unit in media_units] == [
+            {"message_id": "1506344740558475356", "kind": "attachment", "index": 0},
+            {"message_id": "1506344740558475357", "kind": "attachment", "index": 0},
+            {"message_id": "1506344740558475358", "kind": "attachment", "index": 0},
+        ]
+
+    def test_generation_showcase_single_card_is_valid_whole_post(self):
+        draft = TopicEditorDraft(
+            draft_id="draft-showcase-single",
+            topic_key="generations-to-admire-single",
+            template="generation_showcase",
+            headline="One generation to admire",
+            dek="A single standout generation from this window.",
+            cards=(
+                TopicEditorDraftCard(
+                    angle="Why it's special",
+                    body="A single generation that clears the bar on its own [1].",
+                    source_message_ids=("1506344740558475356",),
+                    media_ids=("1506344740558475356:attachment:0",),
+                ),
+            ),
+            editor_note="The showcase may be the entire post when nothing else is stronger.",
+        )
+
+        result = validate_topic_editor_draft(
+            draft,
+            self._showcase_evidence(),
+            self._showcase_source_metadata(),
+            TopicEditorDraftLimits(),
+            mode="draft",
+        )
+
+        assert result.status == "valid"
+        assert result.errors == ()
+
+        # A single-card showcase renders a standalone, media-bearing post.
+        preview = preview_topic_editor_draft(
+            draft,
+            self._showcase_source_metadata(),
+            evidence_shelf=self._showcase_evidence(),
+            limits=TopicEditorDraftLimits(discord_content_limit=2000),
+        )
+        media_preview = [unit for unit in preview if unit.get("type") == "media"]
+        assert len(media_preview) == 1
+        assert media_preview[0]["media_id"] == "1506344740558475356:attachment:0"
+
+    def test_generation_showcase_requires_cards_and_media(self):
+        empty = TopicEditorDraft(
+            draft_id="draft-showcase-empty",
+            topic_key="generations-to-admire-empty",
+            template="generation_showcase",
+            headline="Empty showcase",
+            dek="This should not validate.",
+            cards=(),
+            editor_note="Must be rejected.",
+        )
+        result = validate_topic_editor_draft(
+            empty, [], {}, TopicEditorDraftLimits(), mode="draft"
+        )
+        assert result.status == "needs_revision"
+        assert any(issue.path == "cards" for issue in result.errors)
+
+        no_media = TopicEditorDraft(
+            draft_id="draft-showcase-no-media",
+            topic_key="generations-to-admire-no-media",
+            template="generation_showcase",
+            headline="Media-less showcase",
+            dek="This should not validate either.",
+            cards=(
+                TopicEditorDraftCard(
+                    angle="No media",
+                    body="A caption with a source but no media [1].",
+                    source_message_ids=("1506344740558475356",),
+                    media_ids=(),
+                ),
+            ),
+            editor_note="Must be rejected.",
+        )
+        result = validate_topic_editor_draft(
+            no_media,
+            self._showcase_evidence(),
+            self._showcase_source_metadata(),
+            TopicEditorDraftLimits(),
+            mode="draft",
+        )
+        assert result.status == "needs_revision"
+        assert any(issue.path == "cards[0].media_ids" for issue in result.errors)
+
+        two_gens = TopicEditorDraft(
+            draft_id="draft-showcase-two-gens",
+            topic_key="generations-to-admire-two-gens",
+            template="generation_showcase",
+            headline="Two generations in one card",
+            dek="This should not validate either.",
+            cards=(
+                TopicEditorDraftCard(
+                    angle="Two at once",
+                    body="Two generations crammed into one card [1][2].",
+                    source_message_ids=(
+                        "1506344740558475356",
+                        "1506344740558475357",
+                    ),
+                    media_ids=(
+                        "1506344740558475356:attachment:0",
+                        "1506344740558475357:attachment:0",
+                    ),
+                ),
+            ),
+            editor_note="Must be rejected.",
+        )
+        result = validate_topic_editor_draft(
+            two_gens,
+            self._showcase_evidence(),
+            self._showcase_source_metadata(),
+            TopicEditorDraftLimits(),
+            mode="draft",
+        )
+        assert result.status == "needs_revision"
+        assert any(issue.path == "cards[0].source_message_ids" for issue in result.errors)
 
     def test_limits_have_recommended_defaults_and_config_overrides(self):
         assert TopicEditorDraftLimits().card_body_max_chars == 650

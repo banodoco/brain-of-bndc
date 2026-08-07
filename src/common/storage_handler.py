@@ -10,7 +10,7 @@ import os
 import mimetypes
 import uuid
 from datetime import datetime, timedelta
-from typing import Any, List, Dict, Optional, Sequence
+from typing import Any, List, Dict, Optional, Sequence, Set
 from pathlib import Path
 import sys
 
@@ -1190,6 +1190,36 @@ class StorageHandler:
             if row:
                 rows.append(row)
         return rows
+
+    async def get_topic_source_message_ids(
+        self,
+        message_ids: Sequence[str],
+        guild_id: Optional[int] = None,
+        environment: str = 'prod',
+    ) -> Set[str]:
+        """Return the subset of ``message_ids`` already referenced as topic sources.
+
+        Keeps the reaction re-scan from re-surfacing a generation that was already
+        published or covered under another topic (e.g. a news topic) but has no
+        media-shortlist watcher of its own. Sources live in ``topic_sources``, not
+        on the ``topics`` rows themselves.
+        """
+        if not self.supabase_client or not message_ids:
+            return set()
+        try:
+            query = (
+                self.supabase_client.table('topic_sources')
+                .select('message_id')
+                .in_('message_id', [str(mid) for mid in message_ids])
+                .eq('environment', environment)
+            )
+            if guild_id is not None:
+                query = query.eq('guild_id', guild_id)
+            result = await asyncio.to_thread(query.execute)
+            return {str(row.get('message_id')) for row in (result.data or [])}
+        except Exception as e:
+            logger.error(f"Error fetching topic source message ids: {e}", exc_info=True)
+            return set()
 
     async def upsert_topic_alias(self, alias: Dict[str, Any], environment: str = 'prod') -> Optional[Dict[str, Any]]:
         return await self._upsert_live_row('topic_aliases', {

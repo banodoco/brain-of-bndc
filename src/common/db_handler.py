@@ -634,6 +634,20 @@ class DatabaseHandler:
             return []
         return self._run_async_in_thread(self.storage_handler.add_topic_sources(sources, environment=environment))
 
+    def get_topic_source_message_ids(
+        self,
+        message_ids: Sequence[str],
+        guild_id: Optional[int] = None,
+        environment: str = 'prod',
+    ) -> Set[str]:
+        if not self.storage_handler:
+            return set()
+        return self._run_async_in_thread(
+            self.storage_handler.get_topic_source_message_ids(
+                message_ids=message_ids, guild_id=guild_id, environment=environment
+            )
+        )
+
     def upsert_topic_alias(self, alias: Dict[str, Any], environment: str = 'prod') -> Optional[Dict[str, Any]]:
         guild_id = alias.get('guild_id')
         if not self._live_write_allowed(guild_id) or not self.storage_handler:

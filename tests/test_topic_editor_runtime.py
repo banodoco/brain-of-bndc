@@ -82,6 +82,9 @@ class FakeDB:
         self.draft_creates = []
         self.draft_updates = []
         self.draft_reads = []
+        self.window_rows = []
+        self.window_query_calls = []
+        self.covered_message_ids = []
 
     def get_topic_editor_checkpoint(self, checkpoint_key, environment="prod"):
         return {
@@ -167,6 +170,13 @@ class FakeDB:
                 row["media_refs_available"] = row.get("media_refs_available", [])
         return rows
 
+    def get_archived_messages_for_window(self, guild_id=None, start=None, end=None, limit=1000, channel_ids=None, exclude_author_ids=None):
+        self.window_query_calls.append((guild_id, start, end, limit, channel_ids, exclude_author_ids))
+        return list(self.window_rows or [])
+
+    def get_topic_source_message_ids(self, message_ids, guild_id=None, environment="prod"):
+        return {str(mid) for mid in self.covered_message_ids}
+
     def get_topic_editor_source_messages(self, message_ids, guild_id=None, environment="prod", limit=50):
         """Resolve source messages for validation, author derivation, and citation hydration."""
         self.source_message_calls.append((message_ids, guild_id, environment, limit))
@@ -185,8 +195,16 @@ class FakeDB:
         return self.reply_chain_rows
 
     def upsert_topic(self, topic, environment="prod"):
+        existing = next(
+            (
+                t for t in self.active_topics
+                if str(t.get("canonical_key")) == str(topic.get("canonical_key"))
+            ),
+            None,
+        )
+        topic_id = existing.get("topic_id") if existing else "topic-1"
         self.topics.append((topic, environment))
-        return {"topic_id": "topic-1", **topic}
+        return {"topic_id": topic_id, **topic}
 
     def add_topic_source(self, source, environment="prod"):
         self.sources.append((source, environment))
@@ -1209,6 +1227,228 @@ def test_topic_editor_auto_shortlist_respects_discard_ignore(monkeypatch):
     assert shortlisted == []
     assert db.topics == []
     assert db.transitions == []
+
+
+def test_topic_editor_shortlist_re_scan_picks_up_late_bloomer(monkeypatch):
+    monkeypatch.setenv("TOPIC_EDITOR_MEDIA_SHORTLIST_MIN_REACTIONS", "5")
+    monkeypatch.setenv("TOPIC_EDITOR_MEDIA_SHORTLIST_LIMIT", "5")
+    monkeypatch.setenv("TOPIC_EDITOR_MEDIA_SHORTLIST_LOOKBACK_HOURS", "24")
+    db = FakeDB()
+    # An OLDER message (before the checkpoint) that crossed the reaction bar late.
+    db.window_rows = [
+        {
+            "message_id": 900,
+            "guild_id": 1,
+            "channel_id": 10,
+            "author_id": 42,
+            "content": "late blooming render",
+            "created_at": "2026-05-12T10:00:00Z",
+            "reaction_count": 5,
+            "author_context_snapshot": {"username": "alice"},
+            "attachments": [
+                {"url": "https://cdn.example.test/render.png", "content_type": "image/png", "filename": "render.png"},
+            ],
+            "embeds": [],
+        }
+    ]
+    editor = TopicEditor(
+        db_handler=db,
+        llm_client=FakeClaude(SimpleNamespace(content=[])),
+        guild_id=1,
+        live_channel_id=2,
+        environment="prod",
+    )
+
+    scan = editor._shortlist_scan_messages([], guild_id=1)
+
+    assert any(str(m.get("message_id")) == "900" for m in scan)
+    # The window query is bounded to the lookback window and capped at 5000.
+    assert len(db.window_query_calls) == 1
+    _guild, start, end, limit, _channels, _excluded = db.window_query_calls[0]
+    assert limit == 5000
+    start_dt = datetime.fromisoformat(start)
+    end_dt = datetime.fromisoformat(end)
+    assert start_dt < end_dt
+    assert start_dt >= datetime.now(timezone.utc) - timedelta(hours=24, minutes=1)
+    assert end_dt <= datetime.now(timezone.utc) + timedelta(minutes=1)
+
+    shortlisted = editor._auto_shortlist_media_messages(scan, [], run_id="run-rescan", guild_id=1)
+    assert len(shortlisted) == 1
+    assert shortlisted[0]["message_id"] == "900"
+    assert db.topics[0][0]["canonical_key"] == "media-shortlist-900"
+
+
+def test_topic_editor_re_scan_skips_sources_already_covered_by_known_topics(monkeypatch):
+    monkeypatch.setenv("TOPIC_EDITOR_MEDIA_SHORTLIST_MIN_REACTIONS", "5")
+    monkeypatch.setenv("TOPIC_EDITOR_MEDIA_SHORTLIST_LIMIT", "5")
+    monkeypatch.setenv("TOPIC_EDITOR_MEDIA_SHORTLIST_LOOKBACK_HOURS", "24")
+    db = FakeDB()
+    # message 900 is already referenced by topic_sources (e.g. covered by a
+    # posted news topic) — the re-scan must not re-surface it as a fresh
+    # candidate even though no media-shortlist watcher exists for it.
+    db.covered_message_ids = ["900"]
+    editor = TopicEditor(
+        db_handler=db,
+        llm_client=FakeClaude(SimpleNamespace(content=[])),
+        guild_id=1,
+        live_channel_id=2,
+        environment="prod",
+    )
+    known_topics = [{
+        "topic_id": "topic-news",
+        "canonical_key": "alice-lora-news",
+        "state": "posted",
+    }]
+    message = {
+        "message_id": 900,
+        "guild_id": 1,
+        "channel_id": 10,
+        "author_id": 42,
+        "content": "render already covered by news",
+        "created_at": "2026-05-12T10:00:00Z",
+        "reaction_count": 8,
+        "author_context_snapshot": {"username": "alice"},
+        "attachments": [{"url": "https://cdn.example.test/render.png", "content_type": "image/png", "filename": "render.png"}],
+        "embeds": [],
+    }
+
+    shortlisted = editor._auto_shortlist_media_messages([message], known_topics, run_id="run-rescan", guild_id=1)
+
+    assert shortlisted == []
+    assert db.topics == []
+
+
+def test_topic_editor_rejects_source_already_published_this_run():
+    messages = _sample_source_message_rows()
+    db = FakeDB()
+    db.source_message_rows = messages
+    editor = _make_editor_with_source_rows(db=db)
+    ctx = _make_source_context(
+        messages=messages,
+        extra={"published_source_ids": {"200"}},
+    )
+
+    call = {
+        "id": "tool-dupe-showcase",
+        "name": "post_topic",
+        "input": {
+            "proposed_key": "Generations to admire",
+            "headline": "A showcase featuring the same generation again",
+            "source_message_ids": ["200"],
+            "blocks": [
+                {
+                    "type": "intro",
+                    "text": "Featuring the already-published generation [1].",
+                    "source_message_ids": ["200"],
+                    "media_refs": [{"message_id": "200", "kind": "attachment", "index": 0}],
+                }
+            ],
+        },
+    }
+
+    outcome = editor._dispatch_tool_call(call, ctx)
+
+    assert outcome["outcome"] == "rejected_post_topic"
+    assert outcome["error"] == "source_already_published_this_run"
+    assert db.topics == []
+
+
+def test_topic_editor_publishing_closes_shortlist_watcher():
+    messages = _sample_source_message_rows()
+    db = FakeDB()
+    db.source_message_rows = messages
+    db.active_topics = [{
+        "topic_id": "topic-watch-200",
+        "canonical_key": "media-shortlist-200",
+        "headline": "Shortlisted media from alice (5 reactions)",
+        "state": "watching",
+    }]
+    editor = _make_editor_with_source_rows(db=db)
+    ctx = _make_source_context(messages=messages, active_topics=db.active_topics)
+
+    call = {
+        "id": "tool-post-showcase",
+        "name": "post_topic",
+        "input": {
+            "proposed_key": "Generations to admire",
+            "headline": "A generation to admire",
+            "source_message_ids": ["200"],
+            "blocks": [
+                {
+                    "type": "intro",
+                    "text": "This generation deserves a moment [1].",
+                    "source_message_ids": ["200"],
+                    "media_refs": [{"message_id": "200", "kind": "attachment", "index": 0}],
+                }
+            ],
+        },
+    }
+
+    outcome = editor._dispatch_tool_call(call, ctx)
+
+    assert outcome["outcome"] == "accepted"
+    assert outcome["action"] == "post_topic"
+    # The shortlist watcher for message 200 is closed once its source is published.
+    assert any(
+        updates.get("state") == "discarded"
+        for _topic_id, updates, _guild_id, _env in db.topic_updates
+    )
+    close_transitions = [
+        transition[0]
+        for transition in db.transitions
+        if transition[0]["payload"].get("tool_name") == "auto_media_shortlist_close"
+    ]
+    assert close_transitions
+    assert close_transitions[0]["to_state"] == "discarded"
+
+
+def test_topic_editor_direct_promotion_of_watcher_does_not_discard_itself():
+    messages = _sample_source_message_rows()
+    db = FakeDB()
+    db.source_message_rows = messages
+    db.active_topics = [{
+        "topic_id": "topic-watch-200",
+        "canonical_key": "media-shortlist-200",
+        "headline": "Shortlisted media from alice (5 reactions)",
+        "state": "watching",
+        "source_message_ids": ["200"],
+    }]
+    editor = _make_editor_with_source_rows(db=db)
+    ctx = _make_source_context(messages=messages, active_topics=db.active_topics)
+
+    call = {
+        "id": "tool-post-watcher-directly",
+        "name": "post_topic",
+        "input": {
+            "proposed_key": "media-shortlist-200",
+            "headline": "Shortlisted media from alice (5 reactions)",
+            "source_message_ids": ["200"],
+            "override_collisions": [{"topic_id": "topic-watch-200", "reason": "promote watcher"}],
+            "blocks": [
+                {
+                    "type": "intro",
+                    "text": "Promoting this watcher directly [1].",
+                    "source_message_ids": ["200"],
+                    "media_refs": [{"message_id": "200", "kind": "attachment", "index": 0}],
+                }
+            ],
+        },
+    }
+
+    outcome = editor._dispatch_tool_call(call, ctx)
+
+    assert outcome["outcome"] == "accepted"
+    # The directly-promoted watcher is the topic just posted — it must NOT be
+    # auto-discarded by _close_shortlist_watchers (exclude_topic_id guard).
+    assert not any(
+        updates.get("state") == "discarded"
+        for _topic_id, updates, _guild_id, _env in db.topic_updates
+    )
+    assert not [
+        transition[0]
+        for transition in db.transitions
+        if transition[0]["payload"].get("tool_name") == "auto_media_shortlist_close"
+    ]
 
 
 def test_topic_editor_dispatch_allows_same_tool_id_collision_override_retry():

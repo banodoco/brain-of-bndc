@@ -71,6 +71,7 @@ TOPIC_EDITOR_DRAFT_TEMPLATES = {
     "technical_finding",
     "tool_workflow_update",
     "community_debate",
+    "generation_showcase",
 }
 
 
@@ -128,6 +129,12 @@ Templates:
 - community_debate: card 1 states the concrete question; card 2 gives the
   strongest position A; card 3 gives the strongest position B; optional card 4
   says what remains unresolved.
+- generation_showcase: a themed showcase of recent generations. Each card
+  spotlights one generation: creator/tool, a short admiring caption, and why it
+  works. Attach that generation's media to its card. One card is fine when a
+  single generation is the strongest thing in the window; otherwise use 1 to a
+  handful of cards. Group generations by a theme when possible (vibe, style,
+  tool, technique) so the post reads as one curated collection.
 
 Media-bearing messages may include cached `media_understandings`; read those
 before spending vision budget. Skip workflow_graph media. For uncached media
@@ -136,6 +143,19 @@ that affects editorial judgment, use understand_image or understand_video.
 Auto-shortlisted media appears in `auto_shortlisted_media` and as active
 watching topics. Explicitly decide publish, watch, update, or discard for those
 items after checking context.
+
+Sometimes the whole post should be a "generations to admire" showcase rather
+than news. When auto_shortlisted_media or other strong generation posts clear
+the bar, draft a generation_showcase: 1 to a handful of cards, one generation
+per card, each with a short, specific, admiring caption plus that generation's
+media attached. Group generations by a theme when possible (vibe, style, tool,
+technique) so the collection has a point of view. Read cached
+media_understandings before spending vision budget, then use understand_image or
+understand_video for uncached media that matters. A showcase may be the entire
+post when nothing else this window is stronger; otherwise fold the strongest one
+or two generations into a news post. Be creative and opinionated here — this is
+the place for taste, not just reporting. Publish at most one generation_showcase
+per run, and do not cite a generation in both a showcase and a news topic.
 
 Legacy direct-post tools (`post_topic`, `post_simple_topic`,
 `post_sectioned_topic`) are rollback-only or adapter-backed compatibility
@@ -233,7 +253,7 @@ TOPIC_EDITOR_TOOLS: List[Dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "topic_key": {"type": "string"},
-                "template": {"type": "string", "enum": sorted(TOPIC_EDITOR_DRAFT_TEMPLATES) if "TOPIC_EDITOR_DRAFT_TEMPLATES" in globals() else ["creation_release", "technical_finding", "tool_workflow_update", "community_debate"]},
+                "template": {"type": "string", "enum": sorted(TOPIC_EDITOR_DRAFT_TEMPLATES) if "TOPIC_EDITOR_DRAFT_TEMPLATES" in globals() else ["creation_release", "technical_finding", "tool_workflow_update", "community_debate", "generation_showcase"]},
                 "headline": {"type": "string"},
                 "dek": {"type": "string"},
                 "cards": {
@@ -613,6 +633,12 @@ class TopicEditor:
         self.trace_channel_id = os.getenv("LIVE_UPDATE_TRACE_CHANNEL_ID", "1316024582041243668")
         self.media_shortlist_min_reactions = self._env_int("TOPIC_EDITOR_MEDIA_SHORTLIST_MIN_REACTIONS", 5)
         self.media_shortlist_limit = self._env_int("TOPIC_EDITOR_MEDIA_SHORTLIST_LIMIT", 5)
+        # Reaction qualification is re-scanned over this window each run so a
+        # generation that crosses the threshold AFTER its first hour still
+        # becomes a candidate (the checkpoint scan alone misses late bloomers).
+        self.media_shortlist_lookback_hours = self._env_int(
+            "TOPIC_EDITOR_MEDIA_SHORTLIST_LOOKBACK_HOURS", 24
+        )
         # Rollout guard for deprecated direct-post tools:
         # - disabled: default draft-required behavior; legacy tools are hidden and refused.
         # - draft_adapter: compatibility path that converts legacy input into a draft and submits it.
@@ -714,6 +740,11 @@ class TopicEditor:
                 run_id,
                 len(messages or []),
             )
+            # Re-scan recent messages for late-blooming candidates: a generation
+            # that crossed the reaction threshold after the checkpoint never made
+            # it into `messages`. Union the lookback window into the shortlist
+            # scan only — the editorial source window stays checkpoint-scoped.
+            shortlist_scan = self._shortlist_scan_messages(messages, guild_id)
             logger.info("TopicEditor fetching known topics: run_id=%s", run_id)
             known_topics = self.db.get_topics(
                 guild_id=guild_id,
@@ -727,7 +758,7 @@ class TopicEditor:
                 len(known_topics or []),
             )
             auto_shortlisted_media = self._auto_shortlist_media_messages(
-                messages,
+                shortlist_scan,
                 known_topics,
                 run_id=run_id,
                 guild_id=guild_id,
@@ -794,7 +825,9 @@ class TopicEditor:
                 except Exception as exc:
                     logger.error("TopicEditor publish-backlog drain failed: run_id=%s error=%s", run_id, exc)
 
-            if not messages and not recovered_drafts:
+            # Re-scan-only candidates (late bloomers surfaced from the lookback
+            # window) are new shortlist watchers — do not fast-path past them.
+            if not messages and not recovered_drafts and not auto_shortlisted_media:
                 updates = self._run_updates(
                     checkpoint_before=checkpoint,
                     checkpoint_after=checkpoint,
@@ -1310,7 +1343,8 @@ class TopicEditor:
                     "next_action": (
                         "Inspect with message/reply/search context plus understand_image or "
                         "understand_video if not already cached; then publish, keep watching, "
-                        "or discard_topic."
+                        "or discard_topic. If it clears the bar, feature it in a "
+                        "generation_showcase (publish at most one showcase per run)."
                     ),
                 }
                 for item in auto_shortlisted_media or []
@@ -3495,6 +3529,36 @@ class TopicEditor:
                 collisions=unresolved,
             )
 
+        # A source may be published in only one topic per run. This stops a
+        # generation from appearing in both a generation_showcase and a news
+        # post (or twice across two topics) in the same run. Runs after collision
+        # detection so canonical-key collisions keep their existing precedence.
+        if call["name"] != "watch_topic":
+            already_published = context.get("published_source_ids") or set()
+            overlaps = [str(sid) for sid in source_ids if str(sid) in already_published]
+            if overlaps:
+                rejected_action = {
+                    "post_topic": "rejected_post_topic",
+                    "post_simple_topic": "rejected_post_simple",
+                    "post_sectioned_topic": "rejected_post_sectioned",
+                }[call["name"]]
+                return self._reject_create_tool(
+                    call,
+                    context,
+                    action=rejected_action,
+                    reason="source_already_published_this_run",
+                    canonical_key=canonical_key,
+                    source_message_ids=source_ids,
+                    extra={
+                        "overlapping_source_message_ids": overlaps,
+                        "guidance": (
+                            "Each source may be published in only one topic per run. "
+                            "A generation already featured in a showcase or news topic "
+                            "cannot be cited again in another post."
+                        ),
+                    },
+                )
+
         revisit_at = None
         if state == "watching":
             revisit_at = parse_optional_datetime(args.get("revisit_when"))
@@ -3549,6 +3613,17 @@ class TopicEditor:
         context.setdefault("created_topic_keys", {})[str(canonical_key)] = topic
         if state == "posted":
             context.setdefault("created_topics", []).append(topic)
+            context.setdefault("published_source_ids", set()).update(
+                str(sid) for sid in source_ids
+            )
+            # Once a generation is published (in any post), its auto-shortlist
+            # watcher's job is done — close it so it is not re-considered and
+            # re-featured in later runs. Exclude the topic just posted, so
+            # directly promoting a watcher (watch→post of the shortlist key)
+            # does not immediately discard itself.
+            self._close_shortlist_watchers(
+                context, source_ids, exclude_topic_id=topic_id
+            )
         for message_id in source_ids:
             self.db.add_topic_source({
                 "topic_id": topic_id,
@@ -3716,6 +3791,31 @@ class TopicEditor:
                 "media_ref": media_ref,
             })
 
+        # Sources live in `topic_sources`, not on the topics rows. A generation
+        # already referenced by ANY known topic (news, another showcase, or an old
+        # shortlist watcher outside the 300-topic fetch) is covered and must not be
+        # re-surfaced as a fresh candidate by the re-scan.
+        if candidates:
+            covered = set()
+            lookup = getattr(self.db, "get_topic_source_message_ids", None)
+            if lookup is not None:
+                try:
+                    covered = set(
+                        lookup(
+                            [item["message_id"] for item in candidates],
+                            guild_id=guild_id,
+                            environment=self.environment,
+                        )
+                        or set()
+                    )
+                except Exception:
+                    covered = set()
+            if covered:
+                candidates = [
+                    item for item in candidates
+                    if item["message_id"] not in covered
+                ]
+
         candidates.sort(
             key=lambda item: (
                 int(item.get("reaction_count") or 0),
@@ -3735,7 +3835,8 @@ class TopicEditor:
             reason = (
                 f"Auto-shortlisted because source message {message_id} has media "
                 f"and {reaction_count} reactions. Investigate context and media "
-                "understanding before deciding whether to publish, keep watching, or discard."
+                "understanding before deciding whether to publish, keep watching, or discard. "
+                "This is a candidate for a \"generations to admire\" showcase."
             )
             revisit_at = (datetime.now(timezone.utc) + timedelta(hours=6)).isoformat()
             topic = self.db.upsert_topic({
@@ -3756,6 +3857,7 @@ class TopicEditor:
                         "get_reply_chain when it is a reply",
                         "search_messages for related posts by the author/tool",
                         "understand_image or understand_video",
+                        "draft a generation_showcase for this candidate",
                         "post_topic, watch_topic/update sources, or discard_topic",
                     ],
                 },
@@ -3827,6 +3929,108 @@ class TopicEditor:
                 ],
             )
         return shortlisted
+
+    def _shortlist_scan_messages(
+        self,
+        messages: Sequence[Dict[str, Any]],
+        guild_id: Optional[int],
+    ) -> List[Dict[str, Any]]:
+        """Union the reaction re-scan lookback window into the shortlist scan.
+
+        The checkpoint scan only sees messages newer than the last checkpoint, so
+        a generation that crosses the reaction threshold AFTER its first hour
+        never becomes a candidate. Merge recent messages over the lookback window
+        in, deduping by message_id, and return the list to feed
+        ``_auto_shortlist_media_messages``. When the shortlist is disabled the
+        original list is returned unchanged.
+
+        NOTE: ``DatabaseHandler.get_archived_messages_for_window`` is synchronous
+        (it wraps the async storage call in a thread), matching every other
+        topic-editor DB call — do not ``await`` it.
+        """
+        scan = list(messages or [])
+        if not (self.media_shortlist_min_reactions > 0 and self.media_shortlist_limit > 0):
+            return scan
+        if self.media_shortlist_lookback_hours <= 0:
+            return scan
+        try:
+            recent = self.db.get_archived_messages_for_window(
+                guild_id=guild_id,
+                start=(
+                    datetime.now(timezone.utc)
+                    - timedelta(hours=self.media_shortlist_lookback_hours)
+                ).isoformat(),
+                end=datetime.now(timezone.utc).isoformat(),
+                limit=5000,
+                channel_ids=None,
+                exclude_author_ids=self._excluded_author_ids(),
+            )
+        except Exception:
+            recent = []
+        if not recent:
+            return scan
+        by_id = {str(m.get("message_id")): m for m in scan}
+        for m in recent:
+            by_id.setdefault(str(m.get("message_id")), m)
+        return list(by_id.values())
+
+    def _close_shortlist_watchers(
+        self,
+        context: Dict[str, Any],
+        source_ids: Sequence[str],
+        *,
+        exclude_topic_id: Optional[str] = None,
+    ) -> None:
+        """Close auto-shortlist watchers whose source just got published.
+
+        A media message is shortlisted as a watching topic under the
+        ``media-shortlist-{message_id}`` canonical key. Once that message is
+        published in ANY topic this run (showcase or news), the watcher is
+        transitioned to ``discarded`` so it is not re-presented and re-featured
+        in later runs.
+        """
+        if not source_ids:
+            return
+        target_keys = {self._media_shortlist_key(sid) for sid in source_ids}
+        for topic in context.get("active_topics") or []:
+            key = str(topic.get("canonical_key") or "")
+            if key not in target_keys or topic.get("state") != "watching":
+                continue
+            topic_id = topic.get("topic_id")
+            if not topic_id:
+                continue
+            if exclude_topic_id and str(topic_id) == str(exclude_topic_id):
+                continue
+            self.db.update_topic(
+                topic_id,
+                {"state": "discarded", "guild_id": context.get("guild_id")},
+                guild_id=context.get("guild_id"),
+                environment=self.environment,
+            )
+            self._store_transition({
+                "topic_id": topic_id,
+                "run_id": context.get("run_id"),
+                "guild_id": context.get("guild_id"),
+                "tool_call_id": f"auto-close-shortlist:{key}",
+                "to_state": "discarded",
+                "action": "discard",
+                "reason": (
+                    f"Shortlisted source was published this run ({key}); "
+                    "closing the watcher."
+                ),
+                "payload": shape_transition_payload(
+                    outcome="accepted",
+                    tool_name="auto_media_shortlist_close",
+                    canonical_key=key,
+                    source_message_ids=[
+                        sid for sid in source_ids
+                        if self._media_shortlist_key(sid) == key
+                    ],
+                    extra={"closed_by": "published_topic_source"},
+                ),
+                "model": self.model,
+            })
+            topic["state"] = "discarded"
 
     @staticmethod
     def _media_shortlist_key(message_id: str) -> str:
@@ -7612,6 +7816,28 @@ def validate_topic_editor_draft(
                     f"{path}.media_ids",
                     "Media appears detached from the relevant text.",
                     "Mention what the attached media proves or shows.",
+                ))
+
+    if parsed.template == "generation_showcase":
+        if not parsed.cards:
+            errors.append(_validation_issue(
+                "cards",
+                "generation_showcase has no cards.",
+                "Add one card per generation to admire.",
+            ))
+        for idx, card in enumerate(parsed.cards):
+            path = f"cards[{idx}]"
+            if not card.media_ids:
+                errors.append(_validation_issue(
+                    f"{path}.media_ids",
+                    "Showcase card has no media attached.",
+                    "Attach the generation's media to its card so it renders inline.",
+                ))
+            if len(card.source_message_ids) != 1:
+                errors.append(_validation_issue(
+                    f"{path}.source_message_ids",
+                    "Showcase card must reference exactly one generation message.",
+                    "Keep one generation per card; add another card for a second generation.",
                 ))
 
     if strong_media_ids and not any(card.media_ids for card in parsed.cards):
