@@ -818,10 +818,24 @@ class TopicEditor:
 
             # Publish backlog: retry topics with pending/failed/partial outbox units
             # (reconcile-before-resend) so quiet windows drain the publish queue too.
+            # Bounded by a timeout so a stuck publish (e.g. a hung media download or
+            # Discord send) can't brick the run before the agent loop — the outbox
+            # reconciliation only resends pending/failed units, so a mid-publish
+            # timeout is safe.
             if hasattr(self.db, "get_pending_topic_publish_outbox_topics"):
                 try:
-                    backlog_results = await self._publish_pending_topics()
+                    backlog_timeout = self._env_float(
+                        "TOPIC_EDITOR_PUBLISH_BACKLOG_TIMEOUT_SECONDS", 120.0
+                    )
+                    backlog_results = await asyncio.wait_for(
+                        self._publish_pending_topics(), timeout=backlog_timeout
+                    )
                     metadata["publish_backlog_results"] = backlog_results
+                except asyncio.TimeoutError:
+                    logger.error(
+                        "TopicEditor publish-backlog drain timed out after %ss: run_id=%s",
+                        backlog_timeout, run_id,
+                    )
                 except Exception as exc:
                     logger.error("TopicEditor publish-backlog drain failed: run_id=%s error=%s", run_id, exc)
 
