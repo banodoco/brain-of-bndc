@@ -11,9 +11,11 @@ may send:
 
 View (read) access is managed only where the model says so — see
 `_VIEW_ROLE_ALLOWED`. The gate channel ('bot' mode) must be readable by Newbie
-and Speaker so they can see the pinned onboarding / welcome message; their
-`view_channel` is enforced to True while @everyone and Moderated are left to
-manual setup. All other modes do not manage view at all.
+and Speaker so they can see the pinned onboarding / welcome message, and the
+'newbie' mode channels (introductions, grants forum, help/support) must be
+readable by the roles that can post there. For those roles `view_channel` is
+enforced to True while @everyone and Moderated are left to manual setup. All
+other modes do not manage view at all.
 
 Moderated is denied everywhere except `appeal`.
 
@@ -61,13 +63,15 @@ _MODE_ROLE_ALLOWED = {
 
 # Per-channel posting mode -> view_channel value the bot enforces for each role.
 # `None` (or an absent role) means the bot leaves that role's view overwrite to
-# manual setup. The gate channel is 'bot' mode: only the bot posts there, but
-# Newbie and Speaker must be able to read the pinned onboarding / welcome
-# message, so their view is enforced to True. @everyone and Moderated are not
-# managed — the welcome message is public, so @everyone already sees it via the
-# default overwrite.
+# manual setup. Enforced for the roles that need to SEE the channel:
+#   - 'bot' mode: the gate channel pins the onboarding / welcome message, so
+#     Newbie and Speaker must be able to read it.
+#   - 'newbie' mode: introductions / grants forum / help-support, where Newbie
+#     and Speaker can post — posting is pointless if they can't see the channel.
+# @everyone and Moderated are not managed.
 _VIEW_ROLE_ALLOWED = {
     'bot': {'newbie': True, 'speaker': True},
+    'newbie': {'newbie': True, 'speaker': True},
 }
 
 VALID_MODES = frozenset(_MODE_ROLE_ALLOWED.keys())

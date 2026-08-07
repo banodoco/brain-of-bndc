@@ -51,8 +51,17 @@ def test_bot_mode_nobody_posts_but_newbie_and_speaker_can_view():
     assert 'view_channel' not in _expected_values('bot', 'moderated')
 
 
+def test_newbie_mode_newbie_and_speaker_can_view():
+    # Newbie-mode channels (introductions, grants forum, help/support) are
+    # postable by Newbie + Speaker — they must be able to see them too.
+    assert _expected_values('newbie', 'newbie').get('view_channel') is True
+    assert _expected_values('newbie', 'speaker').get('view_channel') is True
+    assert 'view_channel' not in _expected_values('newbie', 'everyone')
+    assert 'view_channel' not in _expected_values('newbie', 'moderated')
+
+
 def test_non_bot_modes_do_not_manage_view():
-    for mode in ('newbie', 'community', 'appeal'):
+    for mode in ('community', 'appeal'):
         for role_key in ROLE_KEYS:
             assert 'view_channel' not in _expected_values(mode, role_key)
 

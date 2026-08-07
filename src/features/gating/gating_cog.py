@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import re
+from collections import deque
 from datetime import datetime, timedelta, timezone
 
 import discord
@@ -28,6 +29,9 @@ INTRO_REVIEW_PRIMARY_CLIENT = "deepseek"
 INTRO_REVIEW_PRIMARY_MODEL = "deepseek-v4-flash"
 INTRO_REVIEW_FALLBACK_CLIENT = "openai"
 INTRO_REVIEW_FALLBACK_MODEL = "gpt-4o-mini"
+INTRO_REVIEW_CONTEXT_MESSAGES = 8  # member's prior messages included as context
+INTRO_REVIEW_CONCURRENCY = 5        # max concurrent review calls
+DEFAULT_HELP_CHANNEL_ID = 1163250319107555388  # #support
 
 
 def _intro_review_routes() -> list[tuple[str, str]]:
@@ -68,13 +72,19 @@ def _intro_review_routes() -> list[tuple[str, str]]:
 
 _INTRO_REVIEW_PROMPT = """\
 You are a friendly greeter bot for Banodoco, an open-source AI art community on Discord. \
-A new member has posted a message in the introductions channel. Your job is to welcome \
-them if they've written a real intro, or ask them to try again if they haven't.
+A new member has posted in the introductions channel. Your job is to welcome them if \
+they've written a real intro, or clean up their message if it doesn't belong here.
 
 Everyone is welcome here — but this channel is for real introductions, not drive-by \
 one-liners. The bar isn't high, but it exists.
 
 {bot_voice}
+
+## Context
+
+You will be given a member's recent messages in this channel (oldest first), followed by \
+their current message. Judge the CURRENT message in the context of these prior messages. \
+The member is a newcomer who cannot post anywhere else yet.
 
 ## What makes a good intro
 
@@ -90,40 +100,44 @@ using Kohya and just started experimenting with Wan" is.
 
 ## What to do
 
-Respond with exactly one of three actions on the first line, then your message (if any) \
+Respond with exactly one of these actions on the first line, then your message (if any) \
 after a blank line:
 
 KEEP
 (a short, warm, personal welcome)
 
-Use KEEP for: intros with real substance — they say something specific about who they \
-are or what they do. Write a brief personal reply (1-2 sentences) that references \
-something from their intro. If the message has no links and no media attachments, \
-encourage them to share their work — "the community would love to see what you've been \
-making" — but don't make it sound required.
+Use KEEP for: a real introduction with substance — they say something specific about \
+who they are or what they do. Write a brief personal reply (1-2 sentences) referencing \
+something from their intro. If they shared no links or media, encourage them to share \
+their work without making it sound required.
 
 FEEDBACK
 (reply to post in the channel)
 
-Use FEEDBACK for: intros that show some effort but are too vague to act on — generic \
-interest statements without specifics, or a couple of buzzwords with no substance. \
-Write a warm 2-3 sentence reply. Welcome them, then ask for something concrete: what \
-tools they use, what they're building, a link to their work. Frame it as "we'd love to \
-know more" not "you failed."
+Use FEEDBACK for: an attempt at an intro that shows effort but is too vague to act on — \
+generic interest statements without specifics, or a couple of buzzwords with no \
+substance. Write a warm 2-3 sentence reply. Welcome them, then ask for something \
+concrete: what tools they use, what they're building, a link to their work. Frame it as \
+"we'd love to know more" not "you failed."
 
 DELETE
-(message to show the user briefly before their intro is removed)
+(short, friendly note shown briefly before their message is removed)
 
-Use DELETE for: messages that aren't introductions at all. This includes:
-- Spam, ads, completely off-topic messages
-- Bare greetings ("hi", "hello", single emoji)
-- Random questions not about themselves
-- Generic one-liners that say nothing specific ("here to explore AI's potential", \
-"interested in AI art and video generation")
+Use DELETE for messages that are completely off-topic — not an intro and not a support \
+question: spam, ads, bare greetings ("hi", emoji), generic one-liners that say nothing \
+specific, chit-chat, or replies that just thank or acknowledge someone. The note is \
+shown briefly and then deleted; keep it short.
 
-If someone wrote words but said nothing meaningful about themselves — no specifics, \
-no links, no media, no projects — that's a DELETE. Keep the message short and friendly: \
-tell them what a good intro looks like and invite them to try again."""
+REDIRECT
+(short note pointing them to {support_channel}, shown briefly before their message is removed)
+
+Use REDIRECT for a support-oriented message — a question or request for help about the \
+server, permissions, tools, or anything they need assistance with. Delete their message \
+and point them to {support_channel} in the note. This channel is for introductions only. \
+Keep the note short and helpful.
+
+Remember: judge the current message. A bare greeting, off-topic discussion, or a support \
+question is never KEEP."""
 
 class GatingCog(commands.Cog):
     """
@@ -131,7 +145,7 @@ class GatingCog(commands.Cog):
 
     Flow:
       1. on_member_join     → temp welcome ping in gate channel (auto-deleted after 5 min)
-      2. on_message          → track intro, LLM reviews first message (DELETE / FEEDBACK / KEEP)
+      2. on_message          → track intro, LLM reviews every message with member context (KEEP / FEEDBACK / DELETE / REDIRECT)
       3. on_raw_reaction_add → approver reacts on any tracked message → _approve_member
       4. _approve_member     → grant Speaker role, ✅ reaction, DM the member
 
@@ -158,6 +172,13 @@ class GatingCog(commands.Cog):
         # Temp gate-channel welcome pings awaiting deletion: {message_id: (channel_id, sent_at)}
         self._temp_welcomes: dict[int, tuple[int, datetime]] = {}
 
+        # Per-member recent intro-channel messages, oldest→newest, used as review
+        # context. {member_id: deque[(message_id, content)]}
+        self._intro_history: dict[int, deque] = {}
+
+        # Caps concurrent LLM review calls so a burst of messages doesn't pile up.
+        self._review_semaphore = asyncio.Semaphore(INTRO_REVIEW_CONCURRENCY)
+
     # ── Config helpers ──
 
     _ROLE_ENV_MAP = {
@@ -169,6 +190,7 @@ class GatingCog(commands.Cog):
         'gate_channel_id': 'GATE_CHANNEL_ID',
         'intro_channel_id': 'INTRO_CHANNEL_ID',
         'welcome_channel_id': 'WELCOME_CHANNEL_ID',
+        'help_channel_id': 'HELP_CHANNEL_ID',
     }
 
     def _get_guild_config(self, guild_id: int) -> dict:
@@ -179,7 +201,7 @@ class GatingCog(commands.Cog):
         for key in (
             'gate_channel_id', 'intro_channel_id', 'speaker_role_id',
             'approver_role_id', 'super_approver_role_id', 'welcome_channel_id',
-            'newbie_role_id', 'moderated_role_id',
+            'newbie_role_id', 'moderated_role_id', 'help_channel_id',
         ):
             val = server.get(key) if server else None
             if val is None:
@@ -187,6 +209,10 @@ class GatingCog(commands.Cog):
                 env_val = os.getenv(env_key) if env_key else None
                 val = env_val
             cfg[key] = int(val) if val is not None else None
+        # The support channel is always resolvable — newbies get pointed there for
+        # help requests, so fall back to the known default when unconfigured.
+        if cfg.get('help_channel_id') is None:
+            cfg['help_channel_id'] = DEFAULT_HELP_CHANNEL_ID
         return cfg
 
     def _get_gating_config(self, guild_id: int) -> dict | None:
@@ -266,12 +292,6 @@ class GatingCog(commands.Cog):
         if message.channel.id != cfg['intro_channel_id']:
             return
 
-        # Ignore replies to other people (conversations, not intros)
-        if (message.reference and message.reference.resolved
-                and getattr(message.reference.resolved, 'author', None)
-                and message.reference.resolved.author.id != message.author.id):
-            return
-
         # Only track non-Speakers who aren't moderated
         speaker_role = message.guild.get_role(cfg['speaker_role_id'])
         if not speaker_role or speaker_role in message.author.roles:
@@ -290,23 +310,45 @@ class GatingCog(commands.Cog):
             logger.info(f"GatingCog: tracked intro from {message.author} (msg {message.id})")
         self._pending_messages[message.id] = message.author.id
 
-        # LLM review on first message only
-        if not existing:
-            asyncio.create_task(self._review_intro(message))
+        # Review EVERY message (with the member's prior channel context) so
+        # off-topic chatter and support questions get cleaned up too, not just
+        # the first intro.
+        history = self._member_context(message.author.id)
+        self._append_member_history(message.author.id, message)
+        asyncio.create_task(self._review_intro(message, history))
 
-    async def _review_intro(self, message: discord.Message):
-        """Ask the configured LLM routes to review an intro: DELETE / FEEDBACK / KEEP."""
+    def _append_member_history(self, member_id: int, message: discord.Message) -> None:
+        """Record a member's message for use as review context in later reviews."""
+        buf = self._intro_history.setdefault(member_id, deque(maxlen=INTRO_REVIEW_CONTEXT_MESSAGES))
+        buf.append((message.id, message.content or "(no text — media only)"))
+
+    def _member_context(self, member_id: int) -> list[tuple[int, str]]:
+        """Return the member's recent intro-channel messages (oldest→newest)."""
+        return list(self._intro_history.get(member_id, []))
+
+    async def _review_intro(self, message: discord.Message, history: list[tuple[int, str]] | None = None):
+        """Ask the configured LLM routes to review a message: KEEP / FEEDBACK / DELETE / REDIRECT."""
         try:
             has_url = bool(re.search(r'https?://\S+', message.content))
             has_media = bool(message.attachments)
+            cfg = self._get_guild_config(message.guild.id)
+            help_cid = (cfg or {}).get('help_channel_id') or DEFAULT_HELP_CHANNEL_ID
+            support_mention = f"<#{help_cid}>"
+
+            context_lines = [f"- {mid}: {content[:300]}" for mid, content in (history or [])]
+            context = "\n".join(context_lines) or "(none)"
 
             request = {
-                "system_prompt": _INTRO_REVIEW_PROMPT.format(bot_voice=BOT_VOICE),
+                "system_prompt": _INTRO_REVIEW_PROMPT.format(
+                    bot_voice=BOT_VOICE,
+                    support_channel=support_mention,
+                ),
                 "messages": [{
                     "role": "user",
                     "content": (
-                        f"Introduction from {message.author.display_name}:\n\n"
-                        f"{message.content}\n\n"
+                        f"Member: {message.author.display_name}\n\n"
+                        f"Prior messages from this member in this channel (oldest first):\n{context}\n\n"
+                        f"Current message:\n{message.content or '(no text — media only)'}\n\n"
                         f"Has links: {has_url}\n"
                         f"Has media attachments: {has_media}"
                     ),
@@ -314,29 +356,30 @@ class GatingCog(commands.Cog):
                 "max_tokens": 300,
             }
             last_error: Exception | None = None
-            for client_name, model in _intro_review_routes():
-                try:
-                    route_request = dict(request)
-                    if client_name.casefold() == "deepseek":
-                        # Small classification task — DeepSeek reasoning can
-                        # consume the whole 300-token budget and return no text.
-                        route_request["thinking_enabled"] = False
-                    response = await get_llm_response(
-                        client_name=client_name,
-                        model=model,
-                        **route_request,
-                    )
-                    if not response.strip():
-                        raise RuntimeError("empty intro review response")
-                    break
-                except Exception as e:
-                    last_error = e
-                    logger.warning(
-                        "GatingCog: intro review route %s/%s failed for %s: %s",
-                        client_name, model, message.author, e,
-                    )
-            else:
-                raise RuntimeError("all intro review routes failed") from last_error
+            async with self._review_semaphore:
+                for client_name, model in _intro_review_routes():
+                    try:
+                        route_request = dict(request)
+                        if client_name.casefold() == "deepseek":
+                            # Small classification task — DeepSeek reasoning can
+                            # consume the whole 300-token budget and return no text.
+                            route_request["thinking_enabled"] = False
+                        response = await get_llm_response(
+                            client_name=client_name,
+                            model=model,
+                            **route_request,
+                        )
+                        if not response.strip():
+                            raise RuntimeError("empty intro review response")
+                        break
+                    except Exception as e:
+                        last_error = e
+                        logger.warning(
+                            "GatingCog: intro review route %s/%s failed for %s: %s",
+                            client_name, model, message.author, e,
+                        )
+                else:
+                    raise RuntimeError("all intro review routes failed") from last_error
 
             response = response.strip()
             action = response.split('\n')[0].strip().upper()
@@ -350,34 +393,44 @@ class GatingCog(commands.Cog):
             if action == 'KEEP':
                 if body:
                     await message.reply(body, mention_author=True, delete_after=300)
-                logger.info(f"GatingCog: intro reviewer welcomed {message.author}: {body[:200] if body else '(no body)'}")
-
-            elif action == 'DELETE':
-                self._pending_messages.pop(message.id, None)
-                member_id = message.author.id
-                if not any(m == member_id for m in self._pending_messages.values()):
-                    intro = self.db.get_pending_intro_by_member(member_id, guild_id=message.guild.id)
-                    if intro:
-                        self.db.expire_pending_intro(intro['message_id'], guild_id=message.guild.id)
-                try:
-                    await message.delete()
-                    if body:
-                        hint = await message.channel.send(f"{message.author.mention} {body}")
-                        await asyncio.sleep(15)
-                        await hint.delete()
-                except Exception as e:
-                    logger.error(f"GatingCog: failed to delete intro from {message.author}: {e}")
-                logger.info(f"GatingCog: intro reviewer deleted intro from {message.author}: {body[:200] if body else '(no body)'}")
+                logger.info(f"GatingCog: intro reviewer kept {message.author}: {body[:200] if body else '(no body)'}")
 
             elif action == 'FEEDBACK':
                 if body:
                     await message.reply(body, mention_author=True, delete_after=300)
                 logger.info(f"GatingCog: intro reviewer sent feedback to {message.author}: {body[:200] if body else '(no body)'}")
 
+            elif action == 'DELETE':
+                await self._delete_off_topic(message, body, hint_seconds=15)
+                logger.info(f"GatingCog: intro reviewer deleted off-topic msg from {message.author}: {body[:200] if body else '(no body)'}")
+
+            elif action == 'REDIRECT':
+                # Support question — delete it and leave a pointer to #support
+                # visible a little longer so they actually see the link.
+                await self._delete_off_topic(message, body, hint_seconds=60)
+                logger.info(f"GatingCog: intro reviewer redirected support query from {message.author}: {body[:200] if body else '(no body)'}")
+
             else:
                 logger.warning(f"GatingCog: unexpected intro review response for {message.author}: {response[:100]}")
         except Exception as e:
             logger.error(f"GatingCog: failed to review intro from {message.author}: {e}", exc_info=True)
+
+    async def _delete_off_topic(self, message, body: str, hint_seconds: int = 15) -> None:
+        """Delete a message and leave a short, expiring note for the author."""
+        self._pending_messages.pop(message.id, None)
+        member_id = message.author.id
+        if not any(m == member_id for m in self._pending_messages.values()):
+            intro = self.db.get_pending_intro_by_member(member_id, guild_id=message.guild.id)
+            if intro:
+                self.db.expire_pending_intro(intro['message_id'], guild_id=message.guild.id)
+        try:
+            await message.delete()
+            if body:
+                hint = await message.channel.send(f"{message.author.mention} {body}")
+                await asyncio.sleep(hint_seconds)
+                await hint.delete()
+        except Exception as e:
+            logger.error(f"GatingCog: failed to delete intro message from {message.author}: {e}")
 
     # ═══════════════════════════════════════════════════════════════
     #  3. Approver reacts → approve member
