@@ -29,7 +29,7 @@ INTRO_REVIEW_PRIMARY_CLIENT = "deepseek"
 INTRO_REVIEW_PRIMARY_MODEL = "deepseek-v4-flash"
 INTRO_REVIEW_FALLBACK_CLIENT = "openai"
 INTRO_REVIEW_FALLBACK_MODEL = "gpt-4o-mini"
-INTRO_REVIEW_CONTEXT_MESSAGES = 8  # member's prior messages included as context
+INTRO_REVIEW_CONTEXT_MESSAGES = 16  # member's prior messages + bot replies included as context
 INTRO_REVIEW_CONCURRENCY = 5        # max concurrent review calls
 DEFAULT_HELP_CHANNEL_ID = 1163250319107555388  # #support
 
@@ -103,10 +103,11 @@ one-liners. The bar isn't high, but it exists.
 ## Context
 
 You will be given a member's recent messages in this channel (oldest first), followed by \
-their current message. Judge the CURRENT message in the context of these prior messages. \
-The member is a newcomer who cannot post anywhere else yet. Media attached to the current \
-message is the member's own work — treat an attached image or video as the "something they \
-made" half of the intro, not as a request to share more.
+their current message. Lines marked [bot] are your own previous replies to this member — \
+remember what you already said. Judge the CURRENT message in the context of these prior \
+messages. The member is a newcomer who cannot post anywhere else yet. Media attached to the \
+current message is the member's own work — treat an attached image or video as the \
+"something they made" half of the intro, not as a request to share more.
 
 ## What makes a good intro
 
@@ -168,8 +169,20 @@ server, permissions, tools, or anything they need assistance with. Delete their 
 and point them to {support_channel} in the note. This channel is for introductions only. \
 Keep the note short and helpful.
 
+NO_REPLY
+(do nothing — leave the message, post no reply)
+
+Use NO_REPLY for: a message that's fine in the channel but needs no response from \
+you — a thanks, an acknowledgement, or a small follow-up to your own previous reply \
+where saying anything would be noise. If you've already replied to this member and \
+they've just continued the exchange, prefer NO_REPLY over repeating yourself. Do not \
+use NO_REPLY to dodge the other actions: off-topic content still gets DELETE, support \
+questions still get REDIRECT, and a first real intro still gets a welcome (KEEP).
+
 Remember: judge the current message. A bare greeting, off-topic discussion, or a support \
-question is never KEEP."""
+question is never KEEP. Don't repeat what you already said to this member — if you've \
+already welcomed them or asked for specifics, build on that exchange instead of starting \
+over."""
 
 class GatingCog(commands.Cog):
     """
@@ -177,7 +190,7 @@ class GatingCog(commands.Cog):
 
     Flow:
       1. on_member_join     → temp welcome ping in gate channel (auto-deleted after 5 min)
-      2. on_message          → track intro, LLM reviews every message with member context (KEEP / FEEDBACK / DELETE / REDIRECT)
+      2. on_message          → track intro, LLM reviews every message with member context (KEEP / FEEDBACK / DELETE / REDIRECT / NO_REPLY)
       3. on_raw_reaction_add → approver reacts on any tracked message → _approve_member
       4. _approve_member     → grant Speaker role, ✅ reaction, welcome post + DM
 
@@ -204,8 +217,9 @@ class GatingCog(commands.Cog):
         # Temp gate-channel welcome pings awaiting deletion: {message_id: (channel_id, sent_at)}
         self._temp_welcomes: dict[int, tuple[int, datetime]] = {}
 
-        # Per-member recent intro-channel messages, oldest→newest, used as review
-        # context. {member_id: deque[(message_id, content)]}
+        # Per-member recent intro-channel messages (member posts AND the bot's own
+        # replies, the latter flagged is_bot), oldest→newest, used as review
+        # context. {member_id: deque[(message_id, content, is_bot)]}
         self._intro_history: dict[int, deque] = {}
 
         # Caps concurrent LLM review calls so a burst of messages doesn't pile up.
@@ -316,13 +330,21 @@ class GatingCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        if not self.db or message.author.bot or not message.guild:
+        if not self.db or not message.guild:
             return
         guild_id = message.guild.id
         cfg = self._get_gating_config(guild_id)
         if not cfg:
             return
         if message.channel.id != cfg['intro_channel_id']:
+            return
+
+        # The bot's own replies to a tracked member are recorded as review
+        # context so later reviews see both sides of the conversation — what the
+        # bot already said, and what the member did after. Other bot posts
+        # (approval embeds, expiring notes) aren't replies and fall through.
+        if message.author.bot:
+            self._record_bot_reply_context(message)
             return
 
         # Only track non-Speakers who aren't moderated
@@ -353,14 +375,38 @@ class GatingCog(commands.Cog):
     def _append_member_history(self, member_id: int, message: discord.Message) -> None:
         """Record a member's message for use as review context in later reviews."""
         buf = self._intro_history.setdefault(member_id, deque(maxlen=INTRO_REVIEW_CONTEXT_MESSAGES))
-        buf.append((message.id, message.content or "(no text — media only)"))
+        buf.append((message.id, message.content or "(no text — media only)", False))
 
-    def _member_context(self, member_id: int) -> list[tuple[int, str]]:
-        """Return the member's recent intro-channel messages (oldest→newest)."""
+    def _member_context(self, member_id: int) -> list[tuple[int, str, bool]]:
+        """Return the member's recent intro-channel messages (oldest→newest).
+
+        Entries are (message_id, content, is_bot) — ``is_bot`` marks the bot's
+        own replies so the reviewer can tell the two sides apart.
+        """
         return list(self._intro_history.get(member_id, []))
 
-    async def _review_intro(self, message: discord.Message, history: list[tuple[int, str]] | None = None):
-        """Ask the configured LLM routes to review a message: KEEP / FEEDBACK / DELETE / REDIRECT."""
+    def _record_bot_reply_context(self, message: discord.Message) -> None:
+        """Record the bot's own reply to a member for future review context.
+
+        Only THIS bot's replies to a tracked member's intro-channel message
+        count — those are the agent's previous words to that member. Other bots'
+        messages (which would be misattributed) and non-reply bot posts
+        (approval embeds, expiring notes — no resolvable member) are skipped.
+        """
+        bot_user_id = getattr(getattr(self.bot, 'user', None), 'id', None)
+        if bot_user_id is None or message.author.id != bot_user_id:
+            return
+        ref = message.reference
+        if not ref or not ref.message_id:
+            return
+        member_id = self._pending_messages.get(int(ref.message_id))
+        if member_id is None:
+            return
+        buf = self._intro_history.setdefault(member_id, deque(maxlen=INTRO_REVIEW_CONTEXT_MESSAGES))
+        buf.append((message.id, message.content or "(no text — media only)", True))
+
+    async def _review_intro(self, message: discord.Message, history: list[tuple[int, str, bool]] | None = None):
+        """Ask the configured LLM routes to review a message: KEEP / FEEDBACK / DELETE / REDIRECT / NO_REPLY."""
         try:
             has_url = bool(re.search(r'https?://\S+', message.content))
             attachments = _format_attachments(message)
@@ -370,7 +416,10 @@ class GatingCog(commands.Cog):
             gate_cid = (cfg or {}).get('gate_channel_id')
             gate_mention = f"<#{gate_cid}>" if gate_cid else "the become-a-speaker channel"
 
-            context_lines = [f"- {mid}: {content[:300]}" for mid, content in (history or [])]
+            context_lines = []
+            for mid, content, is_bot in (history or []):
+                role = 'bot' if is_bot else 'member'
+                context_lines.append(f"- {mid} [{role}]: {content[:300]}")
             context = "\n".join(context_lines) or "(none)"
 
             request = {
@@ -446,6 +495,12 @@ class GatingCog(commands.Cog):
                 await self._delete_off_topic(message, body)
                 logger.info(f"GatingCog: intro reviewer redirected support query from {message.author}: {body[:200] if body else '(no body)'}")
 
+            elif action == 'NO_REPLY':
+                # Deliberate no-op: keep the message and the pending intro, post
+                # nothing. The member-still-pending guard above already bailed if
+                # they were approved while the review was in flight.
+                logger.info(f"GatingCog: intro reviewer stayed silent for {message.author}: {body[:200] if body else '(no note)'}")
+
             else:
                 logger.warning(f"GatingCog: unexpected intro review response for {message.author}: {response[:100]}")
         except Exception as e:
@@ -459,6 +514,11 @@ class GatingCog(commands.Cog):
             intro = self.db.get_pending_intro_by_member(member_id, guild_id=message.guild.id)
             if intro:
                 self.db.expire_pending_intro(intro['message_id'], guild_id=message.guild.id)
+            # Nothing left for this member — drop their whole review context so a
+            # future re-intro doesn't inherit this deleted conversation.
+            self._remove_member_messages(member_id)
+        else:
+            self._drop_member_message_context(member_id, message.id)
         try:
             await message.delete()
             if body:
@@ -749,14 +809,30 @@ class GatingCog(commands.Cog):
             if intro:
                 self.db.expire_pending_intro(intro['message_id'], guild_id=intro.get('guild_id'))
                 logger.info(f"GatingCog: expired pending intro for member {member_id} (all messages deleted)")
+            self._remove_member_messages(member_id)
         else:
             logger.info(f"GatingCog: removed deleted message {payload.message_id} from tracking for member {member_id}")
+            self._drop_member_message_context(member_id, int(payload.message_id))
+
+    def _drop_member_message_context(self, member_id: int, message_id: int) -> None:
+        """Remove one deleted message from a member's review context.
+
+        Used when the member still has other tracked messages; the last-message-
+        gone case is handled by _remove_member_messages clearing the whole buffer.
+        """
+        buf = self._intro_history.get(member_id)
+        if not buf:
+            return
+        kept = deque((mid, content, is_bot) for mid, content, is_bot in buf if mid != message_id)
+        if len(kept) != len(buf):
+            self._intro_history[member_id] = kept
 
     def _remove_member_messages(self, member_id: int):
-        """Remove all in-memory tracked messages for a member."""
+        """Remove all in-memory tracked messages and review context for a member."""
         to_remove = [mid for mid, m in self._pending_messages.items() if m == member_id]
         for mid in to_remove:
             del self._pending_messages[mid]
+        self._intro_history.pop(member_id, None)
 
     # ═══════════════════════════════════════════════════════════════
     #  Background tasks

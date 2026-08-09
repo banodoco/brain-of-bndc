@@ -914,3 +914,275 @@ def test_format_attachments_caps_at_five():
     atts = [_att(f"f{i}.mp4", url=f"https://x/{i}") for i in range(7)]
     out = _format_attachments(SimpleNamespace(attachments=atts))
     assert out.count("MB") == 5
+
+
+# =============================================================================
+# Bot-reply review context — the reviewer sees both sides of the conversation
+#
+# Previously _intro_history only held the member's own messages, so the reviewer
+# had no memory of what it already said to them (and could repeat itself). The
+# bot's own replies in the intro channel that reference a tracked member message
+# are now recorded with is_bot=True so later reviews see what the bot said and
+# what the member did after. Deletion paths clear the context so a deleted
+# conversation can't leak into a future review.
+# =============================================================================
+
+
+def _bot_reply_message(msg_id, replied_to_id, content, author_id=42):
+    return SimpleNamespace(
+        id=msg_id,
+        guild=SimpleNamespace(id=_GUILD_ID),
+        channel=SimpleNamespace(id=_INTRO_CHANNEL_ID),
+        author=SimpleNamespace(id=author_id, bot=True),
+        content=content,
+        reference=SimpleNamespace(message_id=replied_to_id),
+    )
+
+
+def _member_message(msg_id, content):
+    return SimpleNamespace(
+        id=msg_id,
+        author=SimpleNamespace(id=_MEMBER_ID, bot=False),
+        content=content,
+    )
+
+
+def test_bot_reply_recorded_as_context_with_role():
+    cog, _channel = _make_cog_for_recovery()
+    cog._pending_messages[100] = _MEMBER_ID
+    cog._append_member_history(_MEMBER_ID, _member_message(100, "I train LoRAs with Kohya"))
+
+    cog._record_bot_reply_context(
+        _bot_reply_message(9001, 100, "Nice, what models are you training?")
+    )
+
+    assert cog._member_context(_MEMBER_ID) == [
+        (100, "I train LoRAs with Kohya", False),
+        (9001, "Nice, what models are you training?", True),
+    ]
+
+
+def test_other_bot_reply_not_recorded():
+    cog, _channel = _make_cog_for_recovery()
+    cog._pending_messages[100] = _MEMBER_ID
+
+    # A different bot replying to the member's message must NOT be attributed
+    # as this reviewer's own reply.
+    cog._record_bot_reply_context(_bot_reply_message(9004, 100, "hey!", author_id=999))
+
+    assert _MEMBER_ID not in cog._intro_history
+
+
+def test_bot_reply_without_reference_skipped():
+    cog, _channel = _make_cog_for_recovery()
+    msg = _bot_reply_message(9002, 100, "welcome!")
+    msg.reference = None
+
+    cog._record_bot_reply_context(msg)
+
+    assert _MEMBER_ID not in cog._intro_history
+
+
+def test_bot_reply_to_untracked_message_skipped():
+    cog, _channel = _make_cog_for_recovery()
+    # No _pending_messages entry for 100 → the reply can't be attributed.
+    cog._record_bot_reply_context(_bot_reply_message(9003, 100, "welcome!"))
+
+    assert _MEMBER_ID not in cog._intro_history
+
+
+def test_bot_reply_shares_member_context_cap():
+    from src.features.gating.gating_cog import INTRO_REVIEW_CONTEXT_MESSAGES
+
+    cog, _channel = _make_cog_for_recovery()
+    cog._pending_messages[100] = _MEMBER_ID
+    for i in range(INTRO_REVIEW_CONTEXT_MESSAGES):
+        mid = 100 + i
+        cog._pending_messages[mid] = _MEMBER_ID
+        cog._append_member_history(_MEMBER_ID, _member_message(mid, f"msg {i}"))
+
+    # Bot reply counts toward the same window → oldest member msg evicted.
+    cog._record_bot_reply_context(_bot_reply_message(9999, 100, "hey"))
+
+    context = cog._member_context(_MEMBER_ID)
+    assert len(context) == INTRO_REVIEW_CONTEXT_MESSAGES
+    assert context[0][0] == 101  # msg 100 evicted
+    assert context[-1] == (9999, "hey", True)
+
+
+def test_on_message_bot_reply_records_context_without_tracking_intro(fresh_event_loop):
+    cog, _channel = _make_cog_for_recovery()
+    cog._pending_messages[100] = _MEMBER_ID
+
+    fresh_event_loop.run_until_complete(
+        cog.on_message(_bot_reply_message(9001, 100, "Nice, what models are you training?"))
+    )
+
+    # Recorded as context, but never treated as a pending intro.
+    assert (9001, "Nice, what models are you training?", True) in cog._member_context(_MEMBER_ID)
+    cog.db.get_pending_intro_by_member.assert_not_called()
+    cog.db.create_pending_intro.assert_not_called()
+    assert 9001 not in cog._pending_messages
+
+
+def test_review_context_renders_role_labels(fresh_event_loop, monkeypatch):
+    from src.features.gating import gating_cog as gc
+
+    cog, _channel = _make_cog_for_recovery()
+    cog._get_guild_config = MagicMock(
+        return_value={'help_channel_id': 999, 'gate_channel_id': 100}
+    )
+    cog._pending_messages[100] = _MEMBER_ID
+    cog._append_member_history(_MEMBER_ID, _member_message(100, "hi there"))
+    cog._record_bot_reply_context(_bot_reply_message(9001, 100, "welcome!"))
+
+    captured = {}
+
+    async def fake_llm(**kwargs):
+        captured['content'] = kwargs['messages'][0]['content']
+        return "KEEP\nwelcome aboard!"
+
+    monkeypatch.setattr(gc, 'get_llm_response', fake_llm)
+
+    message = SimpleNamespace(
+        id=100,
+        author=SimpleNamespace(id=_MEMBER_ID, display_name="Newbie", bot=False),
+        guild=SimpleNamespace(id=_GUILD_ID),
+        content="hi there",
+        attachments=[],
+        reply=AsyncMock(),
+    )
+    fresh_event_loop.run_until_complete(
+        cog._review_intro(message, history=cog._member_context(_MEMBER_ID))
+    )
+
+    assert "[member]: hi there" in captured['content']
+    assert "[bot]: welcome!" in captured['content']
+
+
+def test_intro_review_prompt_includes_no_reply_action():
+    from src.features.gating.gating_cog import _INTRO_REVIEW_PROMPT
+
+    assert "NO_REPLY" in _INTRO_REVIEW_PROMPT
+
+
+def test_review_no_reply_posts_nothing_and_keeps_message(fresh_event_loop, monkeypatch):
+    from src.features.gating import gating_cog as gc
+
+    cog, _channel = _make_cog_for_recovery()
+    cog._get_guild_config = MagicMock(
+        return_value={'help_channel_id': 999, 'gate_channel_id': 100}
+    )
+    cog._pending_messages[100] = _MEMBER_ID
+    cog._append_member_history(_MEMBER_ID, _member_message(100, "thanks!"))
+    cog.db.expire_pending_intro = MagicMock()
+
+    async def fake_llm(**kwargs):
+        return "NO_REPLY\n(no note needed)"
+
+    monkeypatch.setattr(gc, 'get_llm_response', fake_llm)
+
+    message = SimpleNamespace(
+        id=100,
+        author=SimpleNamespace(id=_MEMBER_ID, display_name="Newbie", bot=False),
+        guild=SimpleNamespace(id=_GUILD_ID),
+        content="thanks!",
+        attachments=[],
+        reply=AsyncMock(),
+        delete=AsyncMock(),
+    )
+    fresh_event_loop.run_until_complete(cog._review_intro(message))
+
+    # No reply, no deletion, pending intro and review context untouched.
+    message.reply.assert_not_awaited()
+    message.delete.assert_not_awaited()
+    assert cog._pending_messages == {100: _MEMBER_ID}
+    assert cog._member_context(_MEMBER_ID) == [(100, "thanks!", False)]
+    cog.db.expire_pending_intro.assert_not_called()
+
+
+def test_remove_member_messages_clears_review_context():
+    cog, _channel = _make_cog_for_recovery()
+    cog._pending_messages[100] = _MEMBER_ID
+    cog._append_member_history(_MEMBER_ID, _member_message(100, "hi"))
+    cog._record_bot_reply_context(_bot_reply_message(9001, 100, "welcome!"))
+
+    cog._remove_member_messages(_MEMBER_ID)
+
+    assert cog._pending_messages == {}
+    assert _MEMBER_ID not in cog._intro_history
+
+
+def _off_topic_message(msg_id):
+    """A member message wired for _delete_off_topic (async delete + hint send)."""
+    channel = SimpleNamespace(
+        send=AsyncMock(return_value=SimpleNamespace(delete=AsyncMock())),
+    )
+    return SimpleNamespace(
+        id=msg_id,
+        author=SimpleNamespace(id=_MEMBER_ID, bot=False, mention=f"<@{_MEMBER_ID}>"),
+        guild=SimpleNamespace(id=_GUILD_ID),
+        channel=channel,
+        content="spam",
+        delete=AsyncMock(),
+    )
+
+
+def test_delete_off_topic_clears_history_when_last_message(fresh_event_loop):
+    cog, _channel = _make_cog_for_recovery()
+    cog._pending_messages[100] = _MEMBER_ID
+    cog._append_member_history(_MEMBER_ID, _member_message(100, "hi"))
+    cog._record_bot_reply_context(_bot_reply_message(9001, 100, "welcome!"))
+
+    fresh_event_loop.run_until_complete(
+        cog._delete_off_topic(_off_topic_message(100), "bye", hint_seconds=0)
+    )
+
+    # Last tracked message gone → whole conversation dropped, so a future
+    # re-intro can't inherit the deleted exchange.
+    assert cog._pending_messages == {}
+    assert _MEMBER_ID not in cog._intro_history
+
+
+def test_delete_off_topic_drops_only_deleted_message(fresh_event_loop):
+    cog, _channel = _make_cog_for_recovery()
+    cog._pending_messages[100] = _MEMBER_ID
+    cog._pending_messages[101] = _MEMBER_ID
+    cog._append_member_history(_MEMBER_ID, _member_message(100, "first"))
+    cog._append_member_history(_MEMBER_ID, _member_message(101, "second"))
+
+    fresh_event_loop.run_until_complete(
+        cog._delete_off_topic(_off_topic_message(100), "bye", hint_seconds=0)
+    )
+
+    assert cog._pending_messages == {101: _MEMBER_ID}
+    assert cog._member_context(_MEMBER_ID) == [(101, "second", False)]
+
+
+def test_on_raw_message_delete_clears_history_when_last_message(fresh_event_loop):
+    cog, _channel = _make_cog_for_recovery()
+    cog._pending_messages[100] = _MEMBER_ID
+    cog._append_member_history(_MEMBER_ID, _member_message(100, "hi"))
+    cog._record_bot_reply_context(_bot_reply_message(9001, 100, "welcome!"))
+
+    fresh_event_loop.run_until_complete(
+        cog.on_raw_message_delete(SimpleNamespace(message_id=100, guild_id=_GUILD_ID))
+    )
+
+    assert cog._pending_messages == {}
+    assert _MEMBER_ID not in cog._intro_history
+
+
+def test_on_raw_message_delete_drops_only_deleted_message(fresh_event_loop):
+    cog, _channel = _make_cog_for_recovery()
+    cog._pending_messages[100] = _MEMBER_ID
+    cog._pending_messages[101] = _MEMBER_ID
+    cog._append_member_history(_MEMBER_ID, _member_message(100, "first"))
+    cog._append_member_history(_MEMBER_ID, _member_message(101, "second"))
+
+    fresh_event_loop.run_until_complete(
+        cog.on_raw_message_delete(SimpleNamespace(message_id=100, guild_id=_GUILD_ID))
+    )
+
+    assert cog._pending_messages == {101: _MEMBER_ID}
+    assert cog._member_context(_MEMBER_ID) == [(101, "second", False)]
