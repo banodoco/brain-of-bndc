@@ -68,6 +68,26 @@ def _intro_review_routes() -> list[tuple[str, str]]:
     return routes
 
 
+def _format_attachments(message: discord.Message) -> str:
+    """Format a message's media attachments for the intro-review prompt.
+
+    The reviewer is text-only — it can't play a video or render an image on its
+    own — so instead of a bare boolean we hand it the concrete details (filename,
+    type, dimensions, size, URL) and let it decide whether the attached media is
+    the member's work.
+    """
+    if not message.attachments:
+        return "none"
+    parts = []
+    for a in message.attachments[:5]:
+        dims = f" {a.width}x{a.height}" if a.width and a.height else ""
+        size_mb = (a.size or 0) / (1024 * 1024)
+        parts.append(
+            f"{a.filename} ({a.content_type or 'unknown'}{dims}, {size_mb:.1f}MB) <{a.url}>"
+        )
+    return "; ".join(parts)
+
+
 # ── Prompt used by the LLM reviewer for new introductions ──
 
 _INTRO_REVIEW_PROMPT = """\
@@ -84,19 +104,25 @@ one-liners. The bar isn't high, but it exists.
 
 You will be given a member's recent messages in this channel (oldest first), followed by \
 their current message. Judge the CURRENT message in the context of these prior messages. \
-The member is a newcomer who cannot post anywhere else yet.
+The member is a newcomer who cannot post anywhere else yet. Media attached to the current \
+message is the member's own work — treat an attached image or video as the "something they \
+made" half of the intro, not as a request to share more.
 
 ## What makes a good intro
 
-A good intro tells the community something specific about the person. It includes at \
-least one of:
-- A specific project, tool, or technique they're working with or exploring
-- Links to their work, portfolio, social media, GitHub, etc.
-- Images or videos of things they've made
-- Enough concrete detail that you could distinguish them from any other newcomer
+Becoming a Speaker is a two-part ask, and both parts matter:
 
-"I'm into AI art" is not an intro. "I've been training LoRAs for stylised portraits \
-using Kohya and just started experimenting with Wan" is.
+1. A short intro — a few specific sentences about who they are or what they're \
+into. "I'm into AI art" is not an intro. "I've been training LoRAs for stylised \
+portraits using Kohya and just started experimenting with Wan" is.
+2. Something they made — a link, image, video, workflow, model, or even a silly \
+generation. It doesn't need to be polished; rough and unfinished work is welcome. \
+"I made this yesterday and it's not very good" is fine — the point is showing real \
+work, not showing off.
+
+If they haven't made anything yet, that's fine too — encourage them to share what \
+they have, or what they're working toward. Early and imperfect work is welcome here; \
+we're looking for substance and a genuine interest in building, not a portfolio.
 
 ## What to do
 
@@ -107,20 +133,23 @@ KEEP
 (a short, warm, personal welcome)
 
 Use KEEP for: a real introduction with substance — they say something specific about \
-who they are or what they do. Write a brief personal reply (1-2 sentences) referencing \
-something from their intro. If they shared no links or media, gently encourage them to \
-share their work — it helps people understand their style, approach, or what they're \
-into. Do not promise feedback, reactions, or anything in return for sharing.
+who they are or what they do, ideally with something they've made (a link, image, \
+video, workflow, or even a rough early attempt). Write a brief personal reply (1-2 \
+sentences) referencing something from their intro. If they haven't shared anything \
+they've made, gently encourage them to — even if it's rough or they don't think it's \
+good. That's the "something you made" half of becoming a Speaker. Do not promise \
+feedback, reactions, or anything in return for sharing.
 
 FEEDBACK
 (reply to post in the channel)
 
 Use FEEDBACK for: an attempt at an intro that shows effort but is too vague to act on — \
-generic interest statements without specifics, or a couple of buzzwords with no \
-substance. Write a warm 2-3 sentence reply. Welcome them, then ask for something \
-concrete: what tools they use, what they're building, a link to their work. Frame it as \
-"we'd love to know more" not "you failed." Point them to {gate_channel} for how to \
-write a proper intro.
+generic interest statements without specifics, a couple of buzzwords with no substance, \
+or a lazy one-liner that doesn't say who they are. Write a warm 2-3 sentence reply. \
+Welcome them, then ask for something concrete: what tools they use, what they're \
+building, and something they've made — even a rough first attempt, or what they're \
+working toward. Frame it as "we'd love to know more" not "you failed." Point them to \
+{gate_channel} for how to write a proper intro.
 
 DELETE
 (short, friendly note shown briefly before their message is removed)
@@ -272,11 +301,9 @@ class GatingCog(commands.Cog):
                 if hist_msg.author.id == self.bot.user.id:
                     reference = hist_msg
                     break
-            help_cid = (cfg or {}).get('help_channel_id') or DEFAULT_HELP_CHANNEL_ID
-            support_mention = f"<#{help_cid}>"
             msg = await channel.send(
                 f"Hi {member.mention}, welcome! If you'd like to speak everywhere, "
-                f"see above \U0001f446 — you can also get help in {support_mention} immediately.",
+                f"see above \U0001f446.",
                 reference=reference,
             )
             self._temp_welcomes[msg.id] = (channel.id, msg.created_at)
@@ -336,7 +363,7 @@ class GatingCog(commands.Cog):
         """Ask the configured LLM routes to review a message: KEEP / FEEDBACK / DELETE / REDIRECT."""
         try:
             has_url = bool(re.search(r'https?://\S+', message.content))
-            has_media = bool(message.attachments)
+            attachments = _format_attachments(message)
             cfg = self._get_guild_config(message.guild.id)
             help_cid = (cfg or {}).get('help_channel_id') or DEFAULT_HELP_CHANNEL_ID
             support_mention = f"<#{help_cid}>"
@@ -359,7 +386,7 @@ class GatingCog(commands.Cog):
                         f"Prior messages from this member in this channel (oldest first):\n{context}\n\n"
                         f"Current message:\n{message.content or '(no text — media only)'}\n\n"
                         f"Has links: {has_url}\n"
-                        f"Has media attachments: {has_media}"
+                        f"Media attachments: {attachments}"
                     ),
                 }],
                 "max_tokens": 300,

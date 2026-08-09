@@ -861,3 +861,56 @@ def test_public_welcome_failure_does_not_block_approval_dm(fresh_event_loop):
     member.send.assert_awaited_once_with(
         "Hey New Member! You've been approved to speak in **BNDC**. Welcome aboard 🎉"
     )
+
+
+# =============================================================================
+# _format_attachments — give the text-only intro reviewer the media details
+#
+# The reviewer can't play a video or render an image, so we hand it filename,
+# type, dimensions, size, and URL instead of a bare boolean. These tests pin
+# that formatting so the reviewer can tell the attached media IS the member's
+# work (the helium video-intro regression).
+# =============================================================================
+
+
+def _att(filename, *, content_type="video/mp4", size=1024 * 1024,
+         width=None, height=None, url="https://cdn.discordapp.com/attachments/1/x"):
+    return SimpleNamespace(
+        filename=filename, content_type=content_type, size=size,
+        width=width, height=height, url=url,
+    )
+
+
+def test_format_attachments_none():
+    from src.features.gating.gating_cog import _format_attachments
+    assert _format_attachments(SimpleNamespace(attachments=[])) == "none"
+
+
+def test_format_attachments_video_includes_type_size_and_url():
+    from src.features.gating.gating_cog import _format_attachments
+    att = _att("movie.mp4", content_type="video/mp4",
+               size=int(12.5 * 1024 * 1024),
+               url="https://cdn.discordapp.com/attachments/9/movie.mp4")
+    out = _format_attachments(SimpleNamespace(attachments=[att]))
+    assert "movie.mp4" in out
+    assert "video/mp4" in out
+    assert "12.5MB" in out
+    assert "<https://cdn.discordapp.com/attachments/9/movie.mp4>" in out
+
+
+def test_format_attachments_image_includes_dimensions():
+    from src.features.gating.gating_cog import _format_attachments
+    att = _att("shot.png", content_type="image/png", size=204800,
+               width=1920, height=1080)
+    out = _format_attachments(SimpleNamespace(attachments=[att]))
+    assert "shot.png" in out
+    assert "image/png" in out
+    assert "1920x1080" in out
+    assert "0.2MB" in out
+
+
+def test_format_attachments_caps_at_five():
+    from src.features.gating.gating_cog import _format_attachments
+    atts = [_att(f"f{i}.mp4", url=f"https://x/{i}") for i in range(7)]
+    out = _format_attachments(SimpleNamespace(attachments=atts))
+    assert out.count("MB") == 5
