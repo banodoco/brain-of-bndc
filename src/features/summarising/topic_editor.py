@@ -65,6 +65,9 @@ WRITE_TOOL_NAMES = {
 
 LEGACY_POST_TOOL_NAMES = {"post_topic", "post_simple_topic", "post_sectioned_topic"}
 DRAFT_TOOL_NAMES = {"create_draft", "edit_draft", "validate_draft", "preview_draft", "submit_draft", "abandon_draft"}
+# Fields an edit_draft patch may set on a card. Patches that omit a field leave
+# that card's existing value intact (per-card partial overlay).
+_DRAFT_CARD_PATCH_FIELDS = ("angle", "body", "source_message_ids", "media_ids")
 LEGACY_POST_MODES = {"disabled", "draft_adapter", "direct"}
 TOPIC_EDITOR_DRAFT_TEMPLATES = {
     "creation_release",
@@ -95,7 +98,9 @@ Use the workflow in order:
 4. Validate: call validate_draft.
 5. Revise: when validation returns errors or meaningful warnings, call
    edit_draft on the same draft. Do not start a replacement draft for normal
-   revision.
+   revision. The `cards` patch is a positional overlay: resend only the card(s)
+   and field(s) you are changing; everything you omit stays intact. Remove a
+   card with remove_card_indices, add one with append_cards.
 6. Preview: call preview_draft and inspect the exact text/media units.
 7. Submit: call submit_draft only after a valid preview. Submit refuses stale
    or invalid previews.
@@ -289,7 +294,7 @@ TOPIC_EDITOR_TOOLS: List[Dict[str, Any]] = [
                 "draft_id": {"type": "string"},
                 "patch": {
                     "type": "object",
-                    "description": "Partial patch over draft_json. cards[].media_ids must be message_id:kind:index (kinds attachment|embed|external). Restart inline citation numbering at [1] for every card; [N] maps to the Nth entry of that card's source_message_ids.",
+                    "description": "Partial patch over draft_json. `cards` is a positional overlay: the card at array position i merges onto the existing card at that position — only the fields you include change and cards you do not mention are preserved, so never resend the whole list to touch one card. Remove cards with `remove_card_indices` (original indices); add new full cards with `append_cards`. Top-level headline/dek/editor_note replace wholesale. Legacy single-field form cards[i].field (e.g. cards[2].body) also works. cards[].media_ids must be message_id:kind:index (kinds attachment|embed|external). Restart inline citation numbering at [1] for every card; [N] maps to the Nth entry of that card's source_message_ids.",
                 },
                 "reason": {"type": "string"},
             },
@@ -2179,21 +2184,107 @@ class TopicEditor:
         return updated
 
     def _apply_draft_patch(self, draft_json: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, Any]:
+        # Deterministic application order (independent of JSON key order):
+        #   1. top-level scalar fields
+        #   2. remove_card_indices (by ORIGINAL draft index)
+        #   3. `cards` positional overlays (against the post-removal list)
+        #   4. legacy dotted cards[i].field keys (post-removal index)
+        #   5. append_cards
         updated = json.loads(json.dumps(draft_json))
-        for key, value in (patch or {}).items():
-            if key == "cards" and isinstance(value, list):
-                updated["cards"] = value
-            elif key in {"topic_key", "template", "headline", "dek", "editor_note"}:
-                updated[key] = value
-            elif key.startswith("cards[") and "]." in key:
-                match = re.match(r"cards\[(\d+)\]\.(\w+)$", key)
-                if not match:
-                    continue
-                idx = int(match.group(1))
-                field_name = match.group(2)
-                cards = updated.setdefault("cards", [])
-                if 0 <= idx < len(cards) and isinstance(cards[idx], dict):
-                    cards[idx][field_name] = value
+        patch = patch or {}
+
+        for key in ("topic_key", "template", "headline", "dek", "editor_note"):
+            if key in patch:
+                updated[key] = patch[key]
+
+        cards = [c for c in (updated.get("cards") or []) if isinstance(c, dict)]
+
+        def _is_complete_card(card: Dict[str, Any]) -> bool:
+            # Mirror topic_editor_draft_from_json's source filtering so
+            # source_message_ids: [""] / [None] does NOT count as complete.
+            body = str(card.get("body") or "").strip()
+            sources = [s for s in (card.get("source_message_ids") or []) if s]
+            return bool(body) and bool(sources)
+
+        # 1. Removals by original index (deduped — a duplicate index must not
+        #    remove two cards). Removal is an explicit operation
+        #    (remove_card_indices) so the `cards` array can stay a pure
+        #    per-card overlay — array length is never overloaded to mean
+        #    "drop the unlisted cards".
+        remove_indices = sorted(
+            {
+                int(i)
+                for i in (patch.get("remove_card_indices") or [])
+                if isinstance(i, (int, str)) and str(i).lstrip("-").isdigit()
+            },
+            reverse=True,
+        )
+        for idx in remove_indices:
+            if 0 <= idx < len(cards):
+                cards.pop(idx)
+
+        # 2. Positional per-card overlays: the patch card at array position i
+        #    merges onto the card now at position i, preserving any field the
+        #    patch omits (angle, body, source_message_ids, media_ids). Cards the
+        #    patch does not mention are untouched — editing one card's body must
+        #    not wipe the other cards or their sources.
+        pos = 0
+        for patch_card in patch.get("cards") or []:
+            if not isinstance(patch_card, dict):
+                logger.warning(
+                    "TopicEditor edit_draft patch: ignoring non-object card entry %r", patch_card
+                )
+                continue
+            if pos < len(cards):
+                base = dict(cards[pos])
+                for fk in _DRAFT_CARD_PATCH_FIELDS:
+                    if fk in patch_card:
+                        base[fk] = patch_card[fk]
+                cards[pos] = base
+            else:
+                # Positions beyond the existing list are out of contract for an
+                # overlay — `cards` edits existing cards, append_cards adds new
+                # ones. Keep the entry only if it is a complete card (body +
+                # sources) so a mistaken partial overlay never synthesizes an
+                # invalid card; anything else is dropped and logged.
+                appended = {fk: patch_card[fk] for fk in _DRAFT_CARD_PATCH_FIELDS if fk in patch_card}
+                if _is_complete_card(appended):
+                    cards.append(appended)
+                else:
+                    logger.warning(
+                        "TopicEditor edit_draft patch: dropped beyond-list card without body/sources "
+                        "(pos=%d); use append_cards for new cards", pos
+                    )
+            pos += 1
+
+        # 3. Legacy dotted keys (cards[i].field), applied after removals and
+        #    array overlays so their index is unambiguous.
+        for key, value in patch.items():
+            match = re.match(r"cards\[(\d+)\]\.(\w+)$", key)
+            if not match:
+                continue
+            idx = int(match.group(1))
+            field_name = match.group(2)
+            if 0 <= idx < len(cards) and isinstance(cards[idx], dict):
+                cards[idx][field_name] = value
+
+        # 4. Append explicit new cards.
+        for patch_card in patch.get("append_cards") or []:
+            if not isinstance(patch_card, dict):
+                logger.warning(
+                    "TopicEditor edit_draft patch: ignoring non-object append_cards entry %r", patch_card
+                )
+                continue
+            full_card = {fk: patch_card[fk] for fk in _DRAFT_CARD_PATCH_FIELDS if fk in patch_card}
+            if _is_complete_card(full_card):
+                cards.append(full_card)
+            else:
+                logger.warning(
+                    "TopicEditor edit_draft patch: append_cards entry lacks body or resolvable sources "
+                    "and was dropped: %r", patch_card
+                )
+
+        updated["cards"] = cards
         return canonical_topic_editor_draft_json(topic_editor_draft_from_json(updated))
 
     def _legacy_post_refusal(self, call: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:

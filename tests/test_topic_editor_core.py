@@ -2253,3 +2253,222 @@ class TestSendFileUrlBatchAlignment:
         # Each unit fell back to a URL message of its own — still 1:1 aligned.
         assert sent_ids == [9001, 9001]
         assert len(channel.sent) == 2
+
+
+class TestApplyDraftPatch:
+    """edit_draft's cards patch must be a per-index partial overlay.
+
+    Regression for the Aug 5 bug where a patch editing one card's body replaced
+    the entire cards array, wiping the other cards and every source_message_ids
+    (topic_editor.py:_apply_draft_patch). The draft then failed validation with
+    "Card has no resolvable source" and the model abandoned it.
+    """
+
+    def _editor(self):
+        # _apply_draft_patch uses only module helpers, not instance state.
+        return TopicEditor.__new__(TopicEditor)
+
+    def _draft(self, ncards=3):
+        return {
+            "draft_id": "draft-test",
+            "topic_key": "topic-x",
+            "template": "technical_finding",
+            "headline": "Headline here",
+            "dek": "Dek here",
+            "editor_note": "note",
+            "cards": [
+                {
+                    "angle": f"angle {i}",
+                    "body": f"body {i}",
+                    "source_message_ids": [f"src-{i}-0", f"src-{i}-1"],
+                    "media_ids": [f"media-{i}"],
+                }
+                for i in range(ncards)
+            ],
+        }
+
+    def test_partial_single_card_patch_preserves_other_cards_and_sources(self):
+        editor = self._editor()
+        patch = {"cards": [{"body": "trimmed body 0"}]}
+        cards = editor._apply_draft_patch(self._draft(3), patch)["cards"]
+        assert len(cards) == 3
+        # card 0 edited, its sources/media/angle preserved
+        assert cards[0]["body"] == "trimmed body 0"
+        assert cards[0]["source_message_ids"] == ["src-0-0", "src-0-1"]
+        assert cards[0]["media_ids"] == ["media-0"]
+        assert cards[0]["angle"] == "angle 0"
+        # cards 1-2 untouched
+        assert cards[1] == {
+            "angle": "angle 1", "body": "body 1",
+            "source_message_ids": ["src-1-0", "src-1-1"], "media_ids": ["media-1"],
+        }
+        assert cards[2]["body"] == "body 2"
+        assert cards[2]["source_message_ids"] == ["src-2-0", "src-2-1"]
+
+    def test_aug5_partial_patch_does_not_wipe_sources(self):
+        """Exact Aug 5 corruption: patch with body+angle only must not strip sources."""
+        editor = self._editor()
+        draft = self._draft(3)
+        patch = {"cards": [{"body": "Paraphrase and cite instead of quoting repeatedly.", "angle": "rephrase"}]}
+        cards = editor._apply_draft_patch(draft, patch)["cards"]
+        assert len(cards) == 3
+        assert cards[0]["body"] == "Paraphrase and cite instead of quoting repeatedly."
+        assert cards[0]["angle"] == "rephrase"
+        assert cards[0]["source_message_ids"] == ["src-0-0", "src-0-1"]
+        assert cards[1]["body"] == "body 1"
+        assert cards[2]["source_message_ids"] == ["src-2-0", "src-2-1"]
+
+    def test_complete_cards_array_replaces_all_cards(self):
+        # Equal-length full cards overlay cleanly onto every existing card.
+        editor = self._editor()
+        new_cards = [
+            {"angle": "new angle 0", "body": "new body 0", "source_message_ids": ["new-src-0"], "media_ids": []},
+            {"angle": "new angle 1", "body": "new body 1", "source_message_ids": ["new-src-1"], "media_ids": []},
+        ]
+        cards = editor._apply_draft_patch(self._draft(2), {"cards": new_cards})["cards"]
+        assert len(cards) == 2
+        assert cards[0]["body"] == "new body 0"
+        assert cards[0]["source_message_ids"] == ["new-src-0"]
+        assert cards[1]["source_message_ids"] == ["new-src-1"]
+
+    def test_remove_card_indices_removes_by_original_index(self):
+        editor = self._editor()
+        cards = editor._apply_draft_patch(self._draft(3), {"remove_card_indices": [1]})["cards"]
+        assert len(cards) == 2
+        assert cards[0]["angle"] == "angle 0"
+        assert cards[1]["angle"] == "angle 2"
+
+    def test_remove_then_overlay_merges_onto_surviving_card(self):
+        # Remove original card 0, then overlay position 0 lands on old card 1.
+        editor = self._editor()
+        result = editor._apply_draft_patch(
+            self._draft(3),
+            {"remove_card_indices": [0], "cards": [{"body": "fixed body"}]},
+        )["cards"]
+        assert len(result) == 2
+        assert result[0]["body"] == "fixed body"
+        assert result[0]["source_message_ids"] == ["src-1-0", "src-1-1"]  # old card 1's sources
+        assert result[1]["angle"] == "angle 2"
+
+    def test_shrink_is_explicit_via_remove_card_indices_not_array_length(self):
+        # Array length must NOT shrink the list — unlisted cards survive. Shrink
+        # is expressed with remove_card_indices (Codex review finding #1).
+        editor = self._editor()
+        kept = editor._apply_draft_patch(self._draft(3), {"cards": [{"body": "edit 0"}, {"body": "edit 1"}]})["cards"]
+        assert len(kept) == 3
+        assert kept[0]["body"] == "edit 0"
+        assert kept[1]["body"] == "edit 1"
+        assert kept[2]["body"] == "body 2"
+        shrunk = editor._apply_draft_patch(
+            self._draft(3),
+            {"remove_card_indices": [1, 2], "cards": [{"body": "only survivor"}]},
+        )["cards"]
+        assert len(shrunk) == 1
+        assert shrunk[0]["body"] == "only survivor"
+        assert shrunk[0]["source_message_ids"] == ["src-0-0", "src-0-1"]
+
+    def test_append_cards_adds_new_cards(self):
+        editor = self._editor()
+        new_card = {"angle": "new angle", "body": "new body", "source_message_ids": ["new-src"], "media_ids": []}
+        cards = editor._apply_draft_patch(self._draft(2), {"append_cards": [new_card]})["cards"]
+        assert len(cards) == 3
+        assert cards[2]["body"] == "new body"
+        assert cards[2]["source_message_ids"] == ["new-src"]
+
+    def test_append_cards_drops_incomplete_card(self):
+        # append_cards without body/sources would create an invalid card; it is
+        # dropped with a warning instead of silently accepted.
+        editor = self._editor()
+        cards = editor._apply_draft_patch(
+            self._draft(2),
+            {"append_cards": [{"body": "no sources"}, {"angle": "a", "body": "b", "source_message_ids": ["s"], "media_ids": []}]},
+        )["cards"]
+        assert len(cards) == 3
+        assert cards[2]["body"] == "b"
+        assert cards[2]["source_message_ids"] == ["s"]
+
+    def test_empty_string_sources_do_not_count_as_complete(self):
+        # source_message_ids: [""]/[None] filters to no sources at
+        # canonicalization, so it must not pass the completeness gate.
+        editor = self._editor()
+        result = editor._apply_draft_patch(
+            self._draft(1),
+            {"cards": [{"body": "edit"}, {"body": "new", "source_message_ids": [""]}]},
+        )["cards"]
+        assert len(result) == 1
+        assert result[0]["body"] == "edit"
+
+    def test_empty_cards_array_is_noop(self):
+        editor = self._editor()
+        cards = editor._apply_draft_patch(self._draft(3), {"cards": []})["cards"]
+        assert len(cards) == 3
+        assert cards[0]["body"] == "body 0"
+        assert cards[2]["body"] == "body 2"
+
+    def test_dotted_cards_field_syntax_patches_single_field(self):
+        editor = self._editor()
+        cards = editor._apply_draft_patch(self._draft(3), {"cards[1].body": "new body 1"})["cards"]
+        assert len(cards) == 3
+        assert cards[0]["body"] == "body 0"
+        assert cards[1]["body"] == "new body 1"
+        assert cards[1]["source_message_ids"] == ["src-1-0", "src-1-1"]
+
+    def test_duplicate_remove_indices_deduped(self):
+        # "1" and 1 both refer to original card 1; must remove exactly one card.
+        editor = self._editor()
+        cards = editor._apply_draft_patch(self._draft(3), {"remove_card_indices": [1, "1"]})["cards"]
+        assert len(cards) == 2
+        assert cards[0]["angle"] == "angle 0"
+        assert cards[1]["angle"] == "angle 2"
+
+    def test_beyond_list_partial_overlay_is_dropped_not_appended(self):
+        # Overlays only edit existing cards; a partial card beyond the list must
+        # not be synthesized (would be an invalid "no resolvable source" card).
+        editor = self._editor()
+        result = editor._apply_draft_patch(self._draft(1), {"cards": [{"body": "edit"}, {"body": "no sources"}]})["cards"]
+        assert len(result) == 1
+        assert result[0]["body"] == "edit"
+
+    def test_beyond_list_complete_overlay_appends_as_new_card(self):
+        # A full card sent beyond the existing list is appended (rebuild path).
+        editor = self._editor()
+        new_card = {"angle": "a", "body": "b", "source_message_ids": ["s1"], "media_ids": []}
+        result = editor._apply_draft_patch(self._draft(1), {"cards": [{"body": "edit"}, new_card]})["cards"]
+        assert len(result) == 2
+        assert result[0]["body"] == "edit"
+        assert result[1]["body"] == "b"
+        assert result[1]["source_message_ids"] == ["s1"]
+
+    def test_non_object_entries_are_ignored_safely(self):
+        editor = self._editor()
+        result = editor._apply_draft_patch(
+            self._draft(2),
+            {"cards": [{"body": "edit 0"}, "not a card", 42], "append_cards": ["nope", {"angle": "x", "body": "y", "source_message_ids": ["s"], "media_ids": []}]},
+        )["cards"]
+        assert len(result) == 3
+        assert result[0]["body"] == "edit 0"
+        assert result[1]["body"] == "body 1"  # untouched
+        assert result[2]["body"] == "y"
+
+    def test_application_order_independent_of_key_order(self):
+        # Determinism (Codex review finding #4): the same logical patch yields
+        # the same cards regardless of JSON key insertion order, because the
+        # method applies removals -> overlays -> dotted -> appends in fixed order.
+        editor = self._editor()
+        patch_a = {"remove_card_indices": [0], "cards": [{"body": "edit"}]}
+        patch_b = {"cards": [{"body": "edit"}], "remove_card_indices": [0]}
+        result_a = editor._apply_draft_patch(self._draft(3), patch_a)["cards"]
+        result_b = editor._apply_draft_patch(self._draft(3), patch_b)["cards"]
+        assert result_a == result_b
+        assert [c["body"] for c in result_a] == ["edit", "body 2"]
+
+    def test_patch_can_update_headline_and_card_together(self):
+        editor = self._editor()
+        result = editor._apply_draft_patch(
+            self._draft(2),
+            {"headline": "New headline", "cards": [{"body": "b0"}]},
+        )
+        assert result["headline"] == "New headline"
+        assert len(result["cards"]) == 2
+        assert result["cards"][0]["body"] == "b0"
+        assert result["cards"][0]["source_message_ids"] == ["src-0-0", "src-0-1"]
