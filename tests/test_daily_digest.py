@@ -469,6 +469,23 @@ def test_resolve_source_metadata_and_inline_citations():
     )
 
 
+def test_inline_citations_normalize_double_bracket_markers():
+    from src.features.summarising.daily_digest import _substitute_citations
+
+    meta = {"111": {"guild_id": 7, "channel_id": 70, "thread_id": None}}
+    # the model sometimes writes [[N]] despite the prompt — both forms must
+    # render as the same masked jump-link
+    assert _substitute_citations(
+        "Claim [[1]].", ["111"], meta, 7
+    ) == "Claim [[1]](https://discord.com/channels/7/70/111)."
+    assert _substitute_citations(
+        "Claim [1].", ["111"], meta, 7
+    ) == "Claim [[1]](https://discord.com/channels/7/70/111)."
+    # already-rendered masked links are never double-wrapped
+    rendered = "Claim [[1]](https://discord.com/channels/7/70/111)."
+    assert _substitute_citations(rendered, ["111"], meta, 7) == rendered
+
+
 def test_curate_caps_at_max_stories():
     topics = [_topic(f"H{i}", f"body{i}", source_id=str(i)) for i in range(8)]
     # selection returns 8 clusters; curate must cap the WRITE stage at max_stories

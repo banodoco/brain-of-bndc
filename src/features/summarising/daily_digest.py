@@ -641,10 +641,13 @@ def _substitute_citations(
     meta_by_id: Dict[str, Dict[str, Any]],
     guild_fallback: Optional[int],
 ) -> str:
-    """Replace inline ``[N]`` markers with ``[[N]](jump_url)`` masked links.
+    """Replace inline ``[N]`` (or ``[[N]]``) markers with ``[[N]](jump_url)``
+    masked links.
 
     Mirrors the live-update renderer: N is the 1-based index into this block's
-    source ids; unresolvable markers are left literal.
+    source ids; unresolvable markers are left literal. Both single- and double-
+    bracket markers are accepted (the model sometimes emits ``[[N]]`` despite
+    the prompt); already-rendered ``[[N]](url)`` links are left untouched.
     """
     if not text or not ordered_source_ids:
         return text
@@ -661,11 +664,13 @@ def _substitute_citations(
             )
 
     def _sub(m: "re.Match") -> str:
-        n = int(m.group(1))
+        n = int(m.group(1) or m.group(2))
         url = idx_to_url.get(n)
         return f"[[{n}]]({url})" if url else m.group(0)
 
-    return re.sub(r"\[(\d{1,2})\](?!\()", _sub, text)
+    return re.sub(
+        r"\[\[(\d{1,2})\]\](?!\()|(?<!\[)\[(\d{1,2})\](?!\()", _sub, text
+    )
 
 
 def apply_citations(

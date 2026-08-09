@@ -110,10 +110,11 @@ Card style:
 - Each card answers one question: what changed, what someone made, what the
   community learned, why this is useful now, or what is worth watching next.
 - Keep card bodies concise. Prefer one tight paragraph over an essay.
-- Use inline `[N]` citations next to factual claims. Each marker must map to
-  that card's source_message_ids. Restart numbering at `[1]` for EVERY card;
-  `[N]` maps to the Nth entry of that card's source_message_ids. Never append
-  a detached "Sources:" footer.
+- Use inline `[N]` citations (single brackets only — `[1]`, `[2]`, never
+  `[[1]]`) next to factual claims. Each marker must map to that card's
+  source_message_ids. Restart numbering at `[1]` for EVERY card; `[N]` maps
+  to the Nth entry of that card's source_message_ids. Never append a
+  detached "Sources:" footer.
 - Attach media_ids to the card that discusses that image or video so media
   appears immediately after the relevant text. Media ids have the shape
   message_id:kind:index (kinds attachment|embed|external); derive them from the
@@ -267,7 +268,7 @@ TOPIC_EDITOR_TOOLS: List[Dict[str, Any]] = [
                         "type": "object",
                         "properties": {
                             "angle": {"type": "string"},
-                            "body": {"type": "string"},
+                            "body": {"type": "string", "description": "Body text. Cite claims inline with single-bracket [N] markers (never [[N]]) mapped to this card's source_message_ids; restart numbering at [1] for every card."},
                             "source_message_ids": {"type": "array", "items": {"type": "string"}},
                             "media_ids": {
                                 "type": "array",
@@ -294,7 +295,7 @@ TOPIC_EDITOR_TOOLS: List[Dict[str, Any]] = [
                 "draft_id": {"type": "string"},
                 "patch": {
                     "type": "object",
-                    "description": "Partial patch over draft_json. `cards` is a positional overlay: the card at array position i merges onto the existing card at that position — only the fields you include change and cards you do not mention are preserved, so never resend the whole list to touch one card. Remove cards with `remove_card_indices` (original indices); add new full cards with `append_cards`. Top-level headline/dek/editor_note replace wholesale. Legacy single-field form cards[i].field (e.g. cards[2].body) also works. cards[].media_ids must be message_id:kind:index (kinds attachment|embed|external). Restart inline citation numbering at [1] for every card; [N] maps to the Nth entry of that card's source_message_ids.",
+                    "description": "Partial patch over draft_json. `cards` is a positional overlay: the card at array position i merges onto the existing card at that position — only the fields you include change and cards you do not mention are preserved, so never resend the whole list to touch one card. Remove cards with `remove_card_indices` (original indices); add new full cards with `append_cards`. Top-level headline/dek/editor_note replace wholesale. Legacy single-field form cards[i].field (e.g. cards[2].body) also works. cards[].media_ids must be message_id:kind:index (kinds attachment|embed|external). Restart inline citation numbering at [1] for every card; [N] maps to the Nth entry of that card's source_message_ids. Single-bracket [N] markers only — never [[N]].",
                 },
                 "reason": {"type": "string"},
             },
@@ -356,7 +357,7 @@ TOPIC_EDITOR_TOOLS: List[Dict[str, Any]] = [
             "(shorthand `{\"message_id\": \"...\", \"attachment_index\": N}` is also "
             "accepted). Do NOT include a global Sources footer — citations are "
             "rendered inline per block using plain integer markers like [1], [2] "
-            "(e.g. \"Body text [1] with a claim [2].\"). Every [N] must match a "
+            "(single-bracket markers only — never [[N]]; e.g. \"Body text [1] with a claim [2].\"). Every [N] must match a "
             "real index in the block's source_message_ids. Restart numbering at "
             "[1] for every block."
         ),
@@ -438,7 +439,7 @@ TOPIC_EDITOR_TOOLS: List[Dict[str, Any]] = [
             "(shorthand `{\"message_id\": \"...\", \"attachment_index\": N}` is also "
             "accepted). Do NOT include a global Sources footer — citations are "
             "rendered inline per block using plain integer markers like [1], [2] "
-            "(e.g. \"Body text [1] with a claim [2].\"). Every [N] must match a "
+            "(single-bracket markers only — never [[N]]; e.g. \"Body text [1] with a claim [2].\"). Every [N] must match a "
             "real index in the block's source_message_ids. Restart numbering at "
             "[1] for every block."
         ),
@@ -7528,23 +7529,29 @@ def render_topic_publish_units(
         # clickable, not the whole marker.)
         if block_text and idx_to_url:
             def _sub_citation(m: re.Match) -> str:
-                n = int(m.group(1))
+                n = int(m.group(1) or m.group(2))
                 url = idx_to_url.get(n)
                 if url is not None:
                     return f"[[{n}]]({url})"
                 return m.group(0)  # out-of-range / unresolvable → literal
 
-            # Negative lookahead (?!\() skips pre-existing [N](url) links;
-            # negative lookbehind (?<!\[) skips the [N] inside an already-
-            # rendered [[N]](url) masked link so re-rendering a body that already
-            # contains citations never double-wraps them into [[[N]](url)](url).
+            # Match `[N]` (group 2) or `[[N]]` (group 1) — the model sometimes
+            # emits double-bracket markers despite the prompt — and render both
+            # as `[[N]](url)`. The (?!\() lookahead skips pre-existing [N](url)
+            # and already-rendered [[N]](url) links, and the (?<!\[) lookbehind
+            # stops the `[N]` alternative from matching the inner marker of a
+            # `[[N]]`, so re-rendering never double-wraps into [[[N]](url)](url).
             substituted_text = re.sub(
-                r"(?<!\[)\[(\d{1,2})\](?!\()", _sub_citation, block_text
+                r"\[\[(\d{1,2})\]\](?!\()|(?<!\[)\[(\d{1,2})\](?!\()",
+                _sub_citation,
+                block_text,
             )
-            # Treat already-rendered [[N]](url) masked links as an inline-citation
-            # success too: neither double-wrap them nor append a redundant
-            # Sources: footer alongside the citations already in the body.
-            has_rendered_citations = bool(re.search(r"\[\[\d{1,2}\]\]\(", block_text))
+            # Treat already-rendered [[N]](url) and [N](url) masked links as an
+            # inline-citation success too: neither double-wrap them nor append a
+            # redundant Sources: footer alongside the citations already in the body.
+            has_rendered_citations = bool(
+                re.search(r"\[\[\d{1,2}\]\]\(|\[(?:\d{1,2})\]\(", block_text)
+            )
             inline_substituted = (substituted_text != block_text) or has_rendered_citations
         else:
             substituted_text = block_text
@@ -7875,6 +7882,18 @@ def validate_topic_editor_draft(
                 errors.append(issue)
             else:
                 warnings.append(issue)
+
+        # Double-bracket [[N]] markers slip past _citation_markers (it matches
+        # the inner [N]), so flag them explicitly. The renderer normalizes them
+        # to [[N]](url) anyway, but their presence means the format instruction
+        # was missed — surface it before publish rather than silently shipping.
+        if re.search(r"\[\[(?:\d{1,2})\]\](?!\()", card.body or ""):
+            warnings.append(_validation_issue(
+                f"{path}.body",
+                "Body uses double-bracket [[N]] citation markers instead of [N].",
+                "Write inline citations as single-bracket [1], [2], etc. "
+                "(the renderer accepts both, but [[N]] means the format rule was missed).",
+            ))
 
         if _looks_like_digest(card.body):
             warnings.append(_validation_issue(

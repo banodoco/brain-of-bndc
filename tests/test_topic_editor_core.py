@@ -612,6 +612,39 @@ class TestTopicEditorDraftPrimitives:
         assert result.status == "valid"
         assert any("no inline citation marker" in issue.message for issue in result.warnings)
 
+    def test_validate_warns_double_bracket_citation_markers(self):
+        # [[N]] markers slip past _citation_markers (it matches the inner [N]),
+        # so validation must flag them as a warning even though the renderer
+        # normalizes them.
+        draft = TopicEditorDraft(
+            draft_id="draft-dbl-bracket",
+            topic_key="dbl-bracket",
+            template="technical_finding",
+            headline="Double Bracket",
+            dek="A concrete finding with a source.",
+            cards=(
+                TopicEditorDraftCard(
+                    angle="What changed",
+                    body="Face collapses at distance [[1]].",
+                    source_message_ids=("111",),
+                    media_ids=(),
+                ),
+            ),
+            editor_note="Uses double-bracket markers.",
+        )
+        source_metadata = {"111": {"guild_id": 123, "channel_id": 456, "attachments": [], "embeds": []}}
+
+        result = validate_topic_editor_draft(
+            draft,
+            [TopicEditorEvidenceItem(message_id="111")],
+            source_metadata,
+            TopicEditorDraftLimits(),
+            mode="draft",
+        )
+
+        assert result.status == "valid"
+        assert any("double-bracket [[N]]" in issue.message for issue in result.warnings)
+
     def test_validate_blocks_bad_citation_media_and_render_lengths(self):
         draft = TopicEditorDraft(
             draft_id="draft-bad",
@@ -1090,6 +1123,57 @@ class TestRenderTopicPublishUnits:
         assert "## Test Topic" in text_unit["content"]
         assert "Hello world." in text_unit["content"]
         assert "Sources: [1] <https://discord.com/channels/123/456/111>" in text_unit["content"]
+
+    def test_double_bracket_citations_render_as_masked_links(self):
+        # The model sometimes writes [[N]] despite the prompt; the renderer must
+        # turn both [N] and [[N]] into [[N]](url) masked links, and not emit a
+        # Sources footer when inline citations rendered.
+        topic = self._topic_with_blocks([
+            {
+                "type": "intro",
+                "text": "Face collapses at distance [[1]], and again [[2]].",
+                "source_message_ids": ["111", "222"],
+            }
+        ])
+        source_metadata = {
+            "111": self._source_meta("111"),
+            "222": self._source_meta("222"),
+        }
+        units = render_topic_publish_units(topic, source_metadata=source_metadata)
+        text_unit = units[0]
+        assert "[[1]](https://discord.com/channels/123/456/111)" in text_unit["content"]
+        assert "[[2]](https://discord.com/channels/123/456/222)" in text_unit["content"]
+        assert "Sources:" not in text_unit["content"]
+
+    def test_already_rendered_masked_links_are_not_double_wrapped(self):
+        topic = self._topic_with_blocks([
+            {
+                "type": "intro",
+                "text": "Holds [[1]](https://discord.com/channels/123/456/111).",
+                "source_message_ids": ["111"],
+            }
+        ])
+        source_metadata = {"111": self._source_meta("111")}
+        units = render_topic_publish_units(topic, source_metadata=source_metadata)
+        content = units[0]["content"]
+        assert content.count("[[1]](") == 1
+        assert "[[[1]](" not in content
+
+    def test_single_bracket_rendered_link_suppresses_sources_footer(self):
+        # A body that already contains rendered [1](url) links counts as having
+        # inline citations — it must not get a redundant Sources footer.
+        topic = self._topic_with_blocks([
+            {
+                "type": "intro",
+                "text": "Holds [1](https://discord.com/channels/123/456/111).",
+                "source_message_ids": ["111"],
+            }
+        ])
+        source_metadata = {"111": self._source_meta("111")}
+        units = render_topic_publish_units(topic, source_metadata=source_metadata)
+        content = units[0]["content"]
+        assert "[1](https://discord.com/channels/123/456/111)" in content
+        assert "Sources:" not in content
 
     def test_no_global_source_footer_for_structured_topics(self):
         topic = self._topic_with_blocks([
