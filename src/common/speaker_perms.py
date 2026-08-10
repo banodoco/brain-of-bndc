@@ -8,6 +8,10 @@ may send:
   - newbie    → Newbie + Speaker (introductions, grants forum, help/support)
   - community → Speaker only (all topical channels)
   - appeal    → Speaker + Moderated (moderation / appeal channel)
+  - admin     → nobody except Administrator bypass (announcement channels:
+                rules, updates, getting-started). The admin role holds the
+                guild-level Administrator permission, so it is unaffected by
+                channel overwrites and needs no explicit allow.
 
 View (read) access is managed only where the model says so — see
 `_VIEW_ROLE_ALLOWED`. The gate channel ('bot' mode) must be readable by Newbie
@@ -59,6 +63,7 @@ _MODE_ROLE_ALLOWED = {
     'newbie':    {'everyone': False, 'newbie': True,  'speaker': True,  'moderated': False},
     'community': {'everyone': False, 'newbie': False, 'speaker': True,  'moderated': False},
     'appeal':    {'everyone': False, 'newbie': False, 'speaker': True,  'moderated': True},
+    'admin':     {'everyone': False, 'newbie': False, 'speaker': False, 'moderated': False},
 }
 
 # Per-channel posting mode -> view_channel value the bot enforces for each role.

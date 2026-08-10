@@ -1,7 +1,8 @@
 """Migrate channel speaker_modes to the three-tier four-mode set and apply perms.
 
 Modes: 'bot' (nobody), 'newbie' (Newbie+Speaker), 'community' (Speaker only),
-'appeal' (Speaker+Moderated). Applies per-channel overwrites for @everyone +
+'appeal' (Speaker+Moderated), 'admin' (admin role only). Applies per-channel
+overwrites for @everyone +
 Newbie + Speaker + Moderated via `apply_perms_to_channel`.
 
 Channel mapping (server_config first, then env fallback):

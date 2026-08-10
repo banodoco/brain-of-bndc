@@ -146,7 +146,7 @@ async def on_ready():
 
     # ── Check 2: valid modes ──
     invalid = [cid for cid, m in modes.items() if m not in CHANNEL_MODES]
-    check(not invalid, f"All DB channel modes valid (bot/newbie/community/appeal) — {len(modes)} modes, {len(invalid)} invalid")
+    check(not invalid, f"All DB channel modes valid (bot/newbie/community/appeal/admin) — {len(modes)} modes, {len(invalid)} invalid")
 
     # ── Check 3: @everyone explicitly DENIES SEND_PERMS (and pin) everywhere ──
     # An unset (None) overwrite is a leak — @everyone's base permissions default
