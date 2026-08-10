@@ -162,10 +162,6 @@ async def apply_perms_to_channel(
         )
         ow = channel.overwrites_for(role)
         needs_update = not check_overwrite_matches(ow, expected)
-        # Clean up legacy add_reactions overwrite (no longer managed)
-        if ow.add_reactions is not None:
-            ow.add_reactions = None
-            needs_update = True
         if needs_update:
             for attr, value in expected.items():
                 setattr(ow, attr, value)
