@@ -5149,6 +5149,8 @@ async def execute_develop_social_proposal(
                 "code": "not_proposed",
                 "detail": f"terminal_status={row.get('terminal_status')} — only 'proposed' runs can be developed",
             }
+        if row.get("approval_state") == "expired":
+            return {"success": False, "code": "expired"}
 
         proposals = row.get("proposals") or []
         if not proposals:
@@ -5251,6 +5253,8 @@ async def execute_update_social_draft(
         row = db_handler.get_live_update_social_run(run_id)
         if not row or row.get("terminal_status") == "published":
             return {"success": False, "code": "missing_or_published"}
+        if row.get("approval_state") == "expired":
+            return {"success": False, "code": "expired"}
 
         run_state = RunState.from_row(row)
 

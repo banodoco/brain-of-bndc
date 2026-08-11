@@ -49,6 +49,16 @@ _DM_ALL_GUILD_BROWSE_TOOLS = frozenset({
     "get_active_channels",
     "get_daily_summaries",
 })
+
+# Social-review milestone tools. Each must be its own turn: after
+# develop/approve/publish succeeds the agent loop ends, so a single model
+# response can never chain develop→approve→publish (or approve→publish).
+# This is an executor-level barrier, not prompt guidance.
+_SOCIAL_MILESTONE_TOOLS = frozenset({
+    "develop_social_proposal",
+    "approve_social_draft",
+    "publish_social_draft",
+})
 from src.common.soul import BOT_VOICE
 
 logger = logging.getLogger('DiscordBot')
@@ -623,6 +633,29 @@ class AdminChatAgent:
 
                 # If the reply or end_turn tool was called, we're done
                 if any(t.name in ("reply", "end_turn") for t in tool_uses):
+                    break
+
+                # ── social milestone barrier ──────────────────────────
+                # develop/approve/publish are conversational milestones: each
+                # must be its own turn so the admin can review between them.
+                # A single model response cannot chain
+                # develop→approve→publish (or approve→publish) — after any
+                # milestone succeeds, the turn ends and the admin must send a
+                # fresh message. Enforced here at the loop level, not by
+                # prompt guidance.
+                if any(
+                    t.name in _SOCIAL_MILESTONE_TOOLS
+                    and next(
+                        (a.get("result") or {}).get("success", False)
+                        for a in reversed(actions)
+                        if a.get("tool") == t.name
+                    )
+                    for t in tool_uses
+                ):
+                    logger.info(
+                        "[AdminChat] Social milestone tool succeeded — ending turn "
+                        "(develop/approve/publish must be separate turns)"
+                    )
                     break
             
             # Log completion

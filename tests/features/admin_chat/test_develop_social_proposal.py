@@ -220,6 +220,36 @@ class TestDevelopSocialProposal:
         assert result["code"] == "proposal_out_of_range"
 
     @pytest.mark.asyncio
+    async def test_rejects_expired_run(self):
+        """An approval_state='expired' (discarded-topic) run cannot be developed."""
+        db = _FakeDB(_proposed_row(approval_state="expired"))
+        bot = _make_bot()
+
+        result = await execute_develop_social_proposal(
+            bot, db,
+            {"run_id": "run-proposed-1", "proposal_index": 1, "draft_text": "x"},
+        )
+
+        assert result["success"] is False
+        assert result["code"] == "expired"
+
+    @pytest.mark.asyncio
+    async def test_rejects_expired_run_when_drafting(self):
+        """update_social_draft refuses approval_state='expired' runs."""
+        from src.features.admin_chat.tools import execute_update_social_draft
+        db = _FakeDB(_proposed_row(terminal_status="draft", draft_text="d",
+                                   approval_state="expired"))
+        bot = _make_bot()
+
+        result = await execute_update_social_draft(
+            bot, db,
+            {"run_id": "run-proposed-1", "new_text": "edited"},
+        )
+
+        assert result["success"] is False
+        assert result["code"] == "expired"
+
+    @pytest.mark.asyncio
     async def test_rejects_zero_index(self):
         db = _FakeDB(_proposed_row())
         bot = _make_bot()

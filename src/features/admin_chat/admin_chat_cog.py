@@ -1637,6 +1637,10 @@ class AdminChatCog(commands.Cog):
                             row = None
                     except (TypeError, ValueError):
                         pass  # malformed expiry — do not drop the binding
+                # Discarded runs (approval_state='expired') must never bind —
+                # their topic was discarded and the review is void.
+                if row is not None and row.get("approval_state") == "expired":
+                    row = None
                 # topic_summary_data is stored under publish_units.
                 topic_title = (
                     row.get("topic_summary_data")

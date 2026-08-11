@@ -1849,9 +1849,10 @@ class TestPublishMode:
                 ],
             })
 
-        assert result["ok"] is True
+        assert result["ok"] is False  # nothing was posted — retryable
+        assert result["terminal_status"] == "failed"
         assert result.get("thread_root_failed") is True
-        assert len(svc.publish_calls) == 1
+        assert len(svc.publish_calls) == 1  # root attempted, reply never ran
 
     # ── retweet rejection ────────────────────────────────────────────
 

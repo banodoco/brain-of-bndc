@@ -489,13 +489,20 @@ async def _run_media_understanding_and_upload(
         # validation.  Still upload if items have source_urls.
         for i, media_item in enumerate(selected_media):
             source_url = media_item.get("source_url") or media_item.get("url")
-            if not source_url:
-                continue
             # The media item IS the identity when no nested identity exists
             # (draft/develop refs carry source/message_id/attachment_index
             # directly on the item).
             identity = media_item.get("identity") or media_item
             content_type = media_item.get("content_type", "")
+            if not source_url:
+                # Never silently drop: record the failure so the caller can
+                # decide (post text-only with a visible warning, or abort).
+                media_failures.append({
+                    "index": i,
+                    "identity": identity,
+                    "error": "No source_url for media — identity could not be resolved",
+                })
+                continue
             media_understanding_results.append({
                 "index": i,
                 "identity": identity,
@@ -1649,6 +1656,7 @@ def _make_publish_handler(
                     failure_reason=FailureReason.DUPLICATE_PREVENTED.value,
                 )
                 run_state.publication_outcome = outcome
+                run_state.terminal_status = "published"
                 db_handler.update_live_update_social_run(
                     run_id=run_state.run_id,
                     terminal_status="published",
@@ -1685,6 +1693,7 @@ def _make_publish_handler(
                 failure_reason=FailureReason.ROUTE_MISSING.value,
             )
             run_state.publication_outcome = outcome
+            run_state.terminal_status = "failed"
             db_handler.update_live_update_social_run(
                 run_id=run_state.run_id,
                 terminal_status="failed",
@@ -1926,7 +1935,7 @@ async def _publish_thread(
                 "error": str(e),
             })
             if i == 0:
-                # Root-post failure — abort thread
+                # Root-post failure — abort thread; nothing was posted.
                 run_state.add_trace(
                     "tool", tool=tool_name,
                     thread_root_failed=True,
@@ -1939,17 +1948,17 @@ async def _publish_thread(
                     per_item_outcomes=per_item_outcomes,
                 )
                 run_state.publication_outcome = outcome
-                run_state.terminal_status = "published"
+                run_state.terminal_status = "failed"
                 db_handler.update_live_update_social_run(
                     run_id=run_state.run_id,
-                    terminal_status="published",
+                    terminal_status="failed",
                     publication_outcome=outcome.to_dict(),
                     trace_entries=run_state.trace_entries,
                 )
                 return {
                     "tool": tool_name,
-                    "terminal_status": "published",
-                    "ok": True,
+                    "terminal_status": "failed",
+                    "ok": False,
                     "thread_root_failed": True,
                     "error": f"Root post failed: {e}",
                 }
@@ -1975,17 +1984,17 @@ async def _publish_thread(
                     per_item_outcomes=per_item_outcomes,
                 )
                 run_state.publication_outcome = outcome
-                run_state.terminal_status = "published"
+                run_state.terminal_status = "failed"
                 db_handler.update_live_update_social_run(
                     run_id=run_state.run_id,
-                    terminal_status="published",
+                    terminal_status="failed",
                     publication_outcome=outcome.to_dict(),
                     trace_entries=run_state.trace_entries,
                 )
                 return {
                     "tool": tool_name,
-                    "terminal_status": "published",
-                    "ok": True,
+                    "terminal_status": "failed",
+                    "ok": False,
                     "thread_root_failed": True,
                     "error": f"Root post failed: {result.error}",
                 }
@@ -2061,7 +2070,10 @@ async def _publish_thread(
     return {
         "tool": tool_name,
         "terminal_status": "published",
-        "ok": True,
+        # Root is live, so 'published' is correct — but ok=False signals the
+        # admin that the publish did not fully complete (some replies failed)
+        # and per_item_outcomes shows which.
+        "ok": all_success,
         "publication_ids": [o.get("publication_id") for o in per_item_outcomes],
         "provider_refs": [o.get("provider_ref") for o in per_item_outcomes],
         "thread_success": all_success,
