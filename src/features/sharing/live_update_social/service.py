@@ -118,6 +118,22 @@ class LiveUpdateSocialService:
                 payload.action,
             )
 
+            # ── replay guard ─────────────────────────────────────────
+            # The upsert returns the EXISTING row on a duplicate handoff
+            # (topic_id+platform+action). A run that already reached a
+            # terminal status must not re-invoke the agent — that would
+            # overwrite proposals/drafts and spam the admin with a second
+            # DM. Only fresh runs (terminal_status is NULL) get an agent turn.
+            existing_status = run.get("terminal_status")
+            if existing_status:
+                self._log.info(
+                    "LiveUpdateSocialService: run %s already terminal "
+                    "(status=%r) — skipping agent invocation on replay",
+                    run_id,
+                    existing_status,
+                )
+                return run_id
+
             # ── invoke agent (best-effort) ────────────────────────────
             if self._bot is not None:
                 terminal = await self._invoke_agent(payload)
@@ -134,7 +150,13 @@ class LiveUpdateSocialService:
                     if row:
                         draft_text = row.get("draft_text")
                         media_decisions = row.get("media_decisions") or {}
-                        topic_summary_data = row.get("topic_summary_data") or {}
+                        # topic_summary_data is stored under publish_units
+                        # (see upsert_live_update_social_run); fall back there.
+                        topic_summary_data = (
+                            row.get("topic_summary_data")
+                            or row.get("publish_units")
+                            or {}
+                        )
                         source_metadata = row.get("source_metadata") or {}
                         topic_title = self._resolve_topic_title(topic_summary_data)
                         source_link = (
@@ -153,6 +175,39 @@ class LiveUpdateSocialService:
                         self._log.warning(
                             "LiveUpdateSocialService: could not re-fetch run %s "
                             "after agent returned draft",
+                            run_id,
+                        )
+
+                # ── DM the admin when agent produced proposals ────────
+                if terminal == "proposed" and run_id:
+                    row = self.db_handler.get_live_update_social_run(run_id)
+                    if row:
+                        proposals = row.get("proposals") or []
+                        media_decisions = row.get("media_decisions") or {}
+                        # topic_summary_data is stored under publish_units.
+                        topic_summary_data = (
+                            row.get("topic_summary_data")
+                            or row.get("publish_units")
+                            or {}
+                        )
+                        source_metadata = row.get("source_metadata") or {}
+                        topic_title = self._resolve_topic_title(topic_summary_data)
+                        source_link = (
+                            source_metadata.get("source_link")
+                            or source_metadata.get("message_link")
+                            or ""
+                        )
+                        await self._dm_admin_with_proposals(
+                            run_id=run_id,
+                            proposals=proposals,
+                            media_decisions=media_decisions,
+                            topic_title=topic_title,
+                            source_link=source_link,
+                        )
+                    else:
+                        self._log.warning(
+                            "LiveUpdateSocialService: could not re-fetch run %s "
+                            "after agent returned proposals",
                             run_id,
                         )
             else:
@@ -562,7 +617,6 @@ class LiveUpdateSocialService:
         source_link: str,
     ) -> None:
         """DM the admin with a draft embed and persist the review_message_id.
-
         If *draft_text* is ``None`` or whitespace-only, logs a warning and
         skips both the DM send and the DB write entirely.  The entire body
         is wrapped in try/except so neither DM nor DB failure ever raises.
@@ -653,5 +707,114 @@ class LiveUpdateSocialService:
         except Exception:
             self._log.exception(
                 "LiveUpdateSocialService: _dm_admin_with_draft failed for run %s",
+                run_id,
+            )
+
+    async def _dm_admin_with_proposals(
+        self,
+        run_id: str,
+        proposals: list,
+        media_decisions: dict,
+        topic_title: str,
+        source_link: str,
+    ) -> None:
+        """DM the admin with a proposals embed and persist the review_message_id.
+
+        Proposals are idea-level (theme + media strategy), not finished
+        drafts — the admin picks which to develop. Persisting
+        ``review_message_id`` lets the admin-chat review loop resolve the
+        run when the admin replies.
+        """
+        try:
+            if not proposals:
+                self._log.warning(
+                    "LiveUpdateSocialService: _dm_admin_with_proposals skipped — "
+                    "proposals empty for run %s",
+                    run_id,
+                )
+                return
+
+            admin_id = os.getenv("ADMIN_USER_ID")
+            if not admin_id:
+                self._log.warning(
+                    "LiveUpdateSocialService: ADMIN_USER_ID not set — "
+                    "cannot DM admin for run %s",
+                    run_id,
+                )
+                return
+
+            user = await self._bot.fetch_user(int(admin_id))
+
+            lines = []
+            for idx, idea in enumerate(proposals, start=1):
+                if not isinstance(idea, dict):
+                    continue
+                lines.append(f"**{idx}. {idea.get('theme', '(untitled)')}**")
+                strategy = idea.get("media_strategy")
+                if strategy:
+                    lines.append(f"Media: {strategy}")
+                basis = idea.get("media_understanding_basis")
+                if basis:
+                    lines.append(f"Based on: {basis}")
+                rationale = idea.get("rationale")
+                if rationale:
+                    lines.append(f"Why: {rationale}")
+                pattern = idea.get("pattern")
+                if pattern and pattern != "custom":
+                    lines.append(f"Pattern: {pattern}")
+                source_ids = idea.get("source_message_ids") or []
+                if source_ids:
+                    lines.append(
+                        "Source messages: "
+                        + ", ".join(f"`{sid}`" for sid in source_ids[:6])
+                    )
+                lines.append("")
+
+            embed = discord.Embed(
+                title=topic_title or "(untitled)",
+                description="\n".join(lines).strip(),
+                color=0x9B59B6,
+            )
+            if len(embed.description or "") > 4000:
+                embed.description = embed.description[:4000].rstrip() + "\n…(truncated)"
+            if source_link:
+                embed.set_footer(text=f"Source: {source_link}")
+
+            content = (
+                "Post ideas for your review — theme + media strategy each. "
+                'Reply with a number (e.g. **"2"**) to develop that idea '
+                'into a draft, or **"skip"** to discard.'
+            )
+
+            try:
+                msg = await user.send(content=content, embed=embed)
+            except Exception:
+                self._log.exception(
+                    "LiveUpdateSocialService: proposal DM send failed for run %s",
+                    run_id,
+                )
+                return
+
+            env = os.getenv("ENVIRONMENT", "prod")
+            expires_at = (
+                datetime.now(timezone.utc) + timedelta(hours=24)
+            ).isoformat()
+            ok = self.db_handler.update_live_update_social_run(
+                run_id=run_id,
+                review_message_id=msg.id,
+                expires_at=expires_at,
+                environment=env,
+            )
+            if not ok:
+                self._log.error(
+                    "LiveUpdateSocialService: proposal DM sent (msg.id=%s) "
+                    "but DB write of review_message_id FAILED for run %s",
+                    msg.id,
+                    run_id,
+                )
+
+        except Exception:
+            self._log.exception(
+                "LiveUpdateSocialService: _dm_admin_with_proposals failed for run %s",
                 run_id,
             )

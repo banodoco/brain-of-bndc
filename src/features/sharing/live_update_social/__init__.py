@@ -18,6 +18,7 @@ from .models import (
 )
 from .tools import (
     TOOL_DRAFT_SOCIAL_POST,
+    TOOL_PROPOSE_SOCIAL_IDEAS,
     TOOL_SKIP_SOCIAL_POST,
     TOOL_REQUEST_SOCIAL_REVIEW,
     TOOL_GET_LIVE_UPDATE_TOPIC,
@@ -88,6 +89,7 @@ __all__ = [
     "PublishOutcome",
     # tools
     "TOOL_DRAFT_SOCIAL_POST",
+    "TOOL_PROPOSE_SOCIAL_IDEAS",
     "TOOL_SKIP_SOCIAL_POST",
     "TOOL_REQUEST_SOCIAL_REVIEW",
     "TOOL_GET_LIVE_UPDATE_TOPIC",

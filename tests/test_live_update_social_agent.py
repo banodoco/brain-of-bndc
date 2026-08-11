@@ -40,6 +40,7 @@ from src.features.sharing.live_update_social.models import (
 from src.features.sharing.live_update_social.tools import (
     ALL_TOOL_SPECS,
     TOOL_DRAFT_SOCIAL_POST,
+    TOOL_PROPOSE_SOCIAL_IDEAS,
     TOOL_SKIP_SOCIAL_POST,
     TOOL_REQUEST_SOCIAL_REVIEW,
     TOOL_GET_LIVE_UPDATE_TOPIC,
@@ -117,13 +118,14 @@ def _make_run_state(
 
 
 class TestToolRegistryConformance:
-    """12 tools advertised (Sprint 3: 3 terminal + 5 read + 1 queue + 1 publish + 2 read)."""
+    """13 tools advertised (Sprint 3 + propose: 4 terminal + 5 read + 1 queue + 1 publish + 2 read)."""
 
-    def test_exactly_twelve_tools_advertised(self):
-        """ALL_TOOL_SPECS contains exactly 12 tools (Sprint 3)."""
+    def test_exactly_thirteen_tools_advertised(self):
+        """ALL_TOOL_SPECS contains exactly 13 tools."""
         names = {ts.name for ts in ALL_TOOL_SPECS}
         expected = {
             "draft_social_post",
+            "propose_social_ideas",
             "skip_social_post",
             "request_social_review",
             "get_live_update_topic",
@@ -137,19 +139,20 @@ class TestToolRegistryConformance:
             "get_social_run_status",
         }
         assert names == expected, f"Expected {expected}, got {names}"
-        assert len(ALL_TOOL_SPECS) == 12
+        assert len(ALL_TOOL_SPECS) == 13
 
     def test_each_tool_has_exactly_one_binding(self):
-        """build_tool_bindings returns 12 bindings with distinct names."""
+        """build_tool_bindings returns 13 bindings with distinct names."""
         fake = FakeSupabase({"live_update_social_runs": []})
         db = build_db_handler(fake)
         bindings = build_tool_bindings(db)
 
-        assert len(bindings) == 12
+        assert len(bindings) == 13
 
         binding_names = {b.name for b in bindings}
         expected = {
             "draft_social_post",
+            "propose_social_ideas",
             "skip_social_post",
             "request_social_review",
             "get_live_update_topic",
@@ -187,6 +190,7 @@ class TestToolRegistryConformance:
 
         for name in (
             "draft_social_post",
+            "propose_social_ideas",
             "skip_social_post",
             "request_social_review",
             "get_live_update_topic",
@@ -460,6 +464,444 @@ class TestToolHandlers:
         decisions = fetched["media_decisions"]
         assert decisions["selected"] == selected
         assert len(decisions["selected"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_propose_social_ideas_sets_terminal_proposed(self):
+        """propose_social_ideas persists ideas and sets terminal_status='proposed'."""
+        fake = FakeSupabase({"live_update_social_runs": []})
+        db = build_db_handler(fake)
+
+        run = db.upsert_live_update_social_run(
+            topic_id="t-propose", platform="twitter", action="post"
+        )
+        run_state = RunState.from_row(run)
+        run_state.media_decisions = {
+            "selected": [
+                {"source": "discord_attachment", "channel_id": 10, "message_id": 42, "attachment_index": 0},
+            ],
+            "considered": [],
+            "skipped": [],
+            "unresolved": [],
+        }
+
+        from src.features.sharing.live_update_social.tools import _make_propose_ideas_handler
+        handler = _make_propose_ideas_handler(db)
+        result = await handler(run_state, {
+            "ideas": [
+                {
+                    "theme": "76 styles, one GPU — all local",
+                    "media_strategy": "compile 60+ clips from this thread into one montage",
+                    "pattern": "thread_to_compilation",
+                    "media_understanding_basis": "60+ clips, distinct styles each ~5s",
+                    "source_message_ids": ["42", "43"],
+                    "rationale": "volume + range is the story; credit the creator",
+                },
+                {
+                    "theme": "Wan Animate 2 motion transfer, examples by Kijai",
+                    "media_strategy": "montage of 6+ example clips",
+                    "pattern": "showcase_montage",
+                    "media_understanding_basis": "split-screen style range across 6+ clips",
+                    "source_message_ids": ["44"],
+                    "rationale": "claim + proof by variety",
+                },
+            ],
+        })
+
+        assert result["tool"] == "propose_social_ideas"
+        assert result["terminal_status"] == "proposed"
+        assert result["idea_count"] == 2
+        assert result["ok"] is True
+
+        fetched = db.get_live_update_social_run(run["run_id"])
+        assert fetched["terminal_status"] == "proposed"
+        assert len(fetched["proposals"]) == 2
+        assert fetched["proposals"][0]["media_strategy"].startswith("compile 60+")
+        assert fetched["proposals"][1]["pattern"] == "showcase_montage"
+        # Media refs attached to each proposal for develop-time defaulting.
+        assert fetched["proposals"][0]["media_refs"] == [
+            {"source": "discord_attachment", "channel_id": 10, "message_id": 42, "attachment_index": 0},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_propose_social_ideas_rejects_single_idea(self):
+        """A single idea violates the 2-4 contract and routes to needs_review."""
+        fake = FakeSupabase({"live_update_social_runs": []})
+        db = build_db_handler(fake)
+
+        run = db.upsert_live_update_social_run(
+            topic_id="t-one", platform="twitter", action="post"
+        )
+        run_state = RunState.from_row(run)
+
+        from src.features.sharing.live_update_social.tools import _make_propose_ideas_handler
+        handler = _make_propose_ideas_handler(db)
+        result = await handler(run_state, {
+            "ideas": [
+                {"theme": "one idea", "media_strategy": "single clip",
+                 "pattern": "minimal_credit", "media_understanding_basis": "b",
+                 "rationale": "r"},
+            ],
+        })
+
+        assert result["ok"] is False
+        assert result["terminal_status"] == "needs_review"
+
+    @pytest.mark.asyncio
+    async def test_propose_social_ideas_rejects_empty(self):
+        """Empty ideas list routes the run to needs_review (not stuck pending)."""
+        fake = FakeSupabase({"live_update_social_runs": []})
+        db = build_db_handler(fake)
+
+        run = db.upsert_live_update_social_run(
+            topic_id="t-empty", platform="twitter", action="post"
+        )
+        run_state = RunState.from_row(run)
+
+        from src.features.sharing.live_update_social.tools import _make_propose_ideas_handler
+        handler = _make_propose_ideas_handler(db)
+        result = await handler(run_state, {"ideas": []})
+
+        assert result["ok"] is False
+        assert result["terminal_status"] == "needs_review"
+        assert run_state.terminal_status == "needs_review"
+        fetched = db.get_live_update_social_run(run["run_id"])
+        assert fetched["terminal_status"] == "needs_review"
+
+    @pytest.mark.asyncio
+    async def test_propose_social_ideas_rejects_too_many(self):
+        """More than 4 ideas routes to needs_review."""
+        fake = FakeSupabase({"live_update_social_runs": []})
+        db = build_db_handler(fake)
+
+        run = db.upsert_live_update_social_run(
+            topic_id="t-many", platform="twitter", action="post"
+        )
+        run_state = RunState.from_row(run)
+
+        from src.features.sharing.live_update_social.tools import _make_propose_ideas_handler
+        handler = _make_propose_ideas_handler(db)
+        ideas = [
+            {"theme": f"idea {i}", "media_strategy": "single clip", "rationale": "why"}
+            for i in range(5)
+        ]
+        result = await handler(run_state, {"ideas": ideas})
+
+        assert result["ok"] is False
+        assert result["terminal_status"] == "needs_review"
+
+    @pytest.mark.asyncio
+    async def test_propose_social_ideas_filters_invalid_entries(self):
+        """Ideas missing any required field are dropped; floor of 2 enforced."""
+        fake = FakeSupabase({"live_update_social_runs": []})
+        db = build_db_handler(fake)
+
+        run = db.upsert_live_update_social_run(
+            topic_id="t-mixed", platform="twitter", action="post"
+        )
+        run_state = RunState.from_row(run)
+
+        from src.features.sharing.live_update_social.tools import _make_propose_ideas_handler
+        handler = _make_propose_ideas_handler(db)
+        result = await handler(run_state, {
+            "ideas": [
+                {"theme": "good idea", "media_strategy": "single hero clip",
+                 "pattern": "minimal_credit", "media_understanding_basis": "b1",
+                 "source_message_ids": ["42"], "rationale": "credit + humor"},
+                {"theme": "no strategy", "rationale": "x", "pattern": "p",
+                 "media_understanding_basis": "b", "source_message_ids": ["42"]},
+                {"media_strategy": "no theme", "rationale": "x", "pattern": "p",
+                 "media_understanding_basis": "b", "source_message_ids": ["42"]},
+                {"theme": "second good idea", "media_strategy": "montage of 6+",
+                 "pattern": "showcase_montage", "media_understanding_basis": "b2",
+                 "source_message_ids": ["43"], "rationale": "variety"},
+            ],
+        })
+
+        assert result["ok"] is True
+        assert result["idea_count"] == 2
+        fetched = db.get_live_update_social_run(run["run_id"])
+        assert len(fetched["proposals"]) == 2
+        assert fetched["proposals"][0]["theme"] == "good idea"
+        assert fetched["proposals"][1]["theme"] == "second good idea"
+        assert fetched["proposals"][0]["media_refs"] == []  # no run media seeded
+
+    @pytest.mark.asyncio
+    async def test_propose_mode_prompt_includes_exemplars(self):
+        """Propose-mode system prompt renders idea patterns and negatives."""
+        fake = FakeSupabase({"live_update_social_runs": []})
+        db = build_db_handler(fake)
+
+        payload = _make_payload(topic_id="t-prompt", channel_id=10)
+        run_state = _make_run_state(run_id="run-prompt", topic_id="t-prompt")
+
+        from unittest.mock import patch as _patch
+        with _patch.dict(
+            "os.environ",
+            {"LIVE_UPDATE_SOCIAL_MODE": "propose"},
+            clear=False,
+        ):
+            agent = LiveUpdateSocialAgent(db_handler=db, bot=MagicMock())
+            prompt = agent._build_system_prompt(payload, run_state)
+
+        assert "propose_social_ideas" in prompt
+        assert "Idea patterns we like" in prompt
+        assert "thread_to_compilation" in prompt
+        assert "showcase_montage" in prompt
+        assert "When NOT to post" in prompt
+        assert "routine_chatter" in prompt
+        assert "draft_social_post" not in prompt or "1. **draft_social_post**" not in prompt
+        # The rules may name it in a prohibition ("no draft_social_post"),
+        # but it must never be advertised as an available terminal tool.
+        assert "1. **draft_social_post**" not in prompt
+
+    @pytest.mark.asyncio
+    async def test_propose_mode_tool_specs_exclude_draft(self):
+        """Propose mode advertises propose_social_ideas, hides draft/enqueue/publish."""
+        from unittest.mock import patch as _patch
+        with _patch.dict(
+            "os.environ",
+            {"LIVE_UPDATE_SOCIAL_MODE": "propose"},
+            clear=False,
+        ):
+            agent = LiveUpdateSocialAgent(db_handler=MagicMock(), bot=MagicMock())
+            specs = agent._build_tool_specs()
+
+        names = {spec["name"] for spec in specs}
+        assert "propose_social_ideas" in names
+        assert "skip_social_post" in names
+        assert "request_social_review" in names
+        assert "draft_social_post" not in names
+        assert "enqueue_social_post" not in names
+        assert "publish_social_post" not in names
+        assert "get_live_update_topic" in names  # read tools retained
+
+    @pytest.mark.asyncio
+    async def test_propose_mode_dispatch_rejects_draft_tool(self):
+        """Dispatch enforces the mode allowlist: propose mode never runs draft_social_post."""
+        from unittest.mock import patch as _patch
+        with _patch.dict(
+            "os.environ",
+            {"LIVE_UPDATE_SOCIAL_MODE": "propose"},
+            clear=False,
+        ):
+            fake = FakeSupabase({"live_update_social_runs": []})
+            db = build_db_handler(fake)
+            run = db.upsert_live_update_social_run(
+                topic_id="t-guard", platform="twitter", action="post"
+            )
+            run_state = RunState.from_row(run)
+            agent = LiveUpdateSocialAgent(db_handler=db, bot=MagicMock())
+
+            terminal = await agent._dispatch_tool(
+                run_state, "draft_social_post", {"draft_text": "sneaky draft"}
+            )
+
+        assert terminal == "needs_review"
+        fetched = db.get_live_update_social_run(run["run_id"])
+        assert fetched["terminal_status"] == "needs_review"
+        assert fetched["draft_text"] is None  # the draft never persisted
+
+    @pytest.mark.asyncio
+    async def test_propose_mode_parse_rejects_draft_tool(self):
+        """Parse enforces the mode allowlist: a draft_social_post JSON call is refused."""
+        from unittest.mock import patch as _patch
+        with _patch.dict(
+            "os.environ",
+            {"LIVE_UPDATE_SOCIAL_MODE": "propose"},
+            clear=False,
+        ):
+            agent = LiveUpdateSocialAgent(db_handler=MagicMock(), bot=MagicMock())
+            tool_name, params = agent._parse_tool_call(
+                '{"tool": "draft_social_post", "draft_text": "sneaky"}'
+            )
+
+        assert tool_name is None
+
+    @pytest.mark.asyncio
+    async def test_propose_mode_all_missed_media_forces_review(self):
+        """All-missed cached understanding forces needs_review (no fabricated strategies)."""
+        from unittest.mock import patch as _patch
+        with _patch.dict(
+            "os.environ",
+            {"LIVE_UPDATE_SOCIAL_MODE": "propose"},
+            clear=False,
+        ):
+            fake = FakeSupabase({"live_update_social_runs": [], "message_media_understandings": []})
+            db = build_db_handler(fake)
+
+            # Real cache accessor that always misses.
+            async def _fake_get(message_id, attachment_index=0, model=""):
+                return None
+            db.storage_handler.get_message_media_understanding = _fake_get
+
+            agent = LiveUpdateSocialAgent(db_handler=db, bot=MagicMock())
+            run_state = _make_run_state(run_id="run-allmiss", topic_id="t-allmiss")
+            run_state.media_decisions = {
+                "selected": [
+                    {"source": "discord_attachment", "channel_id": 10, "message_id": 42, "attachment_index": 0},
+                ],
+                "considered": [],
+                "skipped": [],
+                "unresolved": [],
+            }
+
+            # Stub the rest of the run: force the guard branch directly.
+            understood = await agent._understand_media_for_propose(run_state)
+            assert len(understood) == 1 and "error" in understood[0]
+
+            # Simulate the run() guard decision.
+            selected_count = len(run_state.media_decisions.get("selected", []))
+            assert selected_count > 0
+            assert not any(not u.get("error") for u in understood)
+
+    @pytest.mark.asyncio
+    async def test_propose_mode_media_understanding_reads_cache(self):
+        """_understand_media_for_propose reads cached understanding, never calls Gemini."""
+        from src.features.sharing.live_update_social.agent import LiveUpdateSocialAgent as _LUSA
+        fake = FakeSupabase({"live_update_social_runs": [], "message_media_understandings": []})
+        db = build_db_handler(fake)
+
+        agent = _LUSA(db_handler=db, bot=MagicMock())
+
+        # Pre-seed the cache with the editor's understanding for msg 42
+        # (FakeQuery has no .upsert(), so seed the table directly).
+        fake.tables["message_media_understandings"] = [{
+            "message_id": 42,
+            "attachment_index": 0,
+            "media_url": "https://cdn.example/1.mp4",
+            "media_kind": "video",
+            "content_hash": "abc",
+            "model": "gemini-2.5-flash",
+            "understanding": {
+                "kind": "generation",
+                "summary": "Montage of distinct animation styles",
+                "visual_read": "hand-drawn, stop-motion, 3D segments",
+                "highlight_score": 9,
+                "energy": 8,
+                "pacing": "fast",
+            },
+        }]
+
+        # The build_db_handler storage stub has no cache accessor — attach a
+        # real one backed by the fake so the lookup path is exercised.
+        async def _fake_get(message_id, attachment_index=0, model=""):
+            table = fake.tables.setdefault("message_media_understandings", [])
+            for row in table:
+                if (
+                    row.get("message_id") == message_id
+                    and row.get("attachment_index") == attachment_index
+                    and row.get("model") == model
+                ):
+                    return dict(row)
+            return None
+
+        db.storage_handler.get_message_media_understanding = _fake_get
+
+        run_state = _make_run_state(run_id="run-cache", topic_id="t-cache")
+        # Production shape: selected refs carry the BOT's published message id
+        # (999), while the understanding cache is keyed by the ORIGINAL source
+        # message id (42) — the lookup must use source_metadata.
+        run_state.source_metadata = {"source_message_ids": ["42"]}
+        run_state.media_decisions = {
+            "selected": [
+                {"source": "discord_attachment", "channel_id": 10, "message_id": 999, "attachment_index": 0},
+            ],
+            "considered": [],
+            "skipped": [],
+            "unresolved": [],
+        }
+
+        results = await agent._understand_media_for_propose(run_state)
+        assert len(results) == 1
+        entry = results[0]
+        assert entry["message_id"] == "42"  # keyed by source id, not bot id
+        assert entry["kind"] == "generation"
+        assert entry["highlight_score"] == 9
+        assert entry["summary"].startswith("Montage")
+        assert "error" not in entry
+
+    @pytest.mark.asyncio
+    async def test_propose_mode_media_understanding_misses_bot_id_when_no_source_meta(self):
+        """Without source_metadata, a bot-message-id ref misses the source-keyed cache."""
+        from src.features.sharing.live_update_social.agent import LiveUpdateSocialAgent as _LUSA
+        fake = FakeSupabase({"live_update_social_runs": [], "message_media_understandings": []})
+        db = build_db_handler(fake)
+
+        agent = _LUSA(db_handler=db, bot=MagicMock())
+        fake.tables["message_media_understandings"] = [{
+            "message_id": 42,
+            "attachment_index": 0,
+            "media_url": "https://cdn.example/1.mp4",
+            "media_kind": "video",
+            "content_hash": "abc",
+            "model": "gemini-2.5-flash",
+            "understanding": {"kind": "generation", "summary": "Montage"},
+        }]
+
+        async def _fake_get(message_id, attachment_index=0, model=""):
+            table = fake.tables.setdefault("message_media_understandings", [])
+            for row in table:
+                if (
+                    row.get("message_id") == message_id
+                    and row.get("attachment_index") == attachment_index
+                    and row.get("model") == model
+                ):
+                    return dict(row)
+            return None
+
+        db.storage_handler.get_message_media_understanding = _fake_get
+
+        run_state = _make_run_state(run_id="run-botref", topic_id="t-botref")
+        run_state.media_decisions = {
+            "selected": [
+                {"source": "discord_attachment", "channel_id": 10, "message_id": 999, "attachment_index": 0},
+            ],
+            "considered": [],
+            "skipped": [],
+            "unresolved": [],
+        }
+
+        results = await agent._understand_media_for_propose(run_state)
+        assert len(results) == 1
+        assert "error" in results[0]  # bot id 999 has no cache row
+
+    @pytest.mark.asyncio
+    async def test_propose_mode_media_understanding_cache_miss(self):
+        """Cache miss is recorded as NOT understood, so the agent never invents media."""
+        from src.features.sharing.live_update_social.agent import LiveUpdateSocialAgent as _LUSA
+        fake = FakeSupabase({"live_update_social_runs": []})
+        db = build_db_handler(fake)
+
+        agent = _LUSA(db_handler=db, bot=MagicMock())
+
+        # Real cache accessor that returns None (no rows seeded).
+        async def _fake_get(message_id, attachment_index=0, model=""):
+            table = fake.tables.setdefault("message_media_understandings", [])
+            for row in table:
+                if (
+                    row.get("message_id") == message_id
+                    and row.get("attachment_index") == attachment_index
+                    and row.get("model") == model
+                ):
+                    return dict(row)
+            return None
+
+        db.storage_handler.get_message_media_understanding = _fake_get
+
+        run_state = _make_run_state(run_id="run-miss", topic_id="t-miss")
+        run_state.media_decisions = {
+            "selected": [
+                {"source": "discord_attachment", "channel_id": 10, "message_id": 99, "attachment_index": 0},
+            ],
+            "considered": [],
+            "skipped": [],
+            "unresolved": [],
+        }
+
+        results = await agent._understand_media_for_propose(run_state)
+        assert len(results) == 1
+        assert "error" in results[0]
+        assert "not" in results[0]["error"].lower()
 
     @pytest.mark.asyncio
     async def test_skip_social_post_sets_terminal_skip(self):

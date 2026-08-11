@@ -1221,6 +1221,35 @@ TOOLS = [
         }
     },
     {
+        "name": "develop_social_proposal",
+        "description": "Convert a proposed social post idea (from propose mode) into a draft on the same run. The admin picked one of the proposals — you draft the tweet text for it, attach the media refs it needs, and this tool flips the run from 'proposed' to 'draft' so the normal review loop (approve/publish) applies. Only works when the run's terminal_status is 'proposed'. Provide the FULL draft text as the tweet; selected_media overrides the run's current media selection.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "run_id": {
+                    "type": "string",
+                    "description": "The run_id of the proposed social run to develop."
+                },
+                "proposal_index": {
+                    "type": "integer",
+                    "description": "1-based index of the proposal the admin picked (from the run's proposals list)."
+                },
+                "draft_text": {
+                    "type": "string",
+                    "description": "The full tweet draft text developed from the chosen proposal (theme + media strategy applied)."
+                },
+                "selected_media": {
+                    "type": "array",
+                    "items": {
+                        "type": "object"
+                    },
+                    "description": "Optional media identities for the draft. If omitted, the run's existing media_decisions.selected is preserved."
+                }
+            },
+            "required": ["run_id", "proposal_index", "draft_text"]
+        }
+    },
+    {
         "name": "update_social_draft",
         "description": "Update the draft text for a social draft run. Resets approval state to pending — the draft MUST be re-approved after any edit. If selected_media is omitted, the existing media_decisions.selected list is preserved unchanged. Provide new_text with the full revised draft content.",
         "input_schema": {
@@ -1293,7 +1322,7 @@ TOOLS = [
     },
     {
         "name": "list_pending_social_drafts",
-        "description": "List all pending social draft runs (terminal_status='draft', approval_state not 'expired'). Use this to discover active drafts — especially as a recovery path when an admin DM reply does not resolve to a known run (orphaned reply).",
+        "description": "List all pending social review runs (terminal_status='draft' OR 'proposed', approval_state not 'expired'). Use this to discover active drafts and proposals — especially as a recovery path when an admin DM reply does not resolve to a known run (orphaned reply).",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -5088,6 +5117,118 @@ def _canon(text: Optional[str]) -> str:
     return re.sub(r"\s+", " ", (text or "").strip())
 
 
+async def execute_develop_social_proposal(
+    bot: discord.Client,
+    db_handler,
+    params: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Convert a chosen proposal into a draft on the same run.
+
+    The admin picked a proposal (proposal_index, 1-based) from the run's
+    ``proposals`` list. The agent supplies the developed tweet text and
+    optional media refs; this flips the run to terminal_status='draft' so
+    the standard update/approve/publish loop applies.
+    """
+    run_id = (params.get("run_id") or "").strip()
+    draft_text = params.get("draft_text")
+    proposal_index = params.get("proposal_index")
+    if not run_id:
+        return {"success": False, "code": "missing_run_id"}
+    if draft_text is None or not str(draft_text).strip():
+        return {"success": False, "code": "missing_draft_text"}
+    if proposal_index is None:
+        return {"success": False, "code": "missing_proposal_index"}
+
+    try:
+        row = db_handler.get_live_update_social_run(run_id)
+        if not row:
+            return {"success": False, "code": "missing_run"}
+        if row.get("terminal_status") != "proposed":
+            return {
+                "success": False,
+                "code": "not_proposed",
+                "detail": f"terminal_status={row.get('terminal_status')} — only 'proposed' runs can be developed",
+            }
+
+        proposals = row.get("proposals") or []
+        if not proposals:
+            return {"success": False, "code": "no_proposals"}
+        try:
+            proposal_idx = int(proposal_index)
+        except (TypeError, ValueError):
+            return {"success": False, "code": "bad_proposal_index"}
+        if proposal_idx < 1 or proposal_idx > len(proposals):
+            return {
+                "success": False,
+                "code": "proposal_out_of_range",
+                "detail": f"proposals has {len(proposals)} item(s)",
+            }
+
+        chosen = proposals[proposal_idx - 1]
+
+        if "selected_media" in params:
+            selected_media = params.get("selected_media") or []
+        else:
+            # Default to the chosen proposal's own media refs when present
+            # (the propose handler attached the run's resolved media to each
+            # idea); fall back to the run-wide selection.
+            proposal_media = chosen.get("media_refs") or []
+            if proposal_media:
+                selected_media = proposal_media
+            else:
+                selected_media = (row.get("media_decisions") or {}).get("selected", [])
+
+        run_state = RunState.from_row(row)
+        handler = _make_draft_handler(db_handler)
+        draft_result = await handler(run_state, {"draft_text": draft_text, "selected_media": selected_media})
+        if not draft_result.get("ok"):
+            return {
+                "success": False,
+                "code": "draft_persist_failed",
+                "detail": draft_result.get("error") or "draft write returned not ok",
+            }
+
+        new_revision = int(row.get("revision", 0)) + 1
+        rev_ok = db_handler.update_live_update_social_run(
+            run_id,
+            revision=new_revision,
+            approval_state="pending",
+            clear_approval=True,
+            environment=row.get("environment", "prod"),
+        )
+        if not rev_ok:
+            return {
+                "success": False,
+                "code": "revision_persist_failed",
+                "detail": "revision/approval write returned not ok",
+            }
+
+        # Verify the transition actually landed — a concurrent develop could
+        # have raced past us, or a failed write left the run non-terminal.
+        verify = db_handler.get_live_update_social_run(run_id)
+        if not verify or verify.get("terminal_status") != "draft":
+            return {
+                "success": False,
+                "code": "transition_not_verified",
+                "detail": f"terminal_status={verify.get('terminal_status') if verify else None}",
+            }
+
+        return {
+            "success": True,
+            "run_id": run_id,
+            "proposal_index": proposal_idx,
+            "proposal_theme": chosen.get("theme"),
+            "proposal_media_strategy": chosen.get("media_strategy"),
+            "terminal_status": "draft",
+            "revision": new_revision,
+            "draft_text": draft_text,
+            "approval_state": "pending",
+        }
+    except Exception as e:
+        logger.error("[AdminChat] develop_social_proposal failed for %s: %s", run_id, e, exc_info=True)
+        return {"success": False, "code": "exception", "detail": str(e)}
+
+
 async def execute_update_social_draft(
     bot: discord.Client,
     db_handler,
@@ -5390,7 +5531,11 @@ async def execute_list_pending_social_drafts(
                     age_seconds = None
             summary.append({
                 "run_id": r.get("run_id"),
-                "topic_title": (r.get("topic_summary_data") or {}).get("title"),
+                "topic_title": (
+                    r.get("topic_summary_data")
+                    or r.get("publish_units")
+                    or {}
+                ).get("title"),
                 "revision": r.get("revision", 0),
                 "approval_state": r.get("approval_state"),
                 "age_seconds": age_seconds,
@@ -5613,6 +5758,8 @@ async def execute_tool(
         return await execute_inspect_social_publication(db_handler, trusted_tool_input)
     elif tool_name == "update_social_draft":
         return await execute_update_social_draft(bot, db_handler, trusted_tool_input)
+    elif tool_name == "develop_social_proposal":
+        return await execute_develop_social_proposal(bot, db_handler, trusted_tool_input)
     elif tool_name == "approve_social_draft":
         return await execute_approve_social_draft(bot, db_handler, trusted_tool_input)
     elif tool_name == "publish_social_draft":

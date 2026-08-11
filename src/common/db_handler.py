@@ -2956,6 +2956,7 @@ class DatabaseHandler:
         terminal_status: Optional[str] = None,
         draft_text: Optional[str] = None,
         media_decisions: Optional[Dict[str, Any]] = None,
+        proposals: Optional[List[Dict[str, Any]]] = None,
         trace_entries: Optional[List[Dict[str, Any]]] = None,
         publication_outcome: Optional[Dict[str, Any]] = None,
         environment: str = 'prod',  # signature-parity only — table has no environment column
@@ -2988,6 +2989,8 @@ class DatabaseHandler:
                 payload["draft_text"] = draft_text
             if media_decisions is not None:
                 payload["media_decisions"] = media_decisions
+            if proposals is not None:
+                payload["proposals"] = proposals
             if trace_entries is not None:
                 payload["trace_entries"] = trace_entries
             if publication_outcome is not None:
@@ -3093,13 +3096,14 @@ class DatabaseHandler:
         self,
         environment: Optional[str] = None,
     ) -> List[Dict]:
-        """Return social runs that are in draft and awaiting admin review.
+        """Return social runs awaiting admin review (draft OR proposed).
 
-        Filters terminal_status='draft' AND approval_state != 'expired',
-        ordered by created_at DESC, capped at 25 rows. Distinct from
-        ``list_open_social_runs`` which filters terminal_status IS NULL
-        and would therefore exclude drafts the agent has already
-        transitioned to terminal_status='draft'.
+        Filters terminal_status IN ('draft','proposed') AND approval_state
+        != 'expired', ordered by created_at DESC, capped at 25 rows.
+        Distinct from ``list_open_social_runs`` which filters
+        terminal_status IS NULL and would therefore exclude drafts the
+        agent has already transitioned to terminal_status='draft' or
+        'proposed'.
 
         ``environment`` is accepted for signature parity; the table has no
         environment column so it is ignored.
@@ -3110,7 +3114,7 @@ class DatabaseHandler:
             result = (
                 self.supabase.table("live_update_social_runs")
                 .select("*")
-                .eq("terminal_status", "draft")
+                .in_("terminal_status", ["draft", "proposed"])
                 .neq("approval_state", "expired")
                 .order("created_at", desc=True)
                 .limit(25)

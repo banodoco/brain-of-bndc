@@ -133,6 +133,51 @@ class LiveUpdateSocialAgent:
                            "could not be resolved.",
                 )
 
+            # ── propose mode: pre-run media understanding ─────────────
+            # Single-step agent — understanding must happen BEFORE the LLM
+            # call so the proposals are grounded in what the media actually is.
+            if self._is_propose_mode():
+                understood = await self._understand_media_for_propose(run_state)
+                run_state.add_trace(
+                    "media_understanding",
+                    items=len(understood),
+                    failures=sum(1 for u in understood if u.get("error")),
+                )
+                # Strict invariant: ANY selected media without usable cached
+                # understanding forces review. The agent must never guess
+                # about a clip it could not ground (a mixed hit/miss leaves
+                # the door open for a fabricated "compile 60+ clips" strategy
+                # over clips it never saw). A cache row with an empty
+                # understanding dict also counts as unresolved. Text-only
+                # source messages (media_bearing=false) are NOT misses.
+                selected_refs = (run_state.media_decisions or {}).get("selected", []) or []
+                if selected_refs:
+                    unresolved = [
+                        u for u in understood
+                        if u.get("error") and u.get("media_bearing", True)
+                        or (not u.get("error") and not (u.get("summary") or u.get("subject")))
+                    ]
+                    if len(unresolved) == len(understood):
+                        run_state.add_trace("media_understanding_all_missed")
+                        return await self._force_needs_review(
+                            run_state,
+                            reason="Propose mode: media is expected but no cached "
+                                   "understanding is available — cannot ground a "
+                                   "media strategy without inventing one.",
+                        )
+                    if unresolved:
+                        run_state.add_trace(
+                            "media_understanding_partial",
+                            unresolved=len(unresolved),
+                        )
+                        return await self._force_needs_review(
+                            run_state,
+                            reason=f"Propose mode: {len(unresolved)} of "
+                                   f"{len(understood)} media item(s) have no "
+                                   "cached understanding — the agent would be "
+                                   "guessing about them. Human review required.",
+                        )
+
             # ── build and send prompt ─────────────────────────────────
             system_prompt = self._build_system_prompt(payload, run_state)
             user_message = self._build_user_message(payload, run_state)
@@ -293,6 +338,146 @@ class LiveUpdateSocialAgent:
 
         return not unresolved_any
 
+    # ── propose-mode media understanding (cache read) ────────────────
+
+    # Models the topic editor uses when it understands media during the
+    # editorial pass. We read whatever is already cached — never re-run
+    # Gemini in the social loop.
+    _CACHED_VIDEO_MODELS = ("gemini-2.5-flash", "gemini-2.5-pro")
+    _CACHED_IMAGE_MODELS = ("gpt-4o-mini", "gpt-5.4")
+
+    async def _understand_media_for_propose(
+        self,
+        run_state: RunState,
+    ) -> List[Dict[str, Any]]:
+        """Load the media understanding the topic editor already cached.
+
+        The editorial pass runs ``understand_image`` / ``understand_video``
+        (Gemini/OpenAI) on source media and persists results to
+        ``message_media_understandings`` keyed by (message_id,
+        attachment_index, model). Propose mode reads that cache — a
+        Supabase lookup, NO new Gemini call and no re-download — so the
+        proposals are grounded in the same understanding the editor used.
+
+        Populates ``run_state.media_understanding`` (transient) and returns
+        it. Never raises: cache misses are recorded with ``error`` so the
+        agent knows the media is not understood and must not invent a
+        media strategy for it.
+        """
+        decisions = run_state.media_decisions or {}
+        selected = decisions.get("selected", []) or []
+
+        # CRITICAL: the understanding cache is keyed by the ORIGINAL source
+        # message IDs — the topic editor's understand_* tools run on the
+        # source window and persist under those IDs. The handoff's
+        # topic_summary_data.message_id is the BOT's published message ID
+        # (sent_ids[0]), which has no cache rows. Always key the lookup off
+        # source_metadata.source_message_ids.
+        source_ids: List[str] = []
+        src_meta = run_state.source_metadata or {}
+        for sid in src_meta.get("source_message_ids") or []:
+            if str(sid).strip():
+                source_ids.append(str(sid))
+        # Fallback: only when the handoff carried no source ids — the selected
+        # media refs' message_ids are at least more likely to be source
+        # messages than the bot's output message.
+        if not source_ids:
+            for media in selected:
+                if isinstance(media, dict) and media.get("message_id") is not None:
+                    source_ids.append(str(media["message_id"]))
+        if not source_ids:
+            run_state.media_understanding = []
+            return run_state.media_understanding
+
+        results: List[Dict[str, Any]] = []
+        for sid in source_ids[:6]:
+            # Try attachment indices 0..3 — the editor usually understands the
+            # first attachment of a source message.
+            found = None
+            used_index = 0
+            for attachment_index in range(4):
+                for model in self._CACHED_VIDEO_MODELS + self._CACHED_IMAGE_MODELS:
+                    try:
+                        found = self.db_handler.get_message_media_understanding(
+                            int(sid),
+                            attachment_index,
+                            model=model,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "LiveUpdateSocialAgent: cache lookup failed "
+                            "msg=%s idx=%s model=%s: %s",
+                            sid, attachment_index, model, e,
+                        )
+                        found = None
+                    if found is not None:
+                        used_index = attachment_index
+                        break
+                if found is not None:
+                    break
+
+            if found is None:
+                # Not every source message carries media — a text-only source
+                # has no cache row and that is EXPECTED, not a miss. Only
+                # record a miss when this source actually appears in the run's
+                # resolved media decisions (i.e. it is media-bearing).
+                media_bearing = any(
+                    isinstance(m, dict)
+                    and str(m.get("message_id") or "") == sid
+                    for m in selected
+                )
+                results.append({
+                    "source": "discord_attachment",
+                    "message_id": sid,
+                    "kind": "media",
+                    "error": (
+                        "no cached understanding (editor pass did not analyse "
+                        "this media)" if media_bearing
+                        else "text-only source — no media expected"
+                    ),
+                    "media_bearing": media_bearing,
+                })
+                continue
+
+            understanding = found.get("understanding") or {}
+            kind = understanding.get("kind") or "media"
+            summary = str(understanding.get("summary") or "").strip()
+            visual = str(understanding.get("visual_read") or "").strip()
+            highlight = understanding.get("highlight_score")
+            energy = understanding.get("energy")
+            pacing = understanding.get("pacing")
+
+            entry: Dict[str, Any] = {
+                "source": "discord_attachment",
+                "message_id": sid,
+                "attachment_index": used_index,
+                "kind": kind,
+                "summary": summary,
+                "visual_read": visual[:600],
+                "model": found.get("model", ""),
+            }
+            # Image-schema fields (describe_image) — include when the editor
+            # cached an image understanding.
+            subject = understanding.get("subject")
+            if subject:
+                entry["subject"] = str(subject)[:400]
+            aesthetic = understanding.get("aesthetic_quality")
+            if aesthetic is not None:
+                entry["aesthetic_quality"] = aesthetic
+            technical = understanding.get("technical_signal")
+            if technical:
+                entry["technical_signal"] = str(technical)[:400]
+            if highlight is not None:
+                entry["highlight_score"] = highlight
+            if energy is not None:
+                entry["energy"] = energy
+            if pacing:
+                entry["pacing"] = pacing
+            results.append(entry)
+
+        run_state.media_understanding = results
+        return results
+
     # ── prompt construction ─────────────────────────────────────────
 
     def _build_system_prompt(
@@ -311,6 +496,7 @@ class LiveUpdateSocialAgent:
         """
         queue_mode = self._is_queue_mode()
         publish_mode = self._is_publish_mode()
+        propose_mode = self._is_propose_mode()
 
         if publish_mode:
             tools_text = (
@@ -340,6 +526,36 @@ class LiveUpdateSocialAgent:
                 "get_source_messages, get_published_update_context, "
                 "inspect_message_media, list_social_routes) to gather "
                 "context BEFORE making your terminal decision.\n"
+            )
+        elif propose_mode:
+            tools_text = (
+                "## Available terminal tool (call exactly ONE)\n\n"
+                "1. **propose_social_ideas** — Propose 2-4 social post IDEAS "
+                "for this topic. This is NOT a finished post — each idea pairs "
+                "a THEME (the angle/headline) with a MEDIA STRATEGY (what the "
+                "media should be, and at what scale). Ideas are stored for "
+                "human review; the human picks which to develop.\n"
+                "2. **skip_social_post** — Skip social posting. Use when "
+                "nothing here is worth proposing (not newsworthy, duplicate, "
+                "routine chatter). Provide a reason.\n"
+                "3. **request_social_review** — Request human review. Use "
+                "when you cannot make a confident proposal (media unresolved, "
+                "unclear content, route issues). Provide a reason.\n"
+                "\n"
+                "## What a good idea looks like\n"
+                "- The theme is ONE short sentence with the creator credited.\n"
+                "- The media strategy is SPECIFIC about source and scale — "
+                "base it on the media understanding summaries in the user "
+                "message. If a thread has many short clips (dozens), propose "
+                "a COMPILATION (e.g. 'compile 60+ clips from this thread into "
+                "one montage'). If there are a handful of strong examples "
+                "(3-10), propose a MONTAGE of ~6+ of them. If there is one "
+                "standout clip, propose a single hero clip. If the story is "
+                "the observation, not the media, propose text-only or one "
+                "clip as evidence.\n"
+                "- Ground every media strategy in a specific "
+                "media_understanding_basis (clip count, style range, quality, "
+                "energy) — do not invent media the source does not have.\n"
             )
         else:
             tools_text = (
@@ -378,6 +594,27 @@ class LiveUpdateSocialAgent:
                 "- For threads: each thread item gets its own draft_text. "
                 "Media refs are assigned per-item via media_refs.\n"
             )
+        elif propose_mode:
+            rules_text = (
+                "## Rules\n"
+                "- Call exactly ONE terminal tool.\n"
+                "- Do NOT provide text outside the tool call.\n"
+                "- Propose IDEAS, never finished posts. No draft_social_post, "
+                "no publish_social_post, no enqueue_social_post.\n"
+                "- Every idea MUST have a theme AND a media strategy AND a "
+                "pattern AND a media_understanding_basis AND a rationale.\n"
+                "- The media strategy must fit what the media understanding "
+                "actually found — count the clips, read the style range, "
+                "respect the quality. Never propose a 60+ clip compilation "
+                "for a thread with 3 clips, and never propose a single clip "
+                "when the source is a 76-clip style range.\n"
+                "- Credit the creator on every idea. No hype inflation — "
+                "preserve conditions (local, model, creator).\n"
+                "- If media is expected but unresolved, use "
+                "request_social_review.\n"
+                "- If the content should not be posted at all, use "
+                "skip_social_post.\n"
+            )
         else:
             rules_text = (
                 "## Rules\n"
@@ -405,11 +642,47 @@ class LiveUpdateSocialAgent:
             "Your job is to review a live-update topic and publish it to "
             "social media immediately.\n\n"
             if publish_mode else
+            "You are a social media idea proposer for the Banodoco Discord bot. "
+            "Your job is to review a live-update topic and propose 2-4 post "
+            "ideas — each a theme plus a media strategy — grounded in the "
+            "media understanding summaries, so a human can pick which to "
+            "develop.\n\n"
+            if propose_mode else
             "You are a social media draft reviewer for the Banodoco Discord bot. "
             "Your job is to review a live-update topic and decide whether it "
             "should be drafted for social media, skipped, or flagged for human "
             "review.\n\n"
         )
+
+        exemplars_text = ""
+        if propose_mode:
+            from .exemplars import (
+                SOCIAL_IDEA_EXEMPLARS,
+                SOCIAL_IDEA_NEGATIVES,
+            )
+
+            parts = ["## Idea patterns we like\n"]
+            parts.append(
+                "These are REAL Banodoco posts. Learn the pattern: the "
+                "CONTEXT tells you when to reach for it, the THEME is the "
+                "angle, and the MEDIA STRATEGY says what the media should "
+                "be — including scale. Match the pattern to the source "
+                "material, then propose your own ideas in the same spirit.\n"
+            )
+            for ex in SOCIAL_IDEA_EXEMPLARS:
+                parts.append(
+                    f"\n### Pattern: {ex['pattern']} ({ex['archetype']})\n"
+                    f"- Context: {ex['context']}\n"
+                    f"- Theme: {ex['theme']}\n"
+                    f"- Media strategy: {ex['media_strategy']}\n"
+                    f"- Why it lands: {ex['why']}"
+                )
+            parts.append("\n## When NOT to post\n")
+            for neg in SOCIAL_IDEA_NEGATIVES:
+                parts.append(
+                    f"- {neg['pattern']}: {neg['context']} → {neg['why']}"
+                )
+            exemplars_text = "\n".join(parts) + "\n\n"
 
         return (
             role
@@ -417,7 +690,8 @@ class LiveUpdateSocialAgent:
             + "\n"
             + rules_text
             + "\n"
-            f"Chain: vendor={payload.vendor}, depth={payload.depth}, "
+            + exemplars_text
+            + f"Chain: vendor={payload.vendor}, depth={payload.depth}, "
             f"with_feedback={payload.with_feedback}, "
             f"deepseek_provider={payload.deepseek_provider}"
         )
@@ -495,6 +769,54 @@ class LiveUpdateSocialAgent:
             for i, m in enumerate(unresolved[:5]):
                 parts.append(f"  {i + 1}. {json.dumps(m, default=str)}")
 
+        # ── propose mode: media understanding summaries ───────────────
+        if self._is_propose_mode():
+            understood = run_state.media_understanding or []
+            if understood:
+                parts.append(
+                    f"\n## Media Understanding ({len(understood)} items)"
+                )
+                parts.append(
+                    "These are the topic editor's cached analyses of the "
+                    "source media (Gemini/OpenAI). Ground every media "
+                    "strategy in them — clip count, style range, quality, "
+                    "energy. Do not invent media the source does not have."
+                )
+                for i, u in enumerate(understood, start=1):
+                    if u.get("error"):
+                        parts.append(
+                            f"  {i}. msg {u.get('message_id')} "
+                            f"({u.get('kind')}): NOT UNDERSTOOD — {u['error']}"
+                        )
+                        continue
+                    bits = [f"kind={u.get('kind')}"]
+                    if u.get("highlight_score") is not None:
+                        bits.append(f"highlight={u['highlight_score']}")
+                    if u.get("energy") is not None:
+                        bits.append(f"energy={u['energy']}")
+                    if u.get("pacing"):
+                        bits.append(f"pacing={u['pacing']}")
+                    if u.get("aesthetic_quality") is not None:
+                        bits.append(f"aesthetic={u['aesthetic_quality']}")
+                    head = u.get("summary") or ""
+                    if u.get("subject"):
+                        head = f"{head} | subject: {u['subject']}" if head else f"subject: {u['subject']}"
+                    if u.get("technical_signal"):
+                        head = f"{head} | tech: {u['technical_signal']}" if head else f"tech: {u['technical_signal']}"
+                    if u.get("visual_read"):
+                        head = f"{head} | visual: {u['visual_read']}" if head else f"visual: {u['visual_read']}"
+                    parts.append(
+                        f"  {i}. msg {u.get('message_id')} [{', '.join(bits)}]: {head}"
+                    )
+            else:
+                parts.append("\n## Media Understanding")
+                parts.append(
+                    "No cached media understanding is available for the "
+                    "source media. If the topic needs media, do not invent "
+                    "a media strategy — either propose text-only ideas or "
+                    "request_social_review."
+                )
+
         # Publish units (always include for debugging)
         parts.append("\n## Publish Units")
         parts.append(json.dumps(units, default=str, indent=2))
@@ -515,6 +837,17 @@ class LiveUpdateSocialAgent:
         import os
         return os.getenv("LIVE_UPDATE_SOCIAL_MODE", "") == "publish"
 
+    @staticmethod
+    def _is_propose_mode() -> bool:
+        """Return True if propose mode is enabled via env var.
+
+        Propose mode makes the agent propose post IDEAS (theme + media
+        strategy) grounded in media understanding, instead of drafting a
+        finished post. Set ``LIVE_UPDATE_SOCIAL_MODE=propose``.
+        """
+        import os
+        return os.getenv("LIVE_UPDATE_SOCIAL_MODE", "") == "propose"
+
     def _build_tool_specs(self) -> List[Dict[str, Any]]:
         """Return tool definitions for the LLM.
 
@@ -531,25 +864,44 @@ class LiveUpdateSocialAgent:
 
         publish_mode = self._is_publish_mode()
         queue_mode = self._is_queue_mode()
+        propose_mode = self._is_propose_mode()
 
         if publish_mode:
             # Exclude draft/queue terminal tools; keep publish_social_post
             specs = [ts for ts in specs if ts.name not in (
-                "draft_social_post", "skip_social_post", "request_social_review",
-                "enqueue_social_post",
+                "draft_social_post", "propose_social_ideas", "skip_social_post",
+                "request_social_review", "enqueue_social_post",
+            )]
+        elif propose_mode:
+            # Propose mode: keep propose_social_ideas, skip, review; exclude
+            # draft/enqueue/publish terminals.
+            specs = [ts for ts in specs if ts.name not in (
+                "draft_social_post", "enqueue_social_post", "publish_social_post",
             )]
         elif queue_mode:
             # Exclude publish tool; keep enqueue_social_post
-            specs = [ts for ts in specs if ts.name != "publish_social_post"]
+            specs = [ts for ts in specs if ts.name not in (
+                "propose_social_ideas", "publish_social_post",
+            )]
         else:
             # Draft mode: exclude both enqueue and publish
             specs = [ts for ts in specs if ts.name not in (
-                "enqueue_social_post", "publish_social_post",
+                "propose_social_ideas", "enqueue_social_post", "publish_social_post",
             )]
 
         return [ts.to_openai_tool() for ts in specs]
         # Note: to_openai_tool() produces Anthropic-compatible format because
         # Anthropic also uses the "input_schema" key (same structure).
+
+    def _allowed_tool_names(self) -> frozenset:
+        """Return the tool names allowed in the CURRENT mode.
+
+        The parser accepts any name in ``ALL_TOOL_SPECS`` and every binding
+        is registered, so prompt-only gating is not enough — a model in
+        propose mode could emit ``draft_social_post`` and have it persist.
+        This allowlist is enforced at parse AND dispatch time.
+        """
+        return frozenset(ts["name"] for ts in self._build_tool_specs())
 
     # ── LLM call ─────────────────────────────────────────────────────
 
@@ -629,6 +981,11 @@ class LiveUpdateSocialAgent:
         if not llm_response:
             return None, {}
 
+        # Mode allowlist — the model may only call tools advertised in the
+        # current mode's tool specs. ALL_TOOL_SPECS is the full registry,
+        # but e.g. propose mode must never accept a draft_social_post call.
+        valid_names = self._allowed_tool_names()
+
         # Try to parse as JSON tool-call wrapper
         try:
             data = json.loads(llm_response)
@@ -637,11 +994,10 @@ class LiveUpdateSocialAgent:
                 params = data.get("params") or data.get("parameters") or data.get("input") or {}
                 if tool_name:
                     # Validate tool name
-                    valid_names = {ts.name for ts in ALL_TOOL_SPECS}
                     if tool_name in valid_names:
                         return tool_name, params
                     logger.warning(
-                        "LiveUpdateSocialAgent: unknown tool %r in JSON response",
+                        "LiveUpdateSocialAgent: tool %r not allowed in current mode",
                         tool_name,
                     )
                     return None, {}
@@ -649,8 +1005,6 @@ class LiveUpdateSocialAgent:
             pass
 
         import re
-
-        valid_names = {ts.name for ts in ALL_TOOL_SPECS}
 
         # Strip markdown code fences the model may wrap the call in.
         cleaned = llm_response.strip()
@@ -686,18 +1040,22 @@ class LiveUpdateSocialAgent:
                             k: v for k, v in obj.items()
                             if k not in ("tool", "name", "tool_name")
                         }
-                    if isinstance(obj.get("draft_text"), str):
+                    if (
+                        isinstance(obj.get("draft_text"), str)
+                        and "draft_social_post" in valid_names
+                    ):
                         return "draft_social_post", obj
             except json.JSONDecodeError:
                 pass
 
         # Last resort: a tool name is mentioned but we could not extract a clean
         # argument. Pick a safe terminal — but NEVER store the raw response as a
-        # draft (that leaks the tool-call wrapper into the tweet/DM).
+        # draft (that leaks the tool-call wrapper into the tweet/DM). Respect the
+        # mode allowlist: a disallowed terminal degrades to request_social_review.
         response_lower = cleaned.lower()
-        if "skip_social_post" in response_lower:
+        if "skip_social_post" in response_lower and "skip_social_post" in valid_names:
             return "skip_social_post", {"reason": "Content not suitable for social posting"}
-        if "get_social_run_status" in response_lower:
+        if "get_social_run_status" in response_lower and "get_social_run_status" in valid_names:
             return "get_social_run_status", {}
         if any(n in response_lower for n in ("draft_social_post", "publish_social_post",
                                              "request_social_review", "find_existing_social_posts")):
@@ -716,6 +1074,16 @@ class LiveUpdateSocialAgent:
         tool_params: Dict[str, Any],
     ) -> Optional[str]:
         """Dispatch the tool call through its ToolBinding handler."""
+        if tool_name not in self._allowed_tool_names():
+            logger.error(
+                "LiveUpdateSocialAgent: tool %r not allowed in current mode "
+                "(allowlist=%s)", tool_name, sorted(self._allowed_tool_names()),
+            )
+            return await self._force_needs_review(
+                run_state,
+                reason=f"Tool {tool_name} is not allowed in the current mode.",
+            )
+
         binding = get_tool_by_name(self._bindings, tool_name)
         if not binding:
             logger.error(

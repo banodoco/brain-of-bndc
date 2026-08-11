@@ -347,6 +347,31 @@ class AdminChatAgent:
                     f"{social_draft_run.get('draft_text', '')}\n---\n"
                 )
 
+            # ── Social proposal review context (per-turn only) ────────
+            social_proposal_run = channel_context.get('social_proposal_run')
+            if social_proposal_run:
+                proposals = social_proposal_run.get('proposals') or []
+                ctx_parts.append(
+                    f"\n\n[Social Proposal Review — "
+                    f"run_id={social_proposal_run.get('run_id')}, "
+                    f"topic={social_proposal_run.get('topic_title')}]\n"
+                )
+                for idx, idea in enumerate(proposals, start=1):
+                    if not isinstance(idea, dict):
+                        continue
+                    ctx_parts.append(
+                        f"Proposal {idx}: {idea.get('theme', '(untitled)')}\n"
+                        f"  Media: {idea.get('media_strategy')}\n"
+                        f"  Source messages: {', '.join(str(s) for s in (idea.get('source_message_ids') or [])[:6]) or 'none'}\n"
+                        f"  Why: {idea.get('rationale')}"
+                    )
+                ctx_parts.append(
+                    "\nThe admin picks one idea to develop. Draft the tweet "
+                    "text from the chosen proposal and call "
+                    "`develop_social_proposal` with run_id + proposal_index "
+                    "(1-based) + draft_text."
+                )
+
             full_message = "".join(ctx_parts) + "\n\n" + user_message
         persisted_user_msg: Dict[str, Any] = {"role": "user", "content": user_message}
         request_user_msg: Dict[str, Any] = {"role": "user", "content": full_message}

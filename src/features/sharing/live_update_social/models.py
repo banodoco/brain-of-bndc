@@ -266,6 +266,9 @@ class RunState:
     publish_units: Dict[str, Any] = field(default_factory=dict)
     draft_text: Optional[str] = None
     media_decisions: Dict[str, Any] = field(default_factory=dict)
+    proposals: List[Dict[str, Any]] = field(default_factory=list)
+    # Transient — populated only during propose-mode runs; never persisted.
+    media_understanding: List[Dict[str, Any]] = field(default_factory=list)
     publication_outcome: Optional[PublishOutcome] = None
     trace_entries: List[Dict[str, Any]] = field(default_factory=list)
     created_at: Optional[str] = None
@@ -305,6 +308,7 @@ class RunState:
             publish_units=row.get("publish_units") or {},
             draft_text=row.get("draft_text"),
             media_decisions=row.get("media_decisions") or {},
+            proposals=row.get("proposals") or [],
             publication_outcome=publication_outcome,
             trace_entries=row.get("trace_entries") or [],
             created_at=row.get("created_at"),

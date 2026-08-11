@@ -62,6 +62,99 @@ TOOL_DRAFT_SOCIAL_POST = ToolSpec(
     },
 )
 
+TOOL_PROPOSE_SOCIAL_IDEAS = ToolSpec(
+    name="propose_social_ideas",
+    description=(
+        "Propose 2-4 social post IDEAS for this topic — NOT finished posts. "
+        "Each idea pairs a THEME (the angle/headline) with a MEDIA STRATEGY "
+        "(what the media should be: e.g. compile 60+ clips from the source "
+        "thread into one montage, montage of 6+ example clips, a single "
+        "hero clip, or text-only). Ground each media strategy in the media "
+        "understanding summaries provided. Ideas are stored for human "
+        "review — the human picks which to develop."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "ideas": {
+                "type": "array",
+                "description": (
+                    "2-4 post ideas. Each must pair a theme with a media "
+                    "strategy and cite which pattern it follows."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "theme": {
+                            "type": "string",
+                            "description": (
+                                "The angle/headline of the proposed post — "
+                                "one short sentence, credit included."
+                            ),
+                        },
+                        "media_strategy": {
+                            "type": "string",
+                            "description": (
+                                "What the media SHOULD be, with source and "
+                                "scale — e.g. 'compile 60+ clips from this "
+                                "thread into one montage', 'montage of 6+ "
+                                "example clips', 'single hero clip', "
+                                "'text-only'. Base it on what the media "
+                                "understanding actually found."
+                            ),
+                        },
+                        "pattern": {
+                            "type": "string",
+                            "description": (
+                                "Which idea pattern this follows: "
+                                "thread_to_compilation, showcase_montage, "
+                                "technique_hook, meme_personification, "
+                                "restrained_observation, minimal_credit, or "
+                                "feature_demo_with_reference."
+                            ),
+                        },
+                        "media_understanding_basis": {
+                            "type": "string",
+                            "description": (
+                                "The specific media-understanding finding "
+                                "this strategy builds on (clip count, style "
+                                "range, quality, energy)."
+                            ),
+                        },
+                        "source_message_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "The source Discord message IDs this idea is "
+                                "based on — the few messages that carry the "
+                                "content. Use message IDs from the topic "
+                                "summary / source context."
+                            ),
+                        },
+                        "rationale": {
+                            "type": "string",
+                            "description": (
+                                "Why this idea lands for the Banodoco "
+                                "audience — credit, stat, humor, restraint, "
+                                "or observation."
+                            ),
+                        },
+                    },
+                    "required": [
+                        "theme",
+                        "media_strategy",
+                        "pattern",
+                        "media_understanding_basis",
+                        "source_message_ids",
+                        "rationale",
+                    ],
+                },
+            },
+        },
+        "required": ["ideas"],
+    },
+)
+
 TOOL_SKIP_SOCIAL_POST = ToolSpec(
     name="skip_social_post",
     description=(
@@ -337,6 +430,7 @@ TOOL_GET_SOCIAL_RUN_STATUS = ToolSpec(
 ALL_TOOL_SPECS: List[ToolSpec] = [
     # Terminal tools (Sprint 1)
     TOOL_DRAFT_SOCIAL_POST,
+    TOOL_PROPOSE_SOCIAL_IDEAS,
     TOOL_SKIP_SOCIAL_POST,
     TOOL_REQUEST_SOCIAL_REVIEW,
     # Read tools (Sprint 2)
@@ -541,6 +635,171 @@ def _make_draft_handler(db_handler: "DatabaseHandler") -> Any:
         if not ok:
             logger.error("draft_social_post: DB update failed for run %s", run_state.run_id)
         return {"tool": "draft_social_post", "terminal_status": "draft", "ok": ok}
+
+    return handler
+
+
+def _make_propose_ideas_handler(db_handler: "DatabaseHandler") -> Any:
+    """Return a handler that persists 2-4 proposed post ideas.
+
+    Proposals pair a theme with a media strategy; they are stored for
+    human review (terminal status ``"proposed"``) and do NOT create a
+    draft or a publication.
+    """
+
+    async def _propose_fail_terminal(run_state: RunState, db: "DatabaseHandler", error: str) -> dict:
+        """Validation failed — route to needs_review so the run is terminal
+        and visible to the admin instead of silently stuck pending."""
+        run_state.terminal_status = "needs_review"
+        run_state.add_trace("tool", tool="propose_social_ideas", error=error)
+        try:
+            db.update_live_update_social_run(
+                run_id=run_state.run_id,
+                terminal_status="needs_review",
+                trace_entries=run_state.trace_entries,
+                media_decisions=run_state.media_decisions,
+            )
+        except Exception as e:
+            logger.error(
+                "propose_social_ideas: needs_review persist failed for run %s: %s",
+                run_state.run_id, e,
+            )
+        return {
+            "tool": "propose_social_ideas",
+            "terminal_status": "needs_review",
+            "ok": False,
+            "error": error,
+        }
+
+    async def handler(run_state: RunState, params: dict) -> dict:
+        ideas = params.get("ideas", [])
+        if not isinstance(ideas, list) or not ideas:
+            logger.error(
+                "propose_social_ideas: no ideas provided for run %s",
+                run_state.run_id,
+            )
+            run_state.add_trace("tool", tool="propose_social_ideas", error="empty_ideas")
+            return await _propose_fail_terminal(
+                run_state, db_handler, "No ideas were provided.",
+            )
+        if len(ideas) < 2 or len(ideas) > 4:
+            logger.error(
+                "propose_social_ideas: %d ideas violates the 2-4 contract for run %s",
+                len(ideas), run_state.run_id,
+            )
+            run_state.add_trace("tool", tool="propose_social_ideas", error="bad_idea_count")
+            return await _propose_fail_terminal(
+                run_state, db_handler,
+                "Propose 2-4 ideas per run.",
+            )
+
+        cleaned: list = []
+        # Attach the run's resolved media refs to every proposal so
+        # develop_social_proposal can default media from the chosen idea
+        # instead of the run-wide selection (Codex review #5).
+        resolved_media = [
+            dict(m) for m in ((run_state.media_decisions or {}).get("selected") or [])
+            if isinstance(m, dict)
+        ]
+        for idea in ideas:
+            if not isinstance(idea, dict):
+                continue
+            theme = str(idea.get("theme", "")).strip()
+            strategy = str(idea.get("media_strategy", "")).strip()
+            pattern = str(idea.get("pattern", "")).strip()
+            basis = str(idea.get("media_understanding_basis", "")).strip()
+            rationale = str(idea.get("rationale", "")).strip()
+            source_ids = [
+                str(sid) for sid in (idea.get("source_message_ids") or [])
+                if str(sid).strip()
+            ]
+            if not theme or not strategy or not pattern or not basis or not rationale:
+                continue
+            if not source_ids:
+                continue
+            cleaned.append({
+                "theme": theme,
+                "media_strategy": strategy,
+                "pattern": pattern,
+                "media_understanding_basis": basis,
+                "rationale": rationale,
+                "source_message_ids": source_ids,
+                "media_refs": resolved_media,
+            })
+
+        if len(cleaned) < 2:
+            logger.error(
+                "propose_social_ideas: %d valid ideas below the 2-idea floor for run %s",
+                len(cleaned), run_state.run_id,
+            )
+            run_state.add_trace("tool", tool="propose_social_ideas", error="invalid_ideas")
+            return await _propose_fail_terminal(
+                run_state, db_handler,
+                "Every idea needs a theme, media_strategy, pattern, "
+                "media_understanding_basis, and rationale; 2-4 ideas required.",
+            )
+
+        run_state.terminal_status = "proposed"
+        run_state.proposals = cleaned
+        run_state.add_trace(
+            "tool",
+            tool="propose_social_ideas",
+            idea_count=len(cleaned),
+            patterns=[i["pattern"] for i in cleaned],
+        )
+
+        ok = db_handler.update_live_update_social_run(
+            run_id=run_state.run_id,
+            terminal_status="proposed",
+            proposals=cleaned,
+            trace_entries=run_state.trace_entries,
+        )
+        if not ok:
+            # Persist failure — do NOT report success. The most common cause is
+            # the `proposals` migration not having been applied (Supabase
+            # missing-column error surfaces as a swallowed False here). Route
+            # to needs_review so the failure is visible and the run is not
+            # stuck pending with a phantom 'proposed' state. Retry the DB
+            # update WITHOUT the proposals column so it succeeds even when the
+            # migration is missing.
+            logger.error(
+                "propose_social_ideas: DB update failed for run %s "
+                "(check the proposals migration is applied)",
+                run_state.run_id,
+            )
+            run_state.terminal_status = "needs_review"
+            run_state.add_trace(
+                "tool", tool="propose_social_ideas",
+                error="persist_failed_proposals_migration_missing",
+            )
+            try:
+                db_handler.update_live_update_social_run(
+                    run_id=run_state.run_id,
+                    terminal_status="needs_review",
+                    trace_entries=run_state.trace_entries,
+                    media_decisions=run_state.media_decisions,
+                )
+            except Exception as e:
+                logger.error(
+                    "propose_social_ideas: needs_review fallback persist failed "
+                    "for run %s: %s", run_state.run_id, e,
+                )
+            return {
+                "tool": "propose_social_ideas",
+                "terminal_status": "needs_review",
+                "idea_count": len(cleaned),
+                "ok": False,
+                "error": (
+                    "Could not persist proposals (is the "
+                    "live_update_social_proposals migration applied?)"
+                ),
+            }
+        return {
+            "tool": "propose_social_ideas",
+            "terminal_status": "proposed",
+            "idea_count": len(cleaned),
+            "ok": ok,
+        }
 
     return handler
 
@@ -2017,6 +2276,10 @@ def build_tool_bindings(
         ToolBinding(
             tool_spec=TOOL_DRAFT_SOCIAL_POST,
             handler=_make_draft_handler(db_handler),
+        ),
+        ToolBinding(
+            tool_spec=TOOL_PROPOSE_SOCIAL_IDEAS,
+            handler=_make_propose_ideas_handler(db_handler),
         ),
         ToolBinding(
             tool_spec=TOOL_SKIP_SOCIAL_POST,

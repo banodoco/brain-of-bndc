@@ -136,6 +136,36 @@ replies to a bot-posted draft, you are handling that review turn.
 - If this reply has no matching draft context (orphaned reply), call
   `list_pending_social_drafts` to surface the correct run for the admin."""
 
+SOCIAL_PROPOSAL_REVIEW_GUIDANCE = """\
+## Social Proposal Review Channel
+
+This channel is for admin review of social-media post IDEAS. When an admin
+replies to a bot-posted proposal set, you are handling that review turn.
+
+- The proposed run is injected into context (run_id, proposals list). Each
+  proposal has a theme, a media strategy, the source messages it is based on,
+  and a rationale.
+- The admin will usually pick one idea to develop. When they do, YOU draft the
+  tweet text from that proposal — apply its theme and media strategy, keep the
+  creator credited, no hype inflation — then call `develop_social_proposal`
+  with run_id, proposal_index (1-based), and your draft_text. That converts the
+  proposal into a normal draft.
+- **Development and approval/publish are always separate turns.** After calling
+  `develop_social_proposal`, END your turn by showing the resulting draft and
+  asking for feedback. Never call `approve_social_draft` or
+  `publish_social_draft` in the same turn as development.
+- After development the run becomes a draft and the normal draft review loop
+  applies: `update_social_draft`, `approve_social_draft`,
+  `publish_social_draft`, `preview_social_draft`, `discard_social_draft`.
+  Iterate with the admin until the draft is perfect before publishing.
+- **Any edit resets approval.** After calling `update_social_draft`, the run
+  returns to pending; re-approval is required before publishing.
+- **Never auto-post.** Only call `publish_social_draft` when the admin has
+  explicitly requested it after approving.
+- If the admin says skip or discard, use `discard_social_draft`.
+- If this reply has no matching proposal context (orphaned reply), call
+  `list_pending_social_drafts` to surface the correct run for the admin."""
+
 
 class AdminChatCog(commands.Cog):
     """Cog that handles admin chat plus approved member requests."""
@@ -1565,17 +1595,38 @@ class AdminChatCog(commands.Cog):
                 channel_context["channel_guidance"] = override or LIVE_UPDATE_FEEDBACK_GUIDANCE
 
             # ── Social-draft DM binding (T7) ──────────────────────────
-            # Only runs on DM replies to a bot message that might be a draft embed.
-            # Per-turn only — never persisted into _conversations.
+            # Only runs on DM replies to a bot message that might be a draft
+            # embed. Per-turn only — never persisted into _conversations.
             if is_dm and message.reference is not None:
                 parent_id = int(message.reference.message_id)
                 row = self.db_handler.get_social_run_by_review_message_id(
                     parent_id, environment=self._live_environment()
                 )
-                if row is not None and row.get("terminal_status") != "published":
-                    topic_title = (
-                        row.get("topic_summary_data") or {}
-                    ).get("title", "")
+                # topic_summary_data is stored under publish_units.
+                topic_title = (
+                    row.get("topic_summary_data")
+                    or row.get("publish_units")
+                    or {}
+                ).get("title", "") if row else ""
+                if (
+                    row is not None
+                    and row.get("terminal_status") == "proposed"
+                ):
+                    # Proposal-review context — the admin picks an idea to
+                    # develop into a draft via develop_social_proposal.
+                    channel_context["social_proposal_run"] = {
+                        "run_id": row.get("run_id"),
+                        "proposals": row.get("proposals") or [],
+                        "topic_title": topic_title,
+                        "expires_at": row.get("expires_at"),
+                    }
+                    channel_context["channel_guidance"] = SOCIAL_PROPOSAL_REVIEW_GUIDANCE
+                elif (
+                    row is not None
+                    and row.get("terminal_status") not in (
+                        "published", "needs_review",
+                    )
+                ):
                     channel_context["social_draft_run"] = {
                         "run_id": row.get("run_id"),
                         "draft_text": row.get("draft_text"),
@@ -1589,7 +1640,8 @@ class AdminChatCog(commands.Cog):
                     # inside DMs (wins over feedback guidance when hypothetically both match).
                     channel_context["channel_guidance"] = SOCIAL_DRAFT_REVIEW_GUIDANCE
                 # Orphan-reply fallback: parent does not resolve → do NOT inject
-                # social_draft_run. The agent will see no draft context.
+                # social_draft_run / social_proposal_run. The agent will see
+                # no draft context.
 
             self._busy[user_id] = True
             try:
