@@ -148,7 +148,7 @@ class MediaUnderstandingFakeDB:
         return rows[:limit]
 
     def seed(self, *, message_id: int, attachment_index: int = 0,
-             media_kind: str = "image", model: str = "gpt-4o-mini",
+             media_kind: str = "image", model: str = "gemini-3.1-flash-lite",
              content_hash: str | None = None,
              understanding: dict | None = None):
         """Convenience: insert a pre-cached row."""
@@ -210,11 +210,11 @@ def test_cache_first_second_call_no_api(monkeypatch):
 
     describe_image_calls: list = []
 
-    def fake_describe_image(image_bytes, model):
+    def fake_describe_image_gemini(image_bytes, model, query=None):
         describe_image_calls.append((len(image_bytes), model))
         return dict(FAKE_IMAGE_UNDERSTANDING)
 
-    monkeypatch.setattr(vision_clients, "describe_image", fake_describe_image)
+    monkeypatch.setattr(vision_clients, "describe_image_gemini", fake_describe_image_gemini)
     monkeypatch.setattr(vision_clients, "_sha256", lambda data: "abc123stillimagesha256")
     _mock_requests(monkeypatch)
 
@@ -227,7 +227,7 @@ def test_cache_first_second_call_no_api(monkeypatch):
     assert outcome1["outcome"] == "read"
     assert outcome1["result"]["cached"] is False
     assert len(describe_image_calls) == 1
-    assert describe_image_calls[0][1] == "gpt-4o-mini"
+    assert describe_image_calls[0][1] == "gemini-3.1-flash-lite"
     assert len(db.upserts) == 1
     assert float(context["vision_cost_usd"]) > 0
 
@@ -274,13 +274,13 @@ def test_cross_message_dedup_via_content_hash(monkeypatch):
 
     describe_image_calls: list = []
 
-    def fake_describe_image(image_bytes, model):
+    def fake_describe_image_gemini(image_bytes, model, query=None):
         describe_image_calls.append(True)
         return dict(FAKE_IMAGE_UNDERSTANDING)
 
     COMPUTED_HASH = "abcdef1234567890image"
 
-    monkeypatch.setattr(vision_clients, "describe_image", fake_describe_image)
+    monkeypatch.setattr(vision_clients, "describe_image_gemini", fake_describe_image_gemini)
     monkeypatch.setattr(vision_clients, "_sha256", lambda data: COMPUTED_HASH)
     _mock_requests(monkeypatch)
 
@@ -296,7 +296,7 @@ def test_cross_message_dedup_via_content_hash(monkeypatch):
     assert len(describe_image_calls) == 1
     assert len(db.upserts) == 1
 
-    key100 = (100, 0, "gpt-4o-mini")
+    key100 = (100, 0, "gemini-3.1-flash-lite")
     assert key100 in db._understandings
     assert db._understandings[key100]["message_id"] == 100
 
@@ -311,7 +311,7 @@ def test_cross_message_dedup_via_content_hash(monkeypatch):
     assert len(describe_image_calls) == 1
 
     assert len(db.upserts) == 2
-    key200 = (200, 0, "gpt-4o-mini")
+    key200 = (200, 0, "gemini-3.1-flash-lite")
     assert key200 in db._understandings
     assert db._understandings[key200]["message_id"] == 200
     assert db._understandings[key200]["content_hash"] == COMPUTED_HASH
@@ -382,7 +382,7 @@ def test_payload_enrichment_surfaces_cached_understandings():
         message_id=100,
         attachment_index=0,
         media_kind="image",
-        model="gpt-4o-mini",
+        model="gemini-3.1-flash-lite",
         content_hash="hash-img-100",
         understanding=FAKE_IMAGE_UNDERSTANDING,
     )
@@ -413,7 +413,7 @@ def test_payload_enrichment_surfaces_cached_understandings():
     assert len(understandings) >= 1
 
     mini_entry = next(
-        (u for u in understandings if u.get("model") == "gpt-4o-mini"),
+        (u for u in understandings if u.get("model") == "gemini-3.1-flash-lite"),
         None,
     )
     assert mini_entry is not None
@@ -446,10 +446,10 @@ def test_budget_cap_returns_budget_exceeded(monkeypatch):
     ]
     context = _make_context(messages=messages, vision_budget=0.001, vision_cost=0.0)
 
-    def fail_describe_image(*_args, **_kwargs):
+    def fail_describe_image_gemini(*_args, **_kwargs):
         raise AssertionError("vision API should not be called when budget exceeded")
 
-    monkeypatch.setattr(vision_clients, "describe_image", fail_describe_image)
+    monkeypatch.setattr(vision_clients, "describe_image_gemini", fail_describe_image_gemini)
     monkeypatch.setattr(vision_clients, "_sha256", lambda data: "budget-test-hash")
     _mock_requests(monkeypatch)
 
@@ -476,7 +476,7 @@ def test_budget_not_deducted_on_cache_hit(monkeypatch):
         message_id=100,
         attachment_index=0,
         media_kind="image",
-        model="gpt-4o-mini",
+        model="gemini-3.1-flash-lite",
         content_hash=FAKE_HASH,
         understanding=FAKE_IMAGE_UNDERSTANDING,
     )
@@ -495,10 +495,10 @@ def test_budget_not_deducted_on_cache_hit(monkeypatch):
     ]
     context = _make_context(messages=messages, vision_budget=1.0, vision_cost=0.0)
 
-    def fail_describe_image(*_args, **_kwargs):
-        raise AssertionError("describe_image should not be called on cache hit")
+    def fail_describe_image_gemini(*_args, **_kwargs):
+        raise AssertionError("describe_image_gemini should not be called on cache hit")
 
-    monkeypatch.setattr(vision_clients, "describe_image", fail_describe_image)
+    monkeypatch.setattr(vision_clients, "describe_image_gemini", fail_describe_image_gemini)
 
     editor = TopicEditor(db_handler=db, llm_client=None, guild_id=1, environment="prod")
 
@@ -528,7 +528,7 @@ def test_understand_media_resolves_archive_message_outside_source_window(monkeyp
         message_id=1504502824657227816,
         attachment_index=0,
         media_kind="video",
-        model="gemini-2.5-flash",
+        model="gemini-3.1-flash-lite",
         content_hash="older-video-hash",
         understanding=FAKE_VIDEO_UNDERSTANDING,
     )

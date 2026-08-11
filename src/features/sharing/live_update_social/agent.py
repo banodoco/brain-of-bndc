@@ -342,9 +342,16 @@ class LiveUpdateSocialAgent:
 
     # Models the topic editor uses when it understands media during the
     # editorial pass. We read whatever is already cached — never re-run
-    # Gemini in the social loop.
-    _CACHED_VIDEO_MODELS = ("gemini-2.5-flash", "gemini-2.5-pro")
-    _CACHED_IMAGE_MODELS = ("gpt-4o-mini", "gpt-5.4")
+    # Gemini in the social loop. Images and videos both run on Gemini
+    # 3.1-flash-lite now; older names remain for rows cached before the
+    # switch.
+    _CACHED_VIDEO_MODELS = (
+        "gemini-3.1-flash-lite", "gemini-2.5-flash", "gemini-2.5-pro",
+    )
+    _CACHED_IMAGE_MODELS = (
+        "gemini-3.1-flash-lite", "gemini-2.5-flash", "gemini-2.5-pro",
+        "gpt-4o-mini", "gpt-5.4",
+    )
 
     async def _understand_media_for_propose(
         self,

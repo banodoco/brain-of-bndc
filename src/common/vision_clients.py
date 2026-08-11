@@ -1,8 +1,8 @@
 """
 Vision clients for image and video understanding.
 
-Image:  OpenAI Responses API (/v1/responses), models gpt-4o-mini / gpt-5.4.
-Video:  Gemini SDK (google-genai), models gemini-2.5-flash / gemini-2.5-pro.
+Image:  Gemini SDK (google-genai), model gemini-3.1-flash-lite (OpenAI fallback: gpt-4o-mini).
+Video:  Gemini SDK (google-genai), model gemini-3.1-flash-lite.
 
 Lazy SDK imports — nothing fails at import-time when the optional packages
 are missing; the error surfaces at call-time with a clear message.
@@ -283,7 +283,7 @@ def describe_image(
     image_bytes_or_url:
         Raw bytes, a ``pathlib.Path``, or a http/data URL string.
     model:
-        OpenAI model name, e.g. ``"gpt-4o-mini"`` or ``"gpt-5.4"``.
+        OpenAI model name, e.g. ``"gpt-4o-mini"`` (fallback only).
     query:
         Instruction text.  Falls back to a default editorial-triage prompt.
 
@@ -341,7 +341,7 @@ def describe_video(
     video_path_or_bytes:
         Raw bytes or a ``pathlib.Path`` (or string path) to an ``.mp4`` file.
     model:
-        Gemini model, e.g. ``"gemini-2.5-flash"`` or ``"gemini-2.5-pro"``.
+        Gemini model, e.g. ``"gemini-3.1-flash-lite"``.
 
     Returns
     -------
@@ -436,3 +436,100 @@ def describe_video(
                 video_path.unlink()
             except Exception:
                 pass
+
+
+def describe_image_gemini(
+    image_bytes_or_url: bytes | Path | str,
+    model: str,
+    query: str | None = None,
+) -> dict[str, Any]:
+    """Describe an image via the Gemini SDK (inline base64, no upload).
+
+    Mirrors ``describe_video``'s Gemini path (same SDK, same schema-driven
+    JSON config) but for images — inline data, so no file upload/poll is
+    needed. This is the OpenAI-credit-independent alternative to
+    ``describe_image`` (which bills OpenAI; the topic editor's image
+    understanding hit ``credit_balance_exhausted`` on 2026-08-11).
+
+    Parameters
+    ----------
+    image_bytes_or_url:
+        Raw bytes, a ``pathlib.Path``, or an http(s) URL string.
+    model:
+        Gemini model, e.g. ``"gemini-3.1-flash-lite"``.
+    query:
+        Instruction text.  Falls back to the default editorial-triage prompt.
+
+    Returns
+    -------
+    dict
+        Keys: ``kind``, ``subject``, ``technical_signal``,
+        ``aesthetic_quality`` (0-10), ``discriminator_notes``.
+    """
+    global _genai, _types
+    if "_genai" not in globals():
+        try:
+            from google import genai as _genai
+            from google.genai import types as _types
+        except ModuleNotFoundError:
+            raise ModuleNotFoundError(
+                "google-genai package is required for describe_image_gemini(). "
+                "Install it with: pip install google-genai"
+            )
+
+    import os
+
+    api_key = os.environ.get("GEMINI_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY is not set")
+
+    # Resolve to raw bytes.
+    if isinstance(image_bytes_or_url, bytes):
+        image_bytes = image_bytes_or_url
+        mime = "image/jpeg"
+    elif isinstance(image_bytes_or_url, Path):
+        image_bytes = image_bytes_or_url.read_bytes()
+        mime = mimetypes.guess_type(image_bytes_or_url.name)[0] or "image/jpeg"
+    elif isinstance(image_bytes_or_url, str) and image_bytes_or_url.startswith(
+        ("http://", "https://")
+    ):
+        # Download bytes via urllib (same transport the OpenAI path uses).
+        request = Request(
+            image_bytes_or_url,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        with urlopen(request, timeout=60) as resp:
+            image_bytes = resp.read()
+        mime = resp.headers.get_content_type() or "image/jpeg"
+    else:
+        path = Path(str(image_bytes_or_url)).expanduser()
+        image_bytes = path.read_bytes()
+        mime = mimetypes.guess_type(path.name)[0] or "image/jpeg"
+
+    final_query = query or DEFAULT_IMAGE_QUERY
+    sanitized_schema = _sanitize_gemini_schema(IMAGE_RESPONSE_SCHEMA)
+
+    client = _genai.Client(api_key=api_key)
+    for attempt in range(2):
+        try:
+            response = client.models.generate_content(
+                model=model,
+                contents=[
+                    _types.Part.from_bytes(
+                        data=image_bytes,
+                        mime_type=mime,
+                    ),
+                    final_query,
+                ],
+                config=_types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=sanitized_schema,
+                ),
+            )
+            return json.loads(response.text)
+        except Exception as exc:
+            if attempt == 1 or not _is_transient_error(exc):
+                raise
+            time.sleep(1.0)
+
+    raise RuntimeError("describe_image_gemini exhausted retries")

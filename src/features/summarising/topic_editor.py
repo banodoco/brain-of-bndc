@@ -1311,8 +1311,8 @@ class TopicEditor:
     # Known model presets for enrichment — image models for image understanding,
     # video models for video understanding.  We loop over all four so any cached
     # row produced by the dispatcher is surfaced in the initial payload.
-    _IMAGE_MODEL_PRESETS = ("gpt-4o-mini", "gpt-5.4")
-    _VIDEO_MODEL_PRESETS = ("gemini-2.5-flash", "gemini-2.5-pro")
+    _IMAGE_MODEL_PRESETS = ("gemini-3.1-flash-lite", "gemini-2.5-flash", "gemini-2.5-pro", "gpt-4o-mini", "gpt-5.4")
+    _VIDEO_MODEL_PRESETS = ("gemini-3.1-flash-lite", "gemini-2.5-flash", "gemini-2.5-pro")
     _ALL_MODEL_PRESETS = _IMAGE_MODEL_PRESETS + _VIDEO_MODEL_PRESETS
 
     def _build_initial_user_payload(
@@ -2806,9 +2806,11 @@ class TopicEditor:
     _VISION_COST_IMAGE = 0.01
     _VISION_COST_VIDEO = 0.05
 
-    # mode → model mapping
-    _IMAGE_MODEL_MAP = {"fast": "gpt-4o-mini", "best": "gpt-5.4"}
-    _VIDEO_MODEL_MAP = {"fast": "gemini-2.5-flash", "best": "gemini-2.5-pro"}
+    # mode → model mapping. Images + videos both run on Gemini Flash-Lite
+    # (cheapest tier; tested 2026-08-11 on both modalities). OpenAI image
+    # credits were exhausted; Gemini is the primary path with OpenAI fallback.
+    _IMAGE_MODEL_MAP = {"fast": "gemini-3.1-flash-lite", "best": "gemini-3.1-flash-lite"}
+    _VIDEO_MODEL_MAP = {"fast": "gemini-3.1-flash-lite", "best": "gemini-3.1-flash-lite"}
 
     def _dispatch_understand_media(
         self, call: Dict[str, Any], context: Dict[str, Any], media_kind: str
@@ -2839,7 +2841,12 @@ class TopicEditor:
         """
         import requests
 
-        from src.common.vision_clients import describe_image, describe_video, _sha256
+        from src.common.vision_clients import (
+            describe_image,
+            describe_image_gemini,
+            describe_video,
+            _sha256,
+        )
 
         name = call["name"]
         args = call.get("input") or {}
@@ -2915,9 +2922,9 @@ class TopicEditor:
 
         # model preset
         if media_kind == "image":
-            model = self._IMAGE_MODEL_MAP.get(mode, "gpt-4o-mini")
+            model = self._IMAGE_MODEL_MAP.get(mode, "gemini-3.1-flash-lite")
         else:
-            model = self._VIDEO_MODEL_MAP.get(mode, "gemini-2.5-flash")
+            model = self._VIDEO_MODEL_MAP.get(mode, "gemini-3.1-flash-lite")
 
         # (e) PK cache check
         try:
@@ -2998,10 +3005,20 @@ class TopicEditor:
                 ),
             }
 
-        # (g) call vision API
+        # (g) call vision API — images on Gemini first (OpenAI fallback),
+        # videos on Gemini (same as before).
         try:
             if media_kind == "image":
-                understanding = describe_image(media_bytes, model)
+                try:
+                    understanding = describe_image_gemini(media_bytes, model)
+                except Exception as gemini_exc:
+                    # Fall back to OpenAI only if Gemini is genuinely
+                    # unavailable (e.g. GEMINI_API_KEY unset); if both fail,
+                    # surface the Gemini error (the primary path).
+                    try:
+                        understanding = describe_image(media_bytes, "gpt-4o-mini")
+                    except Exception:
+                        raise gemini_exc
             else:
                 understanding = describe_video(media_bytes, model)
         except Exception as exc:
