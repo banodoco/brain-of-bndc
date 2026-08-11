@@ -551,6 +551,49 @@ class TestTopicEditorDraftPrimitives:
         assert result.status == "blocked_for_submit"
         assert any(issue.path == "latest_valid_preview_hash" for issue in result.errors)
 
+    def test_media_source_normalization_keeps_preview_submit_hash_aligned(self):
+        """Media-bearing drafts must not deadlock preview→submit.
+
+        Regression: _ensure_media_sources_in_cards mutates draft_json (appends
+        media message ids to card sources), changing its canonical hash. The
+        topic editor's draft dispatch previously recorded latest_valid_preview_hash
+        BEFORE that normalization and compared it at submit AFTER — so every
+        media-bearing draft was permanently 'blocked_for_submit' in the
+        preview→submit loop and the agent abandoned it (lost LTX-2.5, 2026-08-11).
+        The dispatcher now recomputes revision_hash after normalization, so the
+        hash recorded at preview equals the hash validated at submit.
+        """
+        from src.features.summarising.topic_editor import TopicEditor
+
+        editor = TopicEditor.__new__(TopicEditor)
+
+        draft = {
+            "headline": "LTX-2.5",
+            "template": "creation_release",
+            "cards": [
+                {
+                    "angle": "release",
+                    "body": "Lightricks announced LTX-2.5 [1]",
+                    "source_message_ids": ["1506344740558475356"],
+                    "media_ids": ["1506344740558475357:attachment:0"],
+                }
+            ],
+        }
+
+        # The dispatcher's validate/preview/submit entry now normalizes FIRST,
+        # then recomputes revision_hash — so the hash is stable across calls.
+        state_draft = editor._ensure_media_sources_in_cards(dict(draft))
+        from src.features.summarising.topic_editor import revision_hash_for_topic_editor_draft
+        preview_hash = revision_hash_for_topic_editor_draft(state_draft)
+
+        # Submit sees the SAME normalized draft → same hash → not stale.
+        submit_draft = editor._ensure_media_sources_in_cards(dict(state_draft))
+        submit_hash = revision_hash_for_topic_editor_draft(submit_draft)
+
+        assert preview_hash == submit_hash
+        # And the media message id actually landed in the card's sources.
+        assert "1506344740558475357" in state_draft["cards"][0]["source_message_ids"]
+
     def test_validate_submit_blocks_missing_inline_citations_by_default(self):
         draft = TopicEditorDraft(
             draft_id="draft-no-cites",

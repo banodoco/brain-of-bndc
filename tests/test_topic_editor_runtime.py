@@ -2627,7 +2627,17 @@ def test_draft_tool_flow_create_validate_preview_submit_reuses_topic_path():
             "attachments": [{"url": "https://cdn.discordapp.com/demo.mp4", "content_type": "video/mp4", "filename": "demo.mp4"}],
             "embeds": [],
             "reaction_count": 8,
-        }
+        },
+        {
+            "message_id": "201",
+            "guild_id": 1,
+            "channel_id": 10,
+            "author_id": 43,
+            "author_name": "bob",
+            "content": "Second clip from the same test.",
+            "attachments": [{"url": "https://cdn.discordapp.com/clip2.mp4", "content_type": "video/mp4", "filename": "clip2.mp4"}],
+            "embeds": [],
+        },
     ]
     editor = _make_editor_with_source_rows(db=db)
     ctx = _make_source_context()
@@ -2643,8 +2653,12 @@ def test_draft_tool_flow_create_validate_preview_submit_reuses_topic_path():
             "cards": [{
                 "angle": "What changed",
                 "body": "Alice posted a LoRA test and the attached video shows the output [1].",
+                # Media lives on a DIFFERENT message (201) than the cited
+                # source (200) — the real-world shape that exposed the
+                # preview/submit hash deadlock (media-source normalization
+                # changed the hash mid-flow, permanently blocking submit).
                 "source_message_ids": ["200"],
-                "media_ids": ["200:attachment:0"],
+                "media_ids": ["201:attachment:0"],
             }],
             "editor_note": "Concrete release with media proof.",
         },
@@ -2666,9 +2680,71 @@ def test_draft_tool_flow_create_validate_preview_submit_reuses_topic_path():
     assert submitted["topic_id"] == "topic-1"
     assert db.topics[0][0]["canonical_key"] == "alice-lora-video"
     assert db.topics[0][0]["summary"]["blocks"][0]["media_refs"] == [
-        {"message_id": "200", "kind": "attachment", "index": 0}
+        {"message_id": "201", "kind": "attachment", "index": 0}
     ]
     assert ctx["created_topics"][0]["topic_id"] == "topic-1"
+
+
+def test_publish_diagnostics_attach_preserves_draft_run_id(monkeypatch):
+    """Regression: _attach_publish_diagnostics_to_matching_draft used to pass
+    the draft state as the persist context, which wiped run_id on the published
+    draft's row (payload computed run_id=None). Created drafts must stamp
+    run_id/guild_id into state so post-publish persists keep them."""
+    monkeypatch.setenv("TOPIC_EDITOR_PUBLISHING_ENABLED", "true")
+    db = FakeDB()
+    db.source_message_rows = [
+        {
+            "message_id": "200",
+            "guild_id": 1,
+            "channel_id": 10,
+            "author_id": 42,
+            "author_name": "alice",
+            "content": "I shipped a new LoRA test with a video.",
+            "attachments": [{"url": "https://cdn.discordapp.com/demo.mp4", "content_type": "video/mp4", "filename": "demo.mp4"}],
+            "embeds": [],
+            "reaction_count": 8,
+        }
+    ]
+    editor = _make_editor_with_source_rows(db=db)
+    ctx = _make_source_context()
+    ctx["run_id"] = "run-stamped"
+
+    created = editor._dispatch_tool_call({
+        "id": "draft-create",
+        "name": "create_draft",
+        "input": {
+            "topic_key": "alice-lora-video",
+            "template": "creation_release",
+            "headline": "Alice Ships a LoRA Video Test",
+            "dek": "A short test with attached video evidence.",
+            "cards": [{
+                "angle": "What changed",
+                "body": "Alice posted a LoRA test and the attached video shows the output [1].",
+                "source_message_ids": ["200"],
+                "media_ids": ["200:attachment:0"],
+            }],
+            "editor_note": "Release with media proof.",
+        },
+    }, ctx)
+    draft_id = created["draft_id"]
+    assert created["outcome"] == "accepted"
+
+    # create persists the stamped run_id
+    created_payload = db.draft_creates[-1][0]
+    assert created_payload["run_id"] == "run-stamped"
+    assert created_payload["guild_id"] == 1
+
+    editor._dispatch_tool_call({"id": "draft-preview", "name": "preview_draft", "input": {"draft_id": draft_id}}, ctx)
+    submitted = editor._dispatch_tool_call({"id": "draft-submit", "name": "submit_draft", "input": {"draft_id": draft_id}}, ctx)
+    assert submitted["outcome"] == "accepted"
+    topic_id = submitted["topic_id"]
+
+    # publish diagnostics attach (the old bug site) must not null run_id
+    editor._attach_publish_diagnostics_to_matching_draft(topic_id, "sent", {"reason_codes": [], "media_failures": []})
+    last_update = db.draft_updates[-1][1]
+    assert last_update["run_id"] == "run-stamped"
+    # and the in-memory row keeps it too
+    assert db.drafts[-1]["run_id"] == "run-stamped"
 
 
 def test_submit_draft_refuses_stale_preview_before_topic_upsert():
@@ -2722,6 +2798,70 @@ def test_submit_draft_refuses_stale_preview_before_topic_upsert():
     assert submitted["outcome"] == "blocked_for_submit"
     assert submitted["topic_id"] is None
     assert db.topics == []
+
+
+def test_terminal_draft_refuses_further_mutation():
+    """Regression: submitted/abandoned/needs_review drafts must refuse edit/
+    validate/preview/submit — a known draft_id could otherwise be resubmitted
+    after abandonment (double-publish) or resurrected after submission."""
+    db = FakeDB()
+    db.source_message_rows = [
+        {
+            "message_id": "200",
+            "guild_id": 1,
+            "channel_id": 10,
+            "author_id": 42,
+            "author_name": "alice",
+            "content": "I shipped a new LoRA test with a video.",
+            "attachments": [{"url": "https://cdn.discordapp.com/demo.mp4", "content_type": "video/mp4", "filename": "demo.mp4"}],
+            "embeds": [],
+            "reaction_count": 8,
+        }
+    ]
+    editor = _make_editor_with_source_rows(db=db)
+    ctx = _make_source_context()
+
+    create = editor._dispatch_tool_call({
+        "id": "draft-create-terminal",
+        "name": "create_draft",
+        "input": {
+            "topic_key": "alice-terminal",
+            "template": "creation_release",
+            "headline": "Terminal guard test",
+            "dek": "Draft must refuse mutation after abandon.",
+            "cards": [{
+                "angle": "What changed",
+                "body": "Alice posted the LoRA test with a video proof [1].",
+                "source_message_ids": ["200"],
+                "media_ids": ["200:attachment:0"],
+            }],
+            "editor_note": "Test terminal guard.",
+        },
+    }, ctx)
+    draft_id = create["draft_id"]
+
+    abandoned = editor._dispatch_tool_call({
+        "id": "draft-abandon-terminal",
+        "name": "abandon_draft",
+        "input": {"draft_id": draft_id, "reason": "not publishable this window"},
+    }, ctx)
+    assert abandoned["outcome"] == "accepted"
+    assert abandoned["status"] == "abandoned"
+
+    # Every mutating tool must refuse the terminal draft.
+    for tool_name, tool_input in (
+        ("edit_draft", {"draft_id": draft_id, "patch": {"cards[0].body": "changed [1]."}, "reason": "x"}),
+        ("validate_draft", {"draft_id": draft_id}),
+        ("preview_draft", {"draft_id": draft_id}),
+        ("submit_draft", {"draft_id": draft_id}),
+    ):
+        outcome = editor._dispatch_tool_call(
+            {"id": f"draft-{tool_name}-terminal", "name": tool_name, "input": tool_input}, ctx
+        )
+        assert outcome["outcome"] == "tool_error", f"{tool_name} should refuse terminal draft"
+        assert outcome["error"] == "draft_terminal", f"{tool_name}: {outcome}"
+
+    assert db.topics == []  # nothing published from the abandoned draft
 
 
 def test_draft_persistence_keeps_null_topic_until_submit_backfill_and_reload(monkeypatch):

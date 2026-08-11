@@ -2522,12 +2522,40 @@ class TopicEditor:
         if not state:
             return {"tool_call_id": call["id"], "tool": name, "outcome": "tool_error", "error": "draft_not_found", "draft_id": draft_id}
 
+        # Terminal drafts must refuse further mutation: a submitted/abandoned/
+        # needs_review draft cannot be edited, validated, previewed, or
+        # re-submitted. Without this guard a known draft_id could be
+        # resubmitted after abandonment (double-publish risk) or resurrected.
+        if (
+            name in ("edit_draft", "validate_draft", "preview_draft", "submit_draft")
+            and (state.get("status") or "") in self._TERMINAL_DRAFT_STATUSES
+        ):
+            return {
+                "tool_call_id": call["id"],
+                "tool": name,
+                "outcome": "tool_error",
+                "error": "draft_terminal",
+                "detail": f"draft {draft_id} is {state.get('status')} and cannot be modified",
+                "required_next_action": "create a new draft or recover via the review backlog",
+                **self._draft_state_payload(state),
+            }
+
         # Ensure every card's media message_ids are also present in its
         # source_message_ids so media URL resolution works during validate /
         # preview / submit even when the model attached media from the shelf
         # without listing its message as a text source. Idempotent (dedup).
         if name in ("validate_draft", "preview_draft", "submit_draft"):
             state["draft_json"] = self._ensure_media_sources_in_cards(state.get("draft_json") or {})
+            # CRITICAL: _ensure_media_sources_in_cards mutates draft_json
+            # (appends media message ids to card sources), which changes its
+            # canonical hash. The revision_hash MUST track the effective draft
+            # — otherwise preview records latest_valid_preview_hash under the
+            # pre-normalization hash, and submit's stale-preview check
+            # (latest_valid_preview_hash != revision_hash) blocks forever,
+            # deadlocking every media-bearing draft in the
+            # preview→submit→preview loop. Recompute here so preview and
+            # submit agree on the same canonical draft.
+            state["revision_hash"] = revision_hash_for_topic_editor_draft(state["draft_json"])
 
         if name == "edit_draft":
             if int(state.get("revision_attempts") or 0) >= int(self.draft_limits.max_revision_attempts):
