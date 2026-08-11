@@ -76,6 +76,36 @@ def _render_prompt_template(template: str, **values: Any) -> str:
         rendered = rendered.replace(f"{{{key}}}", str(value))
     return rendered
 
+
+def _milestone_confirmation(actions: List[Dict[str, Any]]) -> Optional[str]:
+    """Synthesize a short admin-facing confirmation for the last social milestone.
+
+    The develop/approve/publish tools persist state but don't post their own
+    confirmation message. When the milestone barrier ends the turn, we render
+    a one-line summary from the action result so the admin always sees what
+    happened (and never silence).
+    """
+    for action in reversed(actions):
+        tool = action.get("tool")
+        result = action.get("result") or {}
+        if tool not in _SOCIAL_MILESTONE_TOOLS:
+            continue
+        if not result.get("success"):
+            continue
+        if tool == "develop_social_proposal":
+            theme = result.get("proposal_theme") or "(untitled)"
+            return (
+                f"Developed that idea into a draft — *{theme}*. "
+                "Reply to tweak it, approve it, or skip it."
+            )
+        if tool == "approve_social_draft":
+            return "Approved. Say **post it** when you're ready to publish."
+        if tool == "publish_social_draft":
+            url = result.get("provider_url") or result.get("tweet_url") or ""
+            base = "Published to X."
+            return f"{base} {url}".strip() if url else base
+    return None
+
 SYSTEM_PROMPT = """You are the {community_name} Discord bot's admin assistant. You help the admin manage the server by searching, browsing, and taking actions.
 
 {bot_voice}
@@ -527,7 +557,33 @@ class AdminChatAgent:
                 # Process each tool call
                 tool_results = []
                 aborted = False
+                milestone_hit = False
                 for tool_use in tool_uses:
+                    if milestone_hit:
+                        # A social milestone (develop/approve/publish) already
+                        # succeeded earlier in this batch — skip remaining
+                        # sibling calls so one response cannot chain
+                        # approve→publish (or develop→approve→publish).
+                        logger.info(
+                            "[AdminChat] Skipping %s: social milestone already "
+                            "ran this turn", tool_use.name,
+                        )
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": tool_use.id,
+                            "content": json.dumps({
+                                "success": False,
+                                "error": (
+                                    "Skipped: a social milestone "
+                                    "(develop/approve/publish) already ran in "
+                                    "this turn. Milestones must be separate "
+                                    "turns."
+                                ),
+                            }),
+                            "is_error": True,
+                        })
+                        continue
+
                     tool_name = tool_use.name
                     tool_input = tool_use.input
 
@@ -608,6 +664,14 @@ class AdminChatAgent:
                     if tool_name in _CHANNEL_POSTING_TOOLS and result.get("success", False):
                         action_tool_called = True
 
+                    # Social milestone succeeded — record it so sibling calls in
+                    # this batch are skipped and the turn ends.
+                    if (
+                        tool_name in _SOCIAL_MILESTONE_TOOLS
+                        and result.get("success", False)
+                    ):
+                        milestone_hit = True
+
                     # If this was the reply tool, capture messages
                     if tool_name == "reply" and result.get("success"):
                         reply_msgs = result.get("messages", [])
@@ -643,17 +707,15 @@ class AdminChatAgent:
                 # milestone succeeds, the turn ends and the admin must send a
                 # fresh message. Enforced here at the loop level, not by
                 # prompt guidance.
-                if any(
-                    t.name in _SOCIAL_MILESTONE_TOOLS
-                    and next(
-                        (a.get("result") or {}).get("success", False)
-                        for a in reversed(actions)
-                        if a.get("tool") == t.name
-                    )
-                    for t in tool_uses
-                ):
+                if milestone_hit:
+                    # The milestone tools don't post their own confirmation,
+                    # so synthesize one so the admin isn't left with silence.
+                    if not final_replies:
+                        confirm = _milestone_confirmation(actions)
+                        if confirm:
+                            final_replies.append(confirm)
                     logger.info(
-                        "[AdminChat] Social milestone tool succeeded — ending turn "
+                        "[AdminChat] Social milestone succeeded — ending turn "
                         "(develop/approve/publish must be separate turns)"
                     )
                     break

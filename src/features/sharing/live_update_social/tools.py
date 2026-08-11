@@ -1741,6 +1741,46 @@ def _make_publish_handler(
                 ),
             }
 
+        # ── media gate: media was requested but none survived ─────────
+        # If the draft specifies media and every item failed to resolve or
+        # upload, do NOT silently publish a text-only post as success — the
+        # draft's whole point was the media. Route to failed so the admin can
+        # fix and retry. (Partial failure — some media attached — is allowed;
+        # media_failures records what was lost.)
+        if selected_media and not media_hints:
+            error_msg = (
+                "All requested media failed to resolve/upload — refusing to "
+                f"publish text-only ({len(media_failures)} failure(s))."
+            )
+            logger.error("publish_social_post: %s", error_msg)
+            run_state.add_trace(
+                "tool", tool=tool_name,
+                media_all_failed=True,
+                error=error_msg,
+                media_failures=media_failures,
+            )
+            outcome = PublishOutcome(
+                success=False,
+                error=error_msg,
+                failure_reason=FailureReason.MEDIA_RESOLUTION_FAILED.value,
+                media_missing=[f.get("identity", {}) for f in media_failures],
+            )
+            run_state.publication_outcome = outcome
+            run_state.terminal_status = "failed"
+            db_handler.update_live_update_social_run(
+                run_id=run_state.run_id,
+                terminal_status="failed",
+                publication_outcome=outcome.to_dict(),
+                trace_entries=run_state.trace_entries,
+            )
+            return {
+                "tool": tool_name,
+                "terminal_status": "failed",
+                "ok": False,
+                "media_all_failed": True,
+                "error": error_msg,
+            }
+
         # ── store media decisions ────────────────────────────────────
         decisions = run_state.media_decisions or {}
         decisions.setdefault("understanding_summaries", [])
@@ -1779,6 +1819,7 @@ def _make_publish_handler(
                 db_handler=db_handler,
                 social_publish_service=social_publish_service,
                 user_details=user_details,
+                bot=bot,
             )
         else:
             return await _publish_single_post(
@@ -1861,6 +1902,7 @@ async def _publish_thread(
     db_handler: "DatabaseHandler",
     social_publish_service: Any,
     user_details: dict,
+    bot: Optional["discord.Client"] = None,
 ) -> dict:
     """Publish a thread via sequential publish_now calls."""
     tool_name = "publish_social_post"
@@ -1876,16 +1918,28 @@ async def _publish_thread(
         item_media_refs = item_raw.get("media_refs", [])
         item_target_ref = item_raw.get("target_post_ref") or last_provider_ref
 
-        # Build media hints for this item from items' media_refs
+        # Build media hints for this item from the item's OWN media refs.
+        # Each item's refs are resolved to fresh URLs + durable-uploaded
+        # independently — matching against the top-level hints would silently
+        # drop media that only appears on a reply item.
         item_media_hints = []
+        item_failures: list = []
         if item_media_refs:
-            for mr in item_media_refs:
-                if isinstance(mr, dict):
-                    for mh in media_hints:
-                        mh_id = mh.get("identity") or {}
-                        if mh_id == mr:
-                            item_media_hints.append(mh)
-                            break
+            resolved_refs = await _resolve_media_refs_to_urls(
+                bot, item_media_refs
+            )
+            (
+                item_media_hints,
+                _item_understanding,
+                item_failures,
+            ) = await _run_media_understanding_and_upload(
+                db_handler=db_handler,
+                selected_media=resolved_refs,
+                skip_understanding=True,
+                skip_reason="thread item media resolved + durable-uploaded here",
+            )
+            if item_failures:
+                media_failures.extend(item_failures)
 
         # For root post (index 0), use action='post'
         action = "reply" if i > 0 else "post"
