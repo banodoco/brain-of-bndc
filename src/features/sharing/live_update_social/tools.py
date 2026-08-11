@@ -644,17 +644,27 @@ async def _resolve_media_refs_to_urls(
         if not isinstance(media, dict):
             resolved.append(media)
             continue
-        if media.get("url") or media.get("durable_url") or media.get("source_url"):
+        # Some refs carry their identity nested under "identity" (the stable
+        # thread media_refs shape) while the resolvable fields live inside.
+        probe = media
+        if (
+            not media.get("url")
+            and not media.get("durable_url")
+            and not media.get("source_url")
+            and isinstance(media.get("identity"), dict)
+        ):
+            probe = media["identity"]
+        if probe.get("url") or probe.get("durable_url") or probe.get("source_url"):
             resolved.append(media)
             continue
 
-        source = media.get("source")
+        source = probe.get("source")
         if source not in {"discord_attachment", "discord_embed"}:
             resolved.append(media)
             continue
 
-        channel_id = media.get("channel_id")
-        message_id = media.get("message_id")
+        channel_id = probe.get("channel_id")
+        message_id = probe.get("message_id")
         if channel_id is None or message_id is None:
             resolved.append(media)
             continue
@@ -675,11 +685,11 @@ async def _resolve_media_refs_to_urls(
             continue
 
         url = None
-        content_type = media.get("content_type")
+        content_type = probe.get("content_type")
         if source == "discord_attachment":
-            raw_index = media.get("attachment_index")
+            raw_index = probe.get("attachment_index")
             if raw_index is None:
-                raw_index = media.get("index")
+                raw_index = probe.get("index")
             if raw_index is not None:
                 attachments = inspected.get("attachments", [])
                 try:
@@ -690,7 +700,7 @@ async def _resolve_media_refs_to_urls(
                     url = attachment.get("url") or attachment.get("proxy_url")
                     content_type = content_type or attachment.get("content_type")
         elif source == "discord_embed":
-            embed_slot = media.get("embed_slot")
+            embed_slot = probe.get("embed_slot")
             if embed_slot:
                 for embed_media in inspected.get("embeds_media", []):
                     if embed_media.get("slot") != embed_slot:
@@ -1743,11 +1753,13 @@ def _make_publish_handler(
 
         # ── media gate: media was requested but none survived ─────────
         # If the draft specifies media and every item failed to resolve or
-        # upload, do NOT silently publish a text-only post as success — the
-        # draft's whole point was the media. Route to failed so the admin can
-        # fix and retry. (Partial failure — some media attached — is allowed;
-        # media_failures records what was lost.)
-        if selected_media and not media_hints:
+        # durable-upload, do NOT silently publish a text-only post as
+        # success — the draft's whole point was the media. Route to failed
+        # so the admin can fix and retry. A fallback hint (upload failed,
+        # no durable_url) does NOT count as surviving — only hints with a
+        # real durable URL can be attached.
+        usable_hints = [h for h in media_hints if h.get("durable_url")]
+        if selected_media and not usable_hints:
             error_msg = (
                 "All requested media failed to resolve/upload — refusing to "
                 f"publish text-only ({len(media_failures)} failure(s))."
@@ -1941,6 +1953,55 @@ async def _publish_thread(
             if item_failures:
                 media_failures.extend(item_failures)
 
+        # Per-item media gate: this item requested media but none survived
+        # (no durable URL). Do not publish the item text-only as success —
+        # fail it so the admin sees exactly which item lost its media.
+        item_usable_hints = [h for h in item_media_hints if h.get("durable_url")]
+        if item_media_refs and not item_usable_hints:
+            err = (
+                f"Thread item {i} media failed to resolve/upload "
+                f"({len(item_failures)} failure(s)) — refusing text-only item."
+            )
+            logger.error("publish_social_post: %s", err)
+            per_item_outcomes.append({
+                "index": i,
+                "success": False,
+                "error": err,
+                "media_failures": item_failures,
+            })
+            if i == 0:
+                # Root item lost its media — abort the whole thread.
+                run_state.add_trace(
+                    "tool", tool=tool_name,
+                    thread_root_failed=True,
+                    media_all_failed=True,
+                    error=err,
+                )
+                outcome = PublishOutcome(
+                    success=False,
+                    error=err,
+                    failure_reason=FailureReason.MEDIA_RESOLUTION_FAILED.value,
+                    media_missing=[f.get("identity", {}) for f in item_failures],
+                    per_item_outcomes=per_item_outcomes,
+                )
+                run_state.publication_outcome = outcome
+                run_state.terminal_status = "failed"
+                db_handler.update_live_update_social_run(
+                    run_id=run_state.run_id,
+                    terminal_status="failed",
+                    publication_outcome=outcome.to_dict(),
+                    trace_entries=run_state.trace_entries,
+                )
+                return {
+                    "tool": tool_name,
+                    "terminal_status": "failed",
+                    "ok": False,
+                    "media_all_failed": True,
+                    "error": err,
+                }
+            # Non-root item lost media — skip it, continue the thread.
+            continue
+
         # For root post (index 0), use action='post'
         action = "reply" if i > 0 else "post"
 
@@ -2105,11 +2166,18 @@ async def _publish_thread(
     run_state.terminal_status = "published"
     run_state.draft_text = draft_text = thread_items_raw[0].get("draft_text", "") if thread_items_raw else ""
     run_state.media_decisions = run_state.media_decisions or {}
+    # Merge per-item media failures into the persisted decisions (the
+    # top-level handler copied them before thread items ran).
+    existing_failures = run_state.media_decisions.setdefault("media_failures", [])
+    for f in media_failures:
+        if f not in existing_failures:
+            existing_failures.append(f)
     run_state.add_trace(
         "tool", tool=tool_name,
         terminal_status="published",
         thread_items=len(per_item_outcomes),
         thread_success=all_success,
+        media_failures_count=len(media_failures),
     )
 
     db_handler.update_live_update_social_run(

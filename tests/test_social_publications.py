@@ -126,7 +126,21 @@ class FakeSupabase:
 def build_db_handler(fake_supabase: FakeSupabase) -> DatabaseHandler:
     db_handler = object.__new__(DatabaseHandler)
     db_handler.supabase = fake_supabase
-    db_handler.storage_handler = type("Storage", (), {"supabase_client": fake_supabase})()
+
+    async def _download_and_upload_url(source_url: str, storage_path: str,
+                                       bucket_name: Optional[str] = None) -> str:
+        # Deterministic fake durable URL so publish-path tests exercise the
+        # durable-upload branch instead of failing on a missing method.
+        return f"https://fake-storage.example/{storage_path}"
+
+    db_handler.storage_handler = type(
+        "Storage",
+        (),
+        {
+            "supabase_client": fake_supabase,
+            "download_and_upload_url": _download_and_upload_url,
+        },
+    )()
     class ServerConfigStub:
         def get_enabled_servers(self, require_write=False):
             return [{"guild_id": 1}]

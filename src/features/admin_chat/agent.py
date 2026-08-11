@@ -695,7 +695,13 @@ class AdminChatAgent:
                     final_replies.append(f"Aborted. Completed {len(actions)} action(s) before stopping.")
                     break
 
-                # If the reply or end_turn tool was called, we're done
+                # If the reply or end_turn tool was called, we're done — but
+                # synthesize a milestone confirmation FIRST so an end_turn
+                # sibling of a milestone never leaves the admin with silence.
+                if milestone_hit and not final_replies:
+                    confirm = _milestone_confirmation(actions)
+                    if confirm:
+                        final_replies.append(confirm)
                 if any(t.name in ("reply", "end_turn") for t in tool_uses):
                     break
 

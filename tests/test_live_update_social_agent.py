@@ -1745,7 +1745,7 @@ class TestPublishMode:
         db, run_state = self._make_db_with_run(fake)
         svc = FakeSocialPublishService()
         with self._mock_user_details_patch():
-            handler_fn = _make_publish_handler(db, social_publish_service=svc, force_publish=True)
+            handler_fn = _make_publish_handler(db, social_publish_service=svc, force_publish=True, bot=MagicMock())
             result = await handler_fn(run_state, {
                 "draft_text": "",
                 "thread_items": [
@@ -1770,11 +1770,26 @@ class TestPublishMode:
     @pytest.mark.asyncio
     async def test_thread_media_associations_traced(self):
         """Thread items can have per-item media_refs traced in outcomes."""
+        from src.features.sharing.live_update_social.helpers import inspect_discord_message as _real_inspect
+        async def _fake_inspect(bot_, channel_id, message_id):
+            if message_id == 42:
+                return {
+                    "attachments": [
+                        {"url": "https://cdn.discordapp.com/attachments/root.mp4",
+                         "content_type": "video/mp4"},
+                    ],
+                    "embeds_media": [],
+                }
+            return {"error": "not found"}
+
         fake = FakeSupabase({"live_update_social_runs": []})
         db, run_state = self._make_db_with_run(fake)
         svc = FakeSocialPublishService(media_ids=["media-root"])
-        with self._mock_user_details_patch():
-            handler_fn = _make_publish_handler(db, social_publish_service=svc, force_publish=True)
+        with patch(
+            "src.features.sharing.live_update_social.helpers.inspect_discord_message",
+            new=_fake_inspect,
+        ), self._mock_user_details_patch():
+            handler_fn = _make_publish_handler(db, social_publish_service=svc, force_publish=True, bot=MagicMock())
             result = await handler_fn(run_state, {
                 "draft_text": "",
                 "thread_items": [
@@ -1802,11 +1817,26 @@ class TestPublishMode:
     @pytest.mark.asyncio
     async def test_thread_reply_no_duplicate_media(self):
         """Replies in a thread do not accidentally reattach root's media."""
+        from src.features.sharing.live_update_social.helpers import inspect_discord_message as _real_inspect
+        async def _fake_inspect(bot_, channel_id, message_id):
+            if message_id == 42:
+                return {
+                    "attachments": [
+                        {"url": "https://cdn.discordapp.com/attachments/root.mp4",
+                         "content_type": "video/mp4"},
+                    ],
+                    "embeds_media": [],
+                }
+            return {"error": "not found"}
+
         fake = FakeSupabase({"live_update_social_runs": []})
         db, run_state = self._make_db_with_run(fake)
         svc = FakeSocialPublishService(media_ids=["media-1"])
-        with self._mock_user_details_patch():
-            handler_fn = _make_publish_handler(db, social_publish_service=svc, force_publish=True)
+        with patch(
+            "src.features.sharing.live_update_social.helpers.inspect_discord_message",
+            new=_fake_inspect,
+        ), self._mock_user_details_patch():
+            handler_fn = _make_publish_handler(db, social_publish_service=svc, force_publish=True, bot=MagicMock())
             result = await handler_fn(run_state, {
                 "draft_text": "",
                 "thread_items": [
@@ -1840,7 +1870,7 @@ class TestPublishMode:
         db, run_state = self._make_db_with_run(fake)
         svc = FakeSocialPublishService(success=False, error="Root publish failed")
         with self._mock_user_details_patch():
-            handler_fn = _make_publish_handler(db, social_publish_service=svc, force_publish=True)
+            handler_fn = _make_publish_handler(db, social_publish_service=svc, force_publish=True, bot=MagicMock())
             result = await handler_fn(run_state, {
                 "draft_text": "",
                 "thread_items": [
