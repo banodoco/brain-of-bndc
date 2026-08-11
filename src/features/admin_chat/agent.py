@@ -378,6 +378,22 @@ class AdminChatAgent:
                     "(1-based) + draft_text."
                 )
 
+            # ── Social failed-publish context (per-turn only) ─────────
+            social_failed_run = channel_context.get('social_failed_run')
+            if social_failed_run:
+                ctx_parts.append(
+                    f"\n\n[Social Failed-Publish Review — "
+                    f"run_id={social_failed_run.get('run_id')}, "
+                    f"revision={social_failed_run.get('revision')}, "
+                    f"topic={social_failed_run.get('topic_title')}]\n"
+                    f"Failure: {social_failed_run.get('failure')}\n"
+                    f"Draft text:\n---\n"
+                    f"{social_failed_run.get('draft_text', '')}\n---\n"
+                    "The draft is preserved and still approved. Diagnose the "
+                    "cause (route? provider? media?), then retry with "
+                    "publish_social_draft once fixed, or edit/discard."
+                )
+
             full_message = "".join(ctx_parts) + "\n\n" + user_message
         persisted_user_msg: Dict[str, Any] = {"role": "user", "content": user_message}
         request_user_msg: Dict[str, Any] = {"role": "user", "content": full_message}
@@ -387,6 +403,35 @@ class AdminChatAgent:
         final_replies: List[str] = []  # Can have multiple messages
         action_tool_called = False  # Tracks whether any non-reply/non-end_turn tool ran
         available_tools = TOOLS
+        # ── context-gated tool allowlist ─────────────────────────────
+        # In a social-review turn, restrict the surface to the review loop:
+        # reply/end_turn + social draft/proposal tools + read-only research.
+        # share_to_social (which bypasses the draft state machine entirely)
+        # and payment/moderation tools are hidden so a single model response
+        # cannot chain develop → approve → publish → out-of-band share.
+        if channel_context and (
+            channel_context.get('social_draft_run')
+            or channel_context.get('social_proposal_run')
+            or channel_context.get('social_failed_run')
+        ):
+            review_allowed = {
+                "reply", "end_turn",
+                # proposal bridge
+                "develop_social_proposal",
+                # draft loop
+                "update_social_draft", "approve_social_draft",
+                "publish_social_draft", "preview_social_draft",
+                "list_pending_social_drafts", "discard_social_draft",
+                # read/research
+                "find_messages", "inspect_message", "get_active_channels",
+                "query_table", "get_live_update_status", "get_bot_status",
+                "search_logs", "list_social_routes", "inspect_social_runs",
+                "inspect_social_publication", "resolve_user",
+            }
+            available_tools = [
+                t for t in TOOLS
+                if t.get("name") in review_allowed
+            ]
         allowed_tool_names = {tool["name"] for tool in available_tools}
         
         max_iterations = 100

@@ -1589,12 +1589,47 @@ class TopicEditor:
             lines.extend(created_lines)
             lines.append("")
 
+        draft_lines = self._open_drafts_recap(dispatcher_context)
+        if draft_lines:
+            lines.append("--- Drafts in progress (content preserved verbatim below) ---")
+            lines.extend(draft_lines)
+            lines.append("")
+
         lines.append(
             "The full source-message dump and earlier turns were summarized to save tokens. "
             "Use the message/reply/search context tools to re-read any specific source in "
             "full before deciding on it."
         )
         return "\n".join(lines)
+
+    def _open_drafts_recap(self, dispatcher_context: Dict[str, Any]) -> List[str]:
+        """Summarize nonterminal drafts with their card bodies preserved verbatim.
+
+        Post-compaction the model no longer has the create/edit tool results in
+        context; without this recap it cannot see what it was drafting and may
+        abandon healthy drafts or edit them blind. Each draft's headline and card
+        bodies are reproduced so edits can proceed without a DB re-read.
+        """
+        lines: List[str] = []
+        drafts = dispatcher_context.get("drafts") or {}
+        for state in list(drafts.values()):
+            status = str(state.get("status") or "drafting")
+            if self._draft_is_terminal(status):
+                continue
+            draft_id = state.get("draft_id")
+            draft_json = state.get("draft_json") or {}
+            headline = draft_json.get("headline") or draft_json.get("topic_key") or draft_id
+            lines.append(f"- draft `{draft_id}` status={status} headline={headline!r}")
+            cards = draft_json.get("cards") or []
+            for idx, card in enumerate(cards):
+                body = str(card.get("body") or "").replace("\n", " ").strip()
+                if len(body) > 400:
+                    body = body[:397].rstrip() + "..."
+                lines.append(f"  card[{idx}] angle={card.get('angle') or '?'}: {body}")
+            media = [m for m in (draft_json.get("media_ids") or [])]
+            if media:
+                lines.append(f"  media_ids={media}")
+        return lines
 
     def _top_source_items(self, messages: Sequence[Dict[str, Any]], limit: int = 6) -> List[str]:
         ranked = sorted(
@@ -2445,6 +2480,8 @@ class TopicEditor:
             revision_hash = revision_hash_for_topic_editor_draft(draft_json)
             state = {
                 "draft_id": draft_id,
+                "run_id": context.get("run_id"),
+                "guild_id": context.get("guild_id"),
                 "draft_json": draft_json,
                 "status": "drafting",
                 "revision_number": 1,
@@ -4717,6 +4754,7 @@ class TopicEditor:
         sent_ids: List[int],
         source_message_ids: Any,
         publish_diagnostics: Any,
+        media_source_message_ids: Optional[Sequence[Any]] = None,
     ) -> None:
         if status not in {'sent', 'partial'}:
             return
@@ -4749,6 +4787,11 @@ class TopicEditor:
                     'cog': 'topic_editor',
                     'environment': self.environment,
                     'source_message_ids': list(source_message_ids or []),
+                    # The ORIGINAL source messages that carry media (the
+                    # understanding cache is keyed by these). Lets the social
+                    # loop's grounding guard compare like-for-like instead of
+                    # guessing from bot-published message IDs.
+                    'media_source_message_ids': list(media_source_message_ids or []),
                     'publish_diagnostics': publish_diagnostics or {},
                 },
                 topic_summary_data=topic_summary_data,
@@ -4760,17 +4803,18 @@ class TopicEditor:
             logger.exception('social handoff scheduling failed', exc_info=True)
 
     def _invalidate_social_drafts_for_topic(self, topic_id: str, reason: str) -> None:
-        """Expire every open (pending, not terminal) social draft for *topic_id*.
+        """Expire every open reviewable social run for *topic_id*.
 
-        Designed to be called from state-change paths (discard, admin delete) so
-        downstream reviewers never see stale ``pending`` runs.  Callers are
-        responsible for supplying a clear *reason* string for audit logging.
+        Covers proposed, draft, and failed runs (not just pending rows with
+        terminal_status IS NULL) so a discarded topic cannot leave stale
+        proposals/drafts in the admin review queue. Published runs are
+        deliberately untouched.  Callers are responsible for supplying a
+        clear *reason* string for audit logging.
         """
         try:
-            rows = self.db.list_open_social_runs(
-                environment=self.environment,
+            rows = self.db.list_reviewable_social_runs_for_topic(
                 topic_id=topic_id,
-                limit=50,
+                environment=self.environment,
             )
             for row in (rows or []):
                 self.db.update_live_update_social_run(
@@ -4943,7 +4987,11 @@ class TopicEditor:
         # --- field: editorial reasoning (the agent's overall narrative) ---
         reasoning = metadata.get("reasoning")
         if reasoning:
-            reasoning_text = reasoning if len(reasoning) <= 1024 else reasoning[:1000] + "…"
+            if len(reasoning) <= 1024:
+                reasoning_text = reasoning
+            else:
+                truncated_note = "\n… (truncated; full reasoning in run metadata)"
+                reasoning_text = reasoning[: 1024 - len(truncated_note)].rstrip() + truncated_note
             embed.add_field(name="editorial reasoning", value=reasoning_text, inline=False)
         else:
             embed.add_field(name="editorial reasoning", value="_(agent did not provide reasoning)_", inline=False)
@@ -5468,7 +5516,11 @@ class TopicEditor:
                     ),
                     "model": self.model,
                 })
-            self._fire_social_handoff(topic, channel_id, status, sent_ids, all_source_ids, publish_diagnostics)
+            self._fire_social_handoff(
+                topic, channel_id, status, sent_ids, all_source_ids,
+                publish_diagnostics,
+                media_source_message_ids=_media_bearing_source_ids(source_metadata),
+            )
             return {
                 "topic_id": topic_id,
                 "status": status,
@@ -5523,7 +5575,10 @@ class TopicEditor:
             "last_published_at": datetime.now(timezone.utc).isoformat() if sent_ids else None,
         }
         self.db.update_topic(topic_id, updates, guild_id=guild_id, environment=self.environment)
-        self._fire_social_handoff(topic, channel_id, status, sent_ids, topic.get('source_message_ids') or [], None)
+        self._fire_social_handoff(
+            topic, channel_id, status, sent_ids,
+            topic.get('source_message_ids') or [], None,
+        )
         return {"topic_id": topic_id, "status": status, "discord_message_ids": sent_ids, "error": error}
 
     async def _send_one_unit(
@@ -6779,6 +6834,27 @@ def _canonical_jsonable(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_canonical_jsonable(item) for item in value]
     return value
+
+
+def _media_bearing_source_ids(
+    source_metadata: Dict[str, Dict[str, Any]],
+) -> List[str]:
+    """Return source message IDs that carry attachments/embeds.
+
+    Uses the hydrated source metadata built at publish time (each row is a
+    source message with its attachments list). The social handoff needs this
+    so its grounding guard can tell media-bearing sources from text-only
+    sources without guessing from bot-published message IDs.
+    """
+    out: List[str] = []
+    for mid, row in (source_metadata or {}).items():
+        if not isinstance(row, dict):
+            continue
+        attachments = row.get("attachments") or []
+        embeds = row.get("embeds_media") or row.get("embeds") or []
+        if attachments or embeds:
+            out.append(str(mid))
+    return out
 
 
 def canonical_topic_editor_draft_json(draft: TopicEditorDraft | Dict[str, Any]) -> Dict[str, Any]:

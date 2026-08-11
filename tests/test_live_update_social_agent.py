@@ -1580,7 +1580,7 @@ class TestPublishMode:
 
     @pytest.mark.asyncio
     async def test_route_missing_blocks_publish(self):
-        """Missing social route returns error with route_missing flag."""
+        """Missing social route fails honestly (ok=False, status=failed, retryable)."""
         fake = FakeSupabase({"live_update_social_runs": []})
         db, run_state = self._make_db_with_run(fake, platform="nonexistent-platform")
         svc = FakeSocialPublishService()
@@ -1588,8 +1588,9 @@ class TestPublishMode:
             handler_fn = _make_publish_handler(db, social_publish_service=svc, force_publish=True)
             result = await handler_fn(run_state, {"draft_text": "Should fail"})
 
-        assert result["ok"] is True  # handler succeeds, but marks route_missing
+        assert result["ok"] is False  # NOT a success — nothing was posted
         assert result.get("route_missing") is True
+        assert result.get("terminal_status") == "failed"  # retryable, not published
         assert len(svc.publish_calls) == 0
 
     # ── provider failure ─────────────────────────────────────────────
@@ -1604,13 +1605,120 @@ class TestPublishMode:
             handler_fn = _make_publish_handler(db, social_publish_service=svc, force_publish=True)
             result = await handler_fn(run_state, {"draft_text": "Will fail"})
 
-        assert result["ok"] is True
+        assert result["ok"] is False
         assert result.get("error") is not None
+        assert result.get("terminal_status") == "failed"
         assert "failure_reason" in result
         row = db.get_live_update_social_run(run_state.run_id)
         outcome = row.get("publication_outcome")
         assert outcome is not None
         assert outcome.get("success") is False
+
+    @pytest.mark.asyncio
+    async def test_publish_resolves_identity_media_and_attaches(self):
+        """Identity-only media refs resolve to URLs and attach on publish."""
+        import os
+        original = os.environ.get("LIVE_UPDATE_SOCIAL_MODE", "")
+        try:
+            os.environ["LIVE_UPDATE_SOCIAL_MODE"] = "publish"
+            fake = FakeSupabase({"live_update_social_runs": []})
+            db, run_state = self._make_db_with_run(
+                fake,
+                draft_text="Draft with media",
+                media_decisions={
+                    "selected": [
+                        {"source": "discord_attachment", "channel_id": 10,
+                         "message_id": 42, "attachment_index": 0},
+                    ],
+                },
+            )
+            svc = FakeSocialPublishService(media_ids=["med-1"])
+            bot = MagicMock()
+
+            # Stub durable upload so the fake Storage's missing
+            # download_and_upload_url doesn't fail the happy path.
+            async def _fake_upload(source_url, storage_path):
+                return f"https://supabase.example/{storage_path}"
+
+            db.storage_handler.download_and_upload_url = _fake_upload
+
+            # Fake Discord inspection: message 42 has one attachment with a URL.
+            from src.features.sharing.live_update_social.helpers import inspect_discord_message as _real_inspect
+            async def _fake_inspect(bot_, channel_id, message_id):
+                if message_id == 42:
+                    return {
+                        "attachments": [
+                            {"url": "https://cdn.discordapp.com/attachments/clip.mp4",
+                             "content_type": "video/mp4"},
+                        ],
+                        "embeds_media": [],
+                    }
+                return {"error": "not found"}
+
+            with patch(
+                "src.features.sharing.live_update_social.helpers.inspect_discord_message",
+                new=_fake_inspect,
+            ), self._mock_user_details_patch():
+                handler_fn = _make_publish_handler(
+                    db, social_publish_service=svc, force_publish=True, bot=bot
+                )
+                result = await handler_fn(run_state, {
+                    "draft_text": "Draft with media",
+                    "selected_media": [
+                        {"source": "discord_attachment", "channel_id": 10,
+                         "message_id": 42, "attachment_index": 0},
+                    ],
+                    "skip_media_understanding": True,
+                    "skip_media_reason": "media already understood during develop",
+                })
+
+            assert result["ok"] is True
+            assert result["terminal_status"] == "published"
+            assert result["media_attached_count"] == 1
+            # Media actually reached the provider request.
+            assert len(svc.publish_calls) == 1
+            request = svc.publish_calls[0]
+            assert len(request.media_hints) == 1
+            assert request.media_hints[0]["identity"]["message_id"] == 42
+        finally:
+            os.environ["LIVE_UPDATE_SOCIAL_MODE"] = original
+
+    @pytest.mark.asyncio
+    async def test_publish_media_skip_without_reason_rejected(self):
+        """skip_media_understanding=True without a reason is refused (no silent drop)."""
+        import os
+        original = os.environ.get("LIVE_UPDATE_SOCIAL_MODE", "")
+        try:
+            os.environ["LIVE_UPDATE_SOCIAL_MODE"] = "publish"
+            fake = FakeSupabase({"live_update_social_runs": []})
+            db, run_state = self._make_db_with_run(
+                fake,
+                draft_text="Draft with media",
+                media_decisions={
+                    "selected": [
+                        {"url": "https://cdn.example/clip.mp4", "content_type": "video/mp4"},
+                    ],
+                },
+            )
+            svc = FakeSocialPublishService()
+            with self._mock_user_details_patch():
+                handler_fn = _make_publish_handler(
+                    db, social_publish_service=svc, force_publish=True, bot=MagicMock()
+                )
+                result = await handler_fn(run_state, {
+                    "draft_text": "Draft with media",
+                    "selected_media": [
+                        {"url": "https://cdn.example/clip.mp4", "content_type": "video/mp4"},
+                    ],
+                    "skip_media_understanding": True,
+                    # no skip_media_reason — must refuse, not silently post text-only
+                })
+
+            assert result["ok"] is False
+            assert "skip_media_reason" in result["error"].lower()
+            assert len(svc.publish_calls) == 0
+        finally:
+            os.environ["LIVE_UPDATE_SOCIAL_MODE"] = original
 
     # ── user_details resolution ──────────────────────────────────────
 

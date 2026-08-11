@@ -3096,10 +3096,13 @@ class DatabaseHandler:
         self,
         environment: Optional[str] = None,
     ) -> List[Dict]:
-        """Return social runs awaiting admin review (draft OR proposed).
+        """Return social runs awaiting admin review (draft, proposed, or failed).
 
-        Filters terminal_status IN ('draft','proposed') AND approval_state
-        != 'expired', ordered by created_at DESC, capped at 25 rows.
+        Filters terminal_status IN ('draft','proposed','failed') AND
+        approval_state != 'expired', ordered by created_at DESC, capped at
+        25 rows. Failed runs are included so a failed publish is retryable
+        from the admin backlog instead of vanishing.
+
         Distinct from ``list_open_social_runs`` which filters
         terminal_status IS NULL and would therefore exclude drafts the
         agent has already transitioned to terminal_status='draft' or
@@ -3114,17 +3117,71 @@ class DatabaseHandler:
             result = (
                 self.supabase.table("live_update_social_runs")
                 .select("*")
-                .in_("terminal_status", ["draft", "proposed"])
+                .in_("terminal_status", ["draft", "proposed", "failed"])
                 .neq("approval_state", "expired")
                 .order("created_at", desc=True)
-                .limit(25)
+                .limit(50)
+                .execute()
+            )
+            rows = result.data if result.data else []
+            # Enforce expiry: rows past expires_at are dropped from the pending
+            # backlog (they can still be found by run_id for explicit repair).
+            now = datetime.now(timezone.utc)
+            live = []
+            for row in rows:
+                expires_at = row.get("expires_at")
+                if expires_at:
+                    try:
+                        ts = expires_at
+                        if isinstance(ts, str):
+                            ts = datetime.fromisoformat(
+                                ts.replace("Z", "+00:00")
+                            )
+                        if ts.tzinfo is None:
+                            ts = ts.replace(tzinfo=timezone.utc)
+                        if ts <= now:
+                            continue
+                    except (TypeError, ValueError):
+                        pass  # malformed expiry — keep the row, do not drop
+                live.append(row)
+            return live[:25]
+        except Exception as e:
+            logger.error(
+                "Error listing pending review live_update_social_runs: %s",
+                e,
+                exc_info=True,
+            )
+            return []
+
+    def list_reviewable_social_runs_for_topic(
+        self,
+        topic_id: str,
+        environment: Optional[str] = None,
+    ) -> List[Dict]:
+        """Return non-expired reviewable runs (proposed/draft/failed) for a topic.
+
+        Used by topic-discard invalidation: proposed and draft runs must be
+        expired when their topic is discarded, not just pending (terminal
+        IS NULL) rows. Published runs are deliberately excluded — they are
+        done and must not be un-published by a discard.
+        """
+        if not self.supabase:
+            return []
+        try:
+            result = (
+                self.supabase.table("live_update_social_runs")
+                .select("*")
+                .eq("topic_id", str(topic_id))
+                .in_("terminal_status", ["proposed", "draft", "failed"])
+                .neq("approval_state", "expired")
+                .limit(50)
                 .execute()
             )
             return result.data if result.data else []
         except Exception as e:
             logger.error(
-                "Error listing pending review live_update_social_runs: %s",
-                e,
+                "Error listing reviewable social runs for topic %s: %s",
+                topic_id, e,
                 exc_info=True,
             )
             return []

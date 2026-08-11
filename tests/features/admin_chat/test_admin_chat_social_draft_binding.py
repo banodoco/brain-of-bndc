@@ -188,3 +188,91 @@ async def test_dm_reply_to_published_run_does_not_inject():
 
     ctx = _captured_channel_context(cog)
     assert "social_draft_run" not in ctx
+
+
+@pytest.mark.asyncio
+async def test_dm_reply_to_failed_run_injects_failed_context():
+    """A failed-publish run binds social_failed_run + failed guidance (retryable)."""
+    from src.features.admin_chat.admin_chat_cog import SOCIAL_FAILED_REVIEW_GUIDANCE
+
+    row = {
+        "run_id": "run-failed-1",
+        "draft_text": "Draft that failed to publish",
+        "revision": 3,
+        "approval_state": "approved",
+        "terminal_status": "failed",
+        "expires_at": "2030-01-01T00:00:00+00:00",
+        "publication_outcome": {"success": False, "error": "No social route configured for twitter"},
+        "topic_summary_data": {"title": "Failed Topic"},
+    }
+    db = _make_db(review_lookup_return=row)
+    cog = _make_cog(db)
+    msg = _make_dm_message(parent_id=555, content="retry the publish")
+
+    await cog._handle_admin_message(msg)
+
+    ctx = _captured_channel_context(cog)
+    assert "social_failed_run" in ctx
+    fr = ctx["social_failed_run"]
+    assert fr["run_id"] == "run-failed-1"
+    assert fr["draft_text"] == "Draft that failed to publish"
+    assert "No social route configured" in fr["failure"]
+    assert ctx["channel_guidance"] == SOCIAL_FAILED_REVIEW_GUIDANCE
+    assert "social_draft_run" not in ctx
+
+
+@pytest.mark.asyncio
+async def test_dm_reply_to_proposed_run_injects_proposal_context():
+    """A proposed run binds social_proposal_run + proposal guidance."""
+    from src.features.admin_chat.admin_chat_cog import SOCIAL_PROPOSAL_REVIEW_GUIDANCE
+
+    row = {
+        "run_id": "run-proposed-1",
+        "draft_text": None,
+        "revision": 0,
+        "approval_state": "pending",
+        "terminal_status": "proposed",
+        "expires_at": "2030-01-01T00:00:00+00:00",
+        "proposals": [
+            {"theme": "Idea one", "media_strategy": "single clip",
+             "source_message_ids": ["42"], "rationale": "why"},
+        ],
+        "topic_summary_data": {"title": "Proposal Topic"},
+    }
+    db = _make_db(review_lookup_return=row)
+    cog = _make_cog(db)
+    msg = _make_dm_message(parent_id=555, content="let's do the first one")
+
+    await cog._handle_admin_message(msg)
+
+    ctx = _captured_channel_context(cog)
+    assert "social_proposal_run" in ctx
+    pr = ctx["social_proposal_run"]
+    assert pr["run_id"] == "run-proposed-1"
+    assert len(pr["proposals"]) == 1
+    assert ctx["channel_guidance"] == SOCIAL_PROPOSAL_REVIEW_GUIDANCE
+    assert "social_draft_run" not in ctx
+
+
+@pytest.mark.asyncio
+async def test_dm_reply_to_expired_run_treated_as_orphan():
+    """An expired review DM (past expires_at) must NOT inject review context."""
+    row = {
+        "run_id": "run-expired",
+        "draft_text": "Stale draft",
+        "revision": 1,
+        "approval_state": "pending",
+        "terminal_status": "draft",
+        "expires_at": "2020-01-01T00:00:00+00:00",  # long past
+        "topic_summary_data": {"title": "Old"},
+    }
+    db = _make_db(review_lookup_return=row)
+    cog = _make_cog(db)
+    msg = _make_dm_message(parent_id=555, content="what's this draft?")
+
+    await cog._handle_admin_message(msg)
+
+    ctx = _captured_channel_context(cog)
+    assert "social_draft_run" not in ctx
+    assert "social_proposal_run" not in ctx
+    assert "social_failed_run" not in ctx

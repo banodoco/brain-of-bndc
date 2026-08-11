@@ -378,6 +378,14 @@ class LiveUpdateSocialAgent:
         for sid in src_meta.get("source_message_ids") or []:
             if str(sid).strip():
                 source_ids.append(str(sid))
+        # The topic editor tells us which ORIGINAL source messages carry media
+        # (media_source_message_ids) — used by the run() grounding guard so it
+        # compares like-for-like instead of matching source ids against the
+        # bot's published message ids.
+        media_source_ids = {
+            str(sid) for sid in (src_meta.get("media_source_message_ids") or [])
+            if str(sid).strip()
+        }
         # Fallback: only when the handoff carried no source ids — the selected
         # media refs' message_ids are at least more likely to be source
         # messages than the bot's output message.
@@ -419,12 +427,11 @@ class LiveUpdateSocialAgent:
             if found is None:
                 # Not every source message carries media — a text-only source
                 # has no cache row and that is EXPECTED, not a miss. Only
-                # record a miss when this source actually appears in the run's
-                # resolved media decisions (i.e. it is media-bearing).
-                media_bearing = any(
-                    isinstance(m, dict)
-                    and str(m.get("message_id") or "") == sid
-                    for m in selected
+                # record a miss when this source is media-bearing (the editor
+                # told us so) or we have no media manifest at all (fall back
+                # to treating it as media-bearing so the guard stays strict).
+                media_bearing = (
+                    sid in media_source_ids if media_source_ids else True
                 )
                 results.append({
                     "source": "discord_attachment",

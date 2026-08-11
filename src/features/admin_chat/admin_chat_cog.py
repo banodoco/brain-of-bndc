@@ -136,10 +136,30 @@ replies to a bot-posted draft, you are handling that review turn.
 - If this reply has no matching draft context (orphaned reply), call
   `list_pending_social_drafts` to surface the correct run for the admin."""
 
+SOCIAL_FAILED_REVIEW_GUIDANCE = """\
+## Social Failed-Publish Review
+
+This channel is for admin review of a social post whose publish FAILED. The
+run is injected into context (run_id, draft_text, failure reason).
+
+- **The draft is preserved and still approved** — once the cause is fixed you
+  may retry with `publish_social_draft`, or edit with `update_social_draft`
+  (which resets approval, so re-approve after editing), or discard with
+  `discard_social_draft`.
+- **Common causes:** no social route configured for the platform (check
+  `list_social_routes` / `create_social_route`), provider/API failure, or
+  media upload failure. Diagnose before retrying — a blind retry of the same
+  broken state wastes a turn.
+- **Approval and publish are always separate turns.** If you edit, re-approve
+  first, then wait for a distinct publish instruction.
+- If this reply has no matching failed-run context (orphaned reply), call
+  `list_pending_social_drafts` to surface the correct run for the admin."""
+
 SOCIAL_PROPOSAL_REVIEW_GUIDANCE = """\
 ## Social Proposal Review Channel
 
 This channel is for admin review of social-media post IDEAS. When an admin
+replies to a bot-posted proposal set, you are handling that review turn.
 replies to a bot-posted proposal set, you are handling that review turn.
 
 - The proposed run is injected into context (run_id, proposals list). Each
@@ -1602,6 +1622,21 @@ class AdminChatCog(commands.Cog):
                 row = self.db_handler.get_social_run_by_review_message_id(
                     parent_id, environment=self._live_environment()
                 )
+                # Enforce expiry: an expired run's DM reply is treated as an
+                # orphan — no review context injected, so the agent falls back
+                # to list_pending_social_drafts and tells the admin the item
+                # expired instead of acting on a stale review.
+                if row is not None and row.get("expires_at"):
+                    try:
+                        ts = row["expires_at"]
+                        if isinstance(ts, str):
+                            ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                        if ts.tzinfo is None:
+                            ts = ts.replace(tzinfo=timezone.utc)
+                        if ts <= datetime.now(timezone.utc):
+                            row = None
+                    except (TypeError, ValueError):
+                        pass  # malformed expiry — do not drop the binding
                 # topic_summary_data is stored under publish_units.
                 topic_title = (
                     row.get("topic_summary_data")
@@ -1609,6 +1644,26 @@ class AdminChatCog(commands.Cog):
                     or {}
                 ).get("title", "") if row else ""
                 if (
+                    row is not None
+                    and row.get("terminal_status") == "failed"
+                ):
+                    # Failed-publish context — the admin can retry, edit, or
+                    # discard. Retry goes through publish_social_draft once the
+                    # cause (e.g. missing route) is fixed.
+                    channel_context["social_failed_run"] = {
+                        "run_id": row.get("run_id"),
+                        "draft_text": row.get("draft_text"),
+                        "revision": row.get("revision", 0),
+                        "approval_state": row.get("approval_state", "pending"),
+                        "topic_title": topic_title,
+                        "failure": (
+                            (row.get("publication_outcome") or {}).get("error")
+                            or "publish failed (see run logs)"
+                        ),
+                        "expires_at": row.get("expires_at"),
+                    }
+                    channel_context["channel_guidance"] = SOCIAL_FAILED_REVIEW_GUIDANCE
+                elif (
                     row is not None
                     and row.get("terminal_status") == "proposed"
                 ):

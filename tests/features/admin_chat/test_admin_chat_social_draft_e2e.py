@@ -114,7 +114,7 @@ class TestSocialDraftDMContextBinding:
             "revision": 2,
             "approval_state": "pending",
             "approved_revision": None,
-            "expires_at": "2026-06-01T00:00:00+00:00",
+            "expires_at": "2026-09-01T00:00:00+00:00",
             "terminal_status": "draft",
             "topic_summary_data": {"title": "E2E Topic"},
         }
@@ -133,7 +133,7 @@ class TestSocialDraftDMContextBinding:
         assert sd["approval_state"] == "pending"
         assert sd["approved_revision"] is None
         assert sd["topic_title"] == "E2E Topic"
-        assert sd["expires_at"] == "2026-06-01T00:00:00+00:00"
+        assert sd["expires_at"] == "2026-09-01T00:00:00+00:00"
         assert ctx["channel_guidance"] == SOCIAL_DRAFT_REVIEW_GUIDANCE
         db.get_social_run_by_review_message_id.assert_called_once_with(
             555, environment="prod"

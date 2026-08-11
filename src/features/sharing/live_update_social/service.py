@@ -210,6 +210,34 @@ class LiveUpdateSocialService:
                             "after agent returned proposals",
                             run_id,
                         )
+
+                # ── DM the admin when the run needs review (agent could
+                # not produce a safe proposal/draft) or publish failed ──
+                if terminal in ("needs_review", "failed") and run_id:
+                    row = self.db_handler.get_live_update_social_run(run_id)
+                    if row:
+                        trace_entries = row.get("trace_entries") or []
+                        reason = self._extract_terminal_reason(
+                            terminal, trace_entries, row.get("publication_outcome")
+                        )
+                        topic_summary_data = (
+                            row.get("topic_summary_data")
+                            or row.get("publish_units")
+                            or {}
+                        )
+                        topic_title = self._resolve_topic_title(topic_summary_data)
+                        await self._dm_admin_with_terminal(
+                            run_id=run_id,
+                            terminal_status=terminal,
+                            reason=reason,
+                            topic_title=topic_title,
+                        )
+                    else:
+                        self._log.warning(
+                            "LiveUpdateSocialService: could not re-fetch run %s "
+                            "after agent returned %s",
+                            run_id, terminal,
+                        )
             else:
                 self._log.warning(
                     "LiveUpdateSocialService: no bot available — cannot invoke "
@@ -279,6 +307,39 @@ class LiveUpdateSocialService:
             if title:
                 return title
         return ""
+
+    @staticmethod
+    def _extract_terminal_reason(
+        terminal_status: str,
+        trace_entries: list,
+        publication_outcome: Any,
+    ) -> str:
+        """Extract a human-readable reason for a needs_review / failed run."""
+        if not isinstance(trace_entries, list):
+            trace_entries = []
+
+        if terminal_status == "failed":
+            # Publish failure — publication_outcome carries the error.
+            if isinstance(publication_outcome, dict):
+                err = publication_outcome.get("error")
+                if err:
+                    return str(err)
+                reason = publication_outcome.get("failure_reason")
+                if reason:
+                    return f"publish failed: {reason}"
+
+        # needs_review — walk trace entries for force_needs_review reason.
+        for entry in reversed(trace_entries):
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("event") in ("force_needs_review", "media_resolution_failed"):
+                reason = entry.get("reason") or entry.get("error")
+                if reason:
+                    return str(reason)
+            if entry.get("event") == "tool" and entry.get("error"):
+                return str(entry["error"])
+
+        return "No reason recorded — see run logs for details."
 
     @staticmethod
     def _is_image_media(url: Optional[str], content_type: Optional[str] = None) -> bool:
@@ -816,5 +877,81 @@ class LiveUpdateSocialService:
         except Exception:
             self._log.exception(
                 "LiveUpdateSocialService: _dm_admin_with_proposals failed for run %s",
+                run_id,
+            )
+
+    async def _dm_admin_with_terminal(
+        self,
+        run_id: str,
+        terminal_status: str,
+        reason: str,
+        topic_title: str,
+    ) -> None:
+        """DM the admin when a run needs review or failed.
+
+        Persists ``review_message_id`` so the admin-chat loop can resolve
+        the run and repair it (retry publish on ``failed``, investigate on
+        ``needs_review``).
+        """
+        try:
+            admin_id = os.getenv("ADMIN_USER_ID")
+            if not admin_id:
+                self._log.warning(
+                    "LiveUpdateSocialService: ADMIN_USER_ID not set — "
+                    "cannot DM admin for run %s",
+                    run_id,
+                )
+                return
+
+            user = await self._bot.fetch_user(int(admin_id))
+
+            title = "Publish failed" if terminal_status == "failed" else "Needs review"
+            color = 0xE74C3C if terminal_status == "failed" else 0xF1C40F
+            embed = discord.Embed(
+                title=f"{title} — {topic_title or '(untitled)'}",
+                description=reason[:3500],
+                color=color,
+            )
+            embed.set_footer(text=f"run {run_id}")
+
+            repair_hint = (
+                "The draft is preserved. Reply here to retry the publish, "
+                "edit the draft, or discard."
+                if terminal_status == "failed"
+                else "Reply here to investigate or discard this run."
+            )
+            try:
+                msg = await user.send(
+                    content=f"{repair_hint}\n`run_id: {run_id}`",
+                    embed=embed,
+                )
+            except Exception:
+                self._log.exception(
+                    "LiveUpdateSocialService: terminal DM send failed for run %s",
+                    run_id,
+                )
+                return
+
+            env = os.getenv("ENVIRONMENT", "prod")
+            expires_at = (
+                datetime.now(timezone.utc) + timedelta(hours=72)
+            ).isoformat()
+            ok = self.db_handler.update_live_update_social_run(
+                run_id=run_id,
+                review_message_id=msg.id,
+                expires_at=expires_at,
+                environment=env,
+            )
+            if not ok:
+                self._log.error(
+                    "LiveUpdateSocialService: terminal DM sent (msg.id=%s) "
+                    "but DB write of review_message_id FAILED for run %s",
+                    msg.id,
+                    run_id,
+                )
+
+        except Exception:
+            self._log.exception(
+                "LiveUpdateSocialService: _dm_admin_with_terminal failed for run %s",
                 run_id,
             )

@@ -491,7 +491,10 @@ async def _run_media_understanding_and_upload(
             source_url = media_item.get("source_url") or media_item.get("url")
             if not source_url:
                 continue
-            identity = media_item.get("identity", {})
+            # The media item IS the identity when no nested identity exists
+            # (draft/develop refs carry source/message_id/attachment_index
+            # directly on the item).
+            identity = media_item.get("identity") or media_item
             content_type = media_item.get("content_type", "")
             media_understanding_results.append({
                 "index": i,
@@ -606,6 +609,97 @@ async def _run_media_understanding_and_upload(
 
 # ── handler factories ─────────────────────────────────────────────────
 # Each returns an async callable that updates the run and returns a result dict.
+
+
+async def _resolve_media_refs_to_urls(
+    bot: Optional["discord.Client"],
+    selected_media: list,
+) -> list:
+    """Enrich identity-only media refs with fresh Discord CDN URLs.
+
+    Draft/proposal media refs are identities (source=discord_attachment /
+    discord_embed, channel_id, message_id, attachment_index). The publish
+    path needs a real URL to durable-upload and attach. Resolves each
+    identity ref to a fresh CDN URL via inspect_discord_message and returns
+    a new list where every item has ``url`` set when resolvable.
+
+    Items that already carry a url/durable_url pass through unchanged.
+    Unresolvable refs are kept as-is (the durable-upload step records the
+    failure) — never silently dropped.
+    """
+    if not bot or not selected_media:
+        return list(selected_media)
+
+    from .helpers import inspect_discord_message
+
+    resolved: list = []
+    for media in selected_media:
+        if not isinstance(media, dict):
+            resolved.append(media)
+            continue
+        if media.get("url") or media.get("durable_url") or media.get("source_url"):
+            resolved.append(media)
+            continue
+
+        source = media.get("source")
+        if source not in {"discord_attachment", "discord_embed"}:
+            resolved.append(media)
+            continue
+
+        channel_id = media.get("channel_id")
+        message_id = media.get("message_id")
+        if channel_id is None or message_id is None:
+            resolved.append(media)
+            continue
+
+        try:
+            inspected = await inspect_discord_message(
+                bot, int(channel_id), int(message_id)
+            )
+        except Exception as e:
+            logger.warning(
+                "publish media resolution failed channel=%s msg=%s: %s",
+                channel_id, message_id, e,
+            )
+            resolved.append(media)
+            continue
+        if inspected.get("error"):
+            resolved.append(media)
+            continue
+
+        url = None
+        content_type = media.get("content_type")
+        if source == "discord_attachment":
+            raw_index = media.get("attachment_index")
+            if raw_index is None:
+                raw_index = media.get("index")
+            if raw_index is not None:
+                attachments = inspected.get("attachments", [])
+                try:
+                    attachment = attachments[int(raw_index)]
+                except (IndexError, TypeError, ValueError):
+                    attachment = None
+                if attachment:
+                    url = attachment.get("url") or attachment.get("proxy_url")
+                    content_type = content_type or attachment.get("content_type")
+        elif source == "discord_embed":
+            embed_slot = media.get("embed_slot")
+            if embed_slot:
+                for embed_media in inspected.get("embeds_media", []):
+                    if embed_media.get("slot") != embed_slot:
+                        continue
+                    url = embed_media.get("url") or embed_media.get("proxy_url")
+                    content_type = content_type or embed_media.get("content_type")
+                    break
+
+        if url:
+            media = dict(media)
+            media["url"] = str(url)
+            if content_type:
+                media["content_type"] = content_type
+        resolved.append(media)
+
+    return resolved
 
 
 def _make_draft_handler(db_handler: "DatabaseHandler") -> Any:
@@ -1593,19 +1687,26 @@ def _make_publish_handler(
             run_state.publication_outcome = outcome
             db_handler.update_live_update_social_run(
                 run_id=run_state.run_id,
-                terminal_status="published",
+                terminal_status="failed",
                 publication_outcome=outcome.to_dict(),
                 trace_entries=run_state.trace_entries,
             )
             return {
                 "tool": tool_name,
-                "terminal_status": "published",
-                "ok": True,
+                "terminal_status": "failed",
+                "ok": False,
                 "route_missing": True,
                 "error": error_msg,
             }
 
         # ── media understanding + durable upload (shared helper) ─────
+        # Identity-only refs must first resolve to fresh CDN URLs or the
+        # durable-upload step silently skips them and the post ships without
+        # media (or with a fallback link). Resolve now; keep unresolvable
+        # refs so the upload step records the failure.
+        selected_media = await _resolve_media_refs_to_urls(
+            bot, selected_media or []
+        )
         media_hints, media_understanding_results, media_failures = (
             await _run_media_understanding_and_upload(
                 db_handler=db_handler,
@@ -2062,7 +2163,12 @@ def _publish_failure_response(
     error_msg: str,
     context: Optional[dict] = None,
 ) -> dict:
-    """Build a failure response for publish, persisting the outcome."""
+    """Build a failure response for publish, persisting the outcome.
+
+    Terminal status is ``failed`` (retryable) — NOT ``published``. The run
+    keeps its draft/approval state so the admin can fix the cause and
+    retry via publish_social_draft.
+    """
     from .failure_reasons import classify_failure
     failure_reason = classify_failure(error_message=error_msg, context=context)
 
@@ -2072,19 +2178,19 @@ def _publish_failure_response(
         failure_reason=failure_reason.value,
     )
     run_state.publication_outcome = outcome
-    run_state.terminal_status = "published"
+    run_state.terminal_status = "failed"
     run_state.draft_text = draft_text
     run_state.media_decisions = run_state.media_decisions or {}
     run_state.add_trace(
         "tool", tool=tool_name,
-        terminal_status="published",
+        terminal_status="failed",
         error=error_msg,
         failure_reason=failure_reason.value,
     )
 
     db_handler.update_live_update_social_run(
         run_id=run_state.run_id,
-        terminal_status="published",
+        terminal_status="failed",
         draft_text=draft_text,
         media_decisions=run_state.media_decisions,
         publication_outcome=outcome.to_dict(),
@@ -2093,8 +2199,8 @@ def _publish_failure_response(
 
     return {
         "tool": tool_name,
-        "terminal_status": "published",
-        "ok": True,
+        "terminal_status": "failed",
+        "ok": False,
         "publication_id": None,
         "error": error_msg,
         "failure_reason": failure_reason.value,

@@ -5430,7 +5430,13 @@ async def execute_publish_social_draft(
         handler_params = {
             "draft_text": row2["draft_text"],
             "selected_media": (row2.get("media_decisions") or {}).get("selected", []),
+            # Media was understood by the topic editor / develop step; we
+            # resolve fresh URLs + durable-upload, but skip re-understanding.
             "skip_media_understanding": True,
+            "skip_media_reason": (
+                "media already understood during editorial/develop step; "
+                "resolve URLs + durable-upload only"
+            ),
         }
         publish_handler = _make_publish_handler(
             db_handler=db_handler,

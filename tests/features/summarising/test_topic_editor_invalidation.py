@@ -15,9 +15,9 @@ def _make_db(list_open_return=None, list_open_side_effect=None):
     db = MagicMock()
     db.update_topic.return_value = True
     if list_open_side_effect is not None:
-        db.list_open_social_runs.side_effect = list_open_side_effect
+        db.list_reviewable_social_runs_for_topic.side_effect = list_open_side_effect
     else:
-        db.list_open_social_runs.return_value = list_open_return or []
+        db.list_reviewable_social_runs_for_topic.return_value = list_open_return or []
     db.update_live_update_social_run.return_value = True
     return db
 
@@ -65,7 +65,7 @@ def _make_context(topic_id='topic-1', guild_id=42, run_id='run-xyz'):
 # ── tests ──────────────────────────────────────────────────────────────
 
 def test_dispatch_discard_invalidates_open_runs():
-    """_dispatch_discard calls list_open_social_runs + per-row expire."""
+    """_dispatch_discard calls list_reviewable_social_runs_for_topic + per-row expire."""
     db = _make_db(list_open_return=[
         {'run_id': 'run-a'},
         {'run_id': 'run-b'},
@@ -77,10 +77,9 @@ def test_dispatch_discard_invalidates_open_runs():
     assert result['outcome'] == 'accepted'
     assert result['action'] == 'discard'
 
-    db.list_open_social_runs.assert_called_once_with(
-        environment='prod',
+    db.list_reviewable_social_runs_for_topic.assert_called_once_with(
         topic_id='topic-1',
-        limit=50,
+        environment='prod',
     )
     assert db.update_live_update_social_run.call_count == 2
 
@@ -106,7 +105,7 @@ def test_dispatch_discard_no_open_runs_no_update_calls():
     result = editor._dispatch_discard(_make_call(), _make_context())
 
     assert result['outcome'] == 'accepted'
-    db.list_open_social_runs.assert_called_once()
+    db.list_reviewable_social_runs_for_topic.assert_called_once()
     db.update_live_update_social_run.assert_not_called()
 
 
@@ -122,12 +121,12 @@ def test_dispatch_discard_topic_not_watching_no_invalidation():
 
     # Should return error, not accepted
     assert result['outcome'] == 'tool_error'
-    db.list_open_social_runs.assert_not_called()
+    db.list_reviewable_social_runs_for_topic.assert_not_called()
     db.update_live_update_social_run.assert_not_called()
 
 
 def test_dispatch_discard_invalidation_failure_is_logged(caplog):
-    """When list_open_social_runs raises, dispatch continues and the error is logged."""
+    """When list_reviewable_social_runs_for_topic raises, dispatch continues and the error is logged."""
     db = _make_db(list_open_side_effect=RuntimeError("db connection lost"))
     editor = _make_editor(db)
 
