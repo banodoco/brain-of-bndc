@@ -1,8 +1,8 @@
 """
 Vision clients for image and video understanding.
 
-Image:  Gemini SDK (google-genai), model gemini-3.1-flash-lite (OpenAI fallback: gpt-4o-mini).
-Video:  Gemini SDK (google-genai), model gemini-3.1-flash-lite.
+Image:  Gemini SDK (google-genai), model gemini-2.5-flash (OpenAI fallback: gpt-4o-mini).
+Video:  Gemini SDK (google-genai), model gemini-2.5-flash.
 
 Lazy SDK imports — nothing fails at import-time when the optional packages
 are missing; the error surfaces at call-time with a clear message.
@@ -341,7 +341,7 @@ def describe_video(
     video_path_or_bytes:
         Raw bytes or a ``pathlib.Path`` (or string path) to an ``.mp4`` file.
     model:
-        Gemini model, e.g. ``"gemini-3.1-flash-lite"``.
+        Gemini model, e.g. ``"gemini-2.5-flash"``.
 
     Returns
     -------
@@ -456,7 +456,7 @@ def describe_image_gemini(
     image_bytes_or_url:
         Raw bytes, a ``pathlib.Path``, or an http(s) URL string.
     model:
-        Gemini model, e.g. ``"gemini-3.1-flash-lite"``.
+        Gemini model, e.g. ``"gemini-2.5-flash"``.
     query:
         Instruction text.  Falls back to the default editorial-triage prompt.
 

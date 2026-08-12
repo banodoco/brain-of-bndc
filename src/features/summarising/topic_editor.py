@@ -1311,8 +1311,8 @@ class TopicEditor:
     # Known model presets for enrichment — image models for image understanding,
     # video models for video understanding.  We loop over all four so any cached
     # row produced by the dispatcher is surfaced in the initial payload.
-    _IMAGE_MODEL_PRESETS = ("gemini-3.1-flash-lite", "gemini-2.5-flash", "gemini-2.5-pro", "gpt-4o-mini", "gpt-5.4")
-    _VIDEO_MODEL_PRESETS = ("gemini-3.1-flash-lite", "gemini-2.5-flash", "gemini-2.5-pro")
+    _IMAGE_MODEL_PRESETS = ("gemini-2.5-flash", "gemini-2.5-pro", "gemini-3.1-flash-lite", "gpt-4o-mini", "gpt-5.4")
+    _VIDEO_MODEL_PRESETS = ("gemini-2.5-flash", "gemini-2.5-pro", "gemini-3.1-flash-lite")
     _ALL_MODEL_PRESETS = _IMAGE_MODEL_PRESETS + _VIDEO_MODEL_PRESETS
 
     def _build_initial_user_payload(
@@ -2806,11 +2806,13 @@ class TopicEditor:
     _VISION_COST_IMAGE = 0.01
     _VISION_COST_VIDEO = 0.05
 
-    # mode → model mapping. Images + videos both run on Gemini Flash-Lite
-    # (cheapest tier; tested 2026-08-11 on both modalities). OpenAI image
-    # credits were exhausted; Gemini is the primary path with OpenAI fallback.
-    _IMAGE_MODEL_MAP = {"fast": "gemini-3.1-flash-lite", "best": "gemini-3.1-flash-lite"}
-    _VIDEO_MODEL_MAP = {"fast": "gemini-3.1-flash-lite", "best": "gemini-3.1-flash-lite"}
+    # mode → model mapping. Images + videos both run on Gemini 2.5-flash —
+    # the model whose classification + audio_read the editorial loop relies on
+    # (flash-lite variants were cheaper but misclassified kind 0-1/3 and lost
+    # lyric transcription; reverted 2026-08-11). OpenAI gpt-4o-mini remains
+    # the image fallback only (OpenAI credits were exhausted).
+    _IMAGE_MODEL_MAP = {"fast": "gemini-2.5-flash", "best": "gemini-2.5-flash"}
+    _VIDEO_MODEL_MAP = {"fast": "gemini-2.5-flash", "best": "gemini-2.5-flash"}
 
     def _dispatch_understand_media(
         self, call: Dict[str, Any], context: Dict[str, Any], media_kind: str
@@ -2922,9 +2924,9 @@ class TopicEditor:
 
         # model preset
         if media_kind == "image":
-            model = self._IMAGE_MODEL_MAP.get(mode, "gemini-3.1-flash-lite")
+            model = self._IMAGE_MODEL_MAP.get(mode, "gemini-2.5-flash")
         else:
-            model = self._VIDEO_MODEL_MAP.get(mode, "gemini-3.1-flash-lite")
+            model = self._VIDEO_MODEL_MAP.get(mode, "gemini-2.5-flash")
 
         # (e) PK cache check
         try:

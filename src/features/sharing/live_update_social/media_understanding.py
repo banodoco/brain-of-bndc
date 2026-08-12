@@ -21,7 +21,7 @@ logger = logging.getLogger("DiscordBot")
 
 # ── Constants ──────────────────────────────────────────────────────────
 
-DEFAULT_MEDIA_UNDERSTANDING_MODEL = "gemini-3.1-flash-lite"
+DEFAULT_MEDIA_UNDERSTANDING_MODEL = "gemini-2.5-flash"
 
 # Truncation thresholds
 MAX_DESCRIPTION_LENGTH = 4000  # characters — truncate beyond this
@@ -235,7 +235,7 @@ async def understand_image(
         content_type: MIME type (e.g. 'image/png'). Guessed from URL if absent.
         prompt: Custom prompt for analysis. Uses default image prompt if absent.
         model: Gemini model name. Defaults to ``MEDIA_UNDERSTANDING_MODEL``
-               or ``gemini-3.1-flash-lite``.
+               or ``gemini-2.5-flash``.
 
     Returns:
         ToolResult with ``ok=True, data={'description': ...}`` on success,

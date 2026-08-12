@@ -343,13 +343,13 @@ class LiveUpdateSocialAgent:
     # Models the topic editor uses when it understands media during the
     # editorial pass. We read whatever is already cached — never re-run
     # Gemini in the social loop. Images and videos both run on Gemini
-    # 3.1-flash-lite now; older names remain for rows cached before the
-    # switch.
+    # 2.5-flash now; the flash-lite / gpt-* names remain for rows cached
+    # during the brief 3.1-flash-lite experiment (2026-08-11).
     _CACHED_VIDEO_MODELS = (
-        "gemini-3.1-flash-lite", "gemini-2.5-flash", "gemini-2.5-pro",
+        "gemini-2.5-flash", "gemini-2.5-pro", "gemini-3.1-flash-lite",
     )
     _CACHED_IMAGE_MODELS = (
-        "gemini-3.1-flash-lite", "gemini-2.5-flash", "gemini-2.5-pro",
+        "gemini-2.5-flash", "gemini-2.5-pro", "gemini-3.1-flash-lite",
         "gpt-4o-mini", "gpt-5.4",
     )
 

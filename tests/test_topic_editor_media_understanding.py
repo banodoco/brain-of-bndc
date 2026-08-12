@@ -148,7 +148,7 @@ class MediaUnderstandingFakeDB:
         return rows[:limit]
 
     def seed(self, *, message_id: int, attachment_index: int = 0,
-             media_kind: str = "image", model: str = "gemini-3.1-flash-lite",
+             media_kind: str = "image", model: str = "gemini-2.5-flash",
              content_hash: str | None = None,
              understanding: dict | None = None):
         """Convenience: insert a pre-cached row."""
@@ -227,7 +227,7 @@ def test_cache_first_second_call_no_api(monkeypatch):
     assert outcome1["outcome"] == "read"
     assert outcome1["result"]["cached"] is False
     assert len(describe_image_calls) == 1
-    assert describe_image_calls[0][1] == "gemini-3.1-flash-lite"
+    assert describe_image_calls[0][1] == "gemini-2.5-flash"
     assert len(db.upserts) == 1
     assert float(context["vision_cost_usd"]) > 0
 
@@ -296,7 +296,7 @@ def test_cross_message_dedup_via_content_hash(monkeypatch):
     assert len(describe_image_calls) == 1
     assert len(db.upserts) == 1
 
-    key100 = (100, 0, "gemini-3.1-flash-lite")
+    key100 = (100, 0, "gemini-2.5-flash")
     assert key100 in db._understandings
     assert db._understandings[key100]["message_id"] == 100
 
@@ -311,7 +311,7 @@ def test_cross_message_dedup_via_content_hash(monkeypatch):
     assert len(describe_image_calls) == 1
 
     assert len(db.upserts) == 2
-    key200 = (200, 0, "gemini-3.1-flash-lite")
+    key200 = (200, 0, "gemini-2.5-flash")
     assert key200 in db._understandings
     assert db._understandings[key200]["message_id"] == 200
     assert db._understandings[key200]["content_hash"] == COMPUTED_HASH
@@ -382,7 +382,7 @@ def test_payload_enrichment_surfaces_cached_understandings():
         message_id=100,
         attachment_index=0,
         media_kind="image",
-        model="gemini-3.1-flash-lite",
+        model="gemini-2.5-flash",
         content_hash="hash-img-100",
         understanding=FAKE_IMAGE_UNDERSTANDING,
     )
@@ -413,7 +413,7 @@ def test_payload_enrichment_surfaces_cached_understandings():
     assert len(understandings) >= 1
 
     mini_entry = next(
-        (u for u in understandings if u.get("model") == "gemini-3.1-flash-lite"),
+        (u for u in understandings if u.get("model") == "gemini-2.5-flash"),
         None,
     )
     assert mini_entry is not None
@@ -476,7 +476,7 @@ def test_budget_not_deducted_on_cache_hit(monkeypatch):
         message_id=100,
         attachment_index=0,
         media_kind="image",
-        model="gemini-3.1-flash-lite",
+        model="gemini-2.5-flash",
         content_hash=FAKE_HASH,
         understanding=FAKE_IMAGE_UNDERSTANDING,
     )
@@ -528,7 +528,7 @@ def test_understand_media_resolves_archive_message_outside_source_window(monkeyp
         message_id=1504502824657227816,
         attachment_index=0,
         media_kind="video",
-        model="gemini-3.1-flash-lite",
+        model="gemini-2.5-flash",
         content_hash="older-video-hash",
         understanding=FAKE_VIDEO_UNDERSTANDING,
     )
