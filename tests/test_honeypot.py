@@ -134,11 +134,20 @@ def _tier_roles():
 
 
 def _member(*, tier='speaker'):
-    roles = {'newbie': _tier_roles()['newbie'], 'speaker': _tier_roles()['speaker'],
-             'moderated': _tier_roles()['moderated']}
-    member = SimpleNamespace(id=111, name='testuser', roles=[roles[tier]])
-    member.add_roles = AsyncMock()
-    member.remove_roles = AsyncMock()
+    roles_by_name = {'newbie': _tier_roles()['newbie'], 'speaker': _tier_roles()['speaker'],
+                     'moderated': _tier_roles()['moderated']}
+    member = SimpleNamespace(id=111, name='testuser', roles=[roles_by_name[tier]])
+
+    async def add_role(role, **kwargs):
+        if role not in member.roles:
+            member.roles.append(role)
+
+    async def remove_role(role, **kwargs):
+        if role in member.roles:
+            member.roles.remove(role)
+
+    member.add_roles = AsyncMock(side_effect=add_role)
+    member.remove_roles = AsyncMock(side_effect=remove_role)
     return member
 
 
@@ -192,6 +201,44 @@ async def test_helper_rolls_back_db_status_when_role_swap_fails():
     assert not any(c[0] == 'create_timed_mute' for c in db.calls)
 
 
+@pytest.mark.asyncio
+async def test_helper_rolls_back_when_timed_mute_record_fails():
+    from src.common.speaker_mute import mute_speaker_member
+    db = _FakeDB()
+    db.create_timed_mute = lambda **kw: db.calls.append(('create_timed_mute', kw)) or False
+    member = _member()
+    result = await mute_speaker_member(
+        db, guild=SimpleNamespace(id=456), member=member, tier_roles=_tier_roles(),
+        reason='honeypot', actor_label='Honeypot guard', duration='1h',
+        mute_end_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        allow_update=False, rollback_on_timer_failure=True,
+    )
+    assert result['success'] is False
+    # full undo: moderated removed, speaker re-added, status rolled back
+    assert member.add_roles.call_args.args[0].id == 2  # speaker restored
+    assert member.remove_roles.call_args.args[0].id == 3  # moderated removed
+    set_calls = [c for c in db.calls if c[0] == 'set_member_status']
+    assert set_calls[0][2] == 'moderated'
+    assert set_calls[-1][2] == 'speaker'
+
+
+@pytest.mark.asyncio
+async def test_helper_without_timer_rollback_flag_keeps_legacy_behavior():
+    from src.common.speaker_mute import mute_speaker_member
+    db = _FakeDB()
+    db.create_timed_mute = lambda **kw: db.calls.append(('create_timed_mute', kw)) or False
+    member = _member()
+    result = await mute_speaker_member(
+        db, guild=SimpleNamespace(id=456), member=member, tier_roles=_tier_roles(),
+        reason='honeypot', actor_label='Honeypot guard', duration='1h',
+        mute_end_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        allow_update=False, rollback_on_timer_failure=False,
+    )
+    assert result['success'] is True
+    assert result['timed_mute_scheduled'] is False
+    assert member.add_roles.call_args.args[0].id == 3  # moderated stays
+
+
 # ═══════════════════════════════════════════════════════════════════
 # HoneypotCog.on_message — end to end
 # ═══════════════════════════════════════════════════════════════════
@@ -203,6 +250,7 @@ def _make_cog(honeypot_channel_id=RULES_CHANNEL, duration='1h'):
     cog.db_handler = _FakeDB()
     cog.server_config = None
     cog._in_flight = set()
+    cog._sweep_locks = {}
     cog._is_enabled = lambda guild_id: True
     cog._resolve_tier_roles = lambda guild: _tier_roles()
     cog._get_channel_id = lambda guild_id: honeypot_channel_id
@@ -358,7 +406,7 @@ def test_on_message_skips_member_without_tier_role():
     assert not member.send.called
 
 
-def test_on_message_in_flight_guard_prevents_second_trap():
+def test_on_message_in_flight_guard_deletes_orphan():
     cog = _make_cog()
     member = _speaker_member()
     cog._in_flight.add((456, member.id))
@@ -366,8 +414,9 @@ def test_on_message_in_flight_guard_prevents_second_trap():
 
     asyncio.run(cog.on_message(msg))
 
-    assert not member.remove_roles.called
+    assert not member.remove_roles.called  # no double mute
     assert not member.send.called
+    msg.delete.assert_awaited_once()  # orphan spam still removed
 
 
 def test_on_message_notice_failure_does_not_break_trap():
@@ -433,6 +482,7 @@ def test_sweep_one_channel_deletes_author_messages_only():
     target.delete.assert_awaited_once()
     other.delete.assert_not_called()
     assert calls['kwargs']['after'] == cutoff
+    assert 'limit' not in calls['kwargs'] or calls['kwargs']['limit'] is None  # full window, no oldest-100 cap
 
 
 def test_sweep_recent_messages_across_channels():
@@ -445,6 +495,22 @@ def test_sweep_recent_messages_across_channels():
     asyncio.run(cog._sweep_recent_messages(guild, SimpleNamespace(id=111)))
 
     target.delete.assert_awaited_once()
+
+
+def test_sweep_skips_when_already_running_for_guild():
+    cog = _make_cog()
+    target = _msg_in_history(1, 111)
+    ch1 = SimpleNamespace(id=10, name='ch1', history=lambda **kw: _agen(target))
+    guild = SimpleNamespace(id=456, text_channels=[ch1], threads=[])
+    cog._sweep_locks[456] = asyncio.Lock()
+
+    async def hold_lock():
+        await cog._sweep_locks[456].acquire()
+    asyncio.run(hold_lock())  # a sweep is already in progress
+
+    asyncio.run(cog._sweep_recent_messages(guild, SimpleNamespace(id=111)))
+
+    target.delete.assert_not_called()  # second sweep skipped, no stacked scans
 
 
 def _agen(*items):

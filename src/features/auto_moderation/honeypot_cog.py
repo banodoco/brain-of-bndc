@@ -75,6 +75,9 @@ class HoneypotCog(commands.Cog):
         # window so two rapid posts can't both pass the "not already muted"
         # check.
         self._in_flight: set = set()
+        # guild_id -> asyncio.Lock — only one 10-min sweep per guild at a time
+        # so a burst of traps can't stack 989-channel history scans.
+        self._sweep_locks: dict = {}
 
     # ------------------------------------------------------------------
     # Config
@@ -172,6 +175,9 @@ class HoneypotCog(commands.Cog):
             return
         member = message.author
         if (message.guild.id, member.id) in self._in_flight:
+            # Second rapid post while the mute is in flight — the mute is
+            # already happening, but this orphan spam must still be removed.
+            await self._delete_spam(message)
             return
         guild_id = message.guild.id
         if not self._is_enabled(guild_id):
@@ -219,6 +225,7 @@ class HoneypotCog(commands.Cog):
             duration=duration,
             mute_end_at=mute_end_at,
             allow_update=False,
+            rollback_on_timer_failure=True,
             invalidate_dm_cache=lambda mid: self._invalidate_dm_cache(mid),
         )
         if not result['success']:
@@ -297,44 +304,58 @@ class HoneypotCog(commands.Cog):
         10 minutes, across every text channel and thread the bot can see.
 
         Runs detached from the trap flow; failures are logged per channel and
-        never propagate. The trapped message itself is usually already deleted
-        by ``_delete_spam`` (a NotFound here is harmless).
+        never propagate. Only ONE sweep per guild runs at a time — a trap that
+        fires mid-sweep skips (its own spam message is already deleted by
+        ``_delete_spam``).
         """
         try:
-            cutoff = datetime.now(timezone.utc) - timedelta(minutes=RECENT_SWEEP_MINUTES)
-            channels = []
-            seen = set()
-            for ch in list(getattr(guild, 'text_channels', []) or []) + list(getattr(guild, 'threads', []) or []):
-                if ch.id not in seen:
-                    seen.add(ch.id)
-                    channels.append(ch)
-
-            sem = asyncio.Semaphore(SWEEP_CONCURRENCY)
-            deleted_total = 0
-
-            async def sweep_one(channel):
-                nonlocal deleted_total
-                try:
-                    async with sem:
-                        deleted = await self._sweep_one_channel(channel, member.id, cutoff)
-                    deleted_total += deleted
-                except Exception as e:
-                    logger.warning(f"HoneypotCog: sweep failed in #{getattr(channel, 'name', channel.id)}: {e}")
-
-            if channels:
-                await asyncio.gather(*(sweep_one(ch) for ch in channels))
-            logger.info(
-                f"HoneypotCog: swept {len(channels)} channels for {member.id} "
-                f"(last {RECENT_SWEEP_MINUTES} min) — deleted {deleted_total} messages"
-            )
+            lock = self._sweep_locks.setdefault(guild.id, asyncio.Lock())
+            if lock.locked():
+                logger.info(f"HoneypotCog: sweep already running for guild {guild.id} — skipping")
+                return
+            async with lock:
+                await self._sweep_guild(guild, member)
         except Exception as e:
             logger.error(f"HoneypotCog: recent-message sweep failed: {e}", exc_info=True)
 
+    async def _sweep_guild(self, guild, member) -> None:
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=RECENT_SWEEP_MINUTES)
+        channels = []
+        seen = set()
+        for ch in list(getattr(guild, 'text_channels', []) or []) + list(getattr(guild, 'threads', []) or []):
+            if ch.id not in seen:
+                seen.add(ch.id)
+                channels.append(ch)
+
+        sem = asyncio.Semaphore(SWEEP_CONCURRENCY)
+        deleted_total = 0
+
+        async def sweep_one(channel):
+            nonlocal deleted_total
+            try:
+                async with sem:
+                    deleted = await self._sweep_one_channel(channel, member.id, cutoff)
+                deleted_total += deleted
+            except Exception as e:
+                logger.warning(f"HoneypotCog: sweep failed in #{getattr(channel, 'name', channel.id)}: {e}")
+
+        if channels:
+            await asyncio.gather(*(sweep_one(ch) for ch in channels))
+        logger.info(
+            f"HoneypotCog: swept {len(channels)} channels for {member.id} "
+            f"(last {RECENT_SWEEP_MINUTES} min) — deleted {deleted_total} messages"
+        )
+
     async def _sweep_one_channel(self, channel, member_id: int, cutoff) -> int:
-        """Delete one author's messages in a channel since ``cutoff``. Returns count."""
+        """Delete one author's messages in a channel since ``cutoff``. Returns count.
+
+        Scans the FULL window (``limit=None``): with ``after=`` set, discord.py
+        pages oldest-first, so a capped limit would read the oldest messages and
+        miss the newest spam in a busy channel.
+        """
         deleted = 0
         try:
-            async for message in channel.history(limit=100, after=cutoff):
+            async for message in channel.history(after=cutoff):
                 if message.author.id != member_id:
                     continue
                 try:

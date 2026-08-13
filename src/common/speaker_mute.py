@@ -150,6 +150,7 @@ async def mute_speaker_member(
     duration: Optional[str] = None,
     mute_end_at=None,
     allow_update: bool = False,
+    rollback_on_timer_failure: bool = False,
     invalidate_dm_cache: Optional[Callable[[int], None]] = None,
 ) -> Dict:
     """Move a member to the Moderated tier and record a timed mute.
@@ -172,6 +173,11 @@ async def mute_speaker_member(
         allow_update: When the member is already Moderated — True updates their
             timed mute (preserving the ORIGINAL prior-status snapshot), False
             leaves everything untouched and reports ``already_muted``.
+        rollback_on_timer_failure: When a timed mute (``mute_end_at`` given) is
+            requested but the DB record cannot be created, undo the whole mute
+            (status, roles, DM access) instead of leaving the member Moderated
+            with no restore path. Default False keeps legacy /mute behavior
+            (mute stands, admin unmutes manually).
         invalidate_dm_cache: Optional callback to drop per-user DM-access cache
             entries (each cog owns its own cache).
 
@@ -232,6 +238,23 @@ async def mute_speaker_member(
 
     audit_reason = f"Muted by {actor_label}: {reason}" + (f" (for {duration})" if duration else "")
     status_written = False
+
+    async def _rollback(reason_note: str) -> None:
+        """Best-effort full undo: DB status, DM access, and tier roles."""
+        try:
+            if db_handler:
+                db_handler.set_member_status(member_id, guild_id, prior_status)
+                if prior_can_message_bot is not None:
+                    db_handler.set_member_can_message_bot(member_id, prior_can_message_bot, username=member.name)
+            if moderated_role in member.roles:
+                await member.remove_roles(moderated_role, reason="Mute rolled back")
+            restore_role = speaker_role if prior_status == 'speaker' else newbie_role
+            if restore_role not in member.roles:
+                await member.add_roles(restore_role, reason="Mute rolled back")
+            logger.info(f"[speaker_mute] Rolled back mute for {member_id} ({reason_note})")
+        except Exception as rollback_err:
+            logger.error(f"[speaker_mute] Rollback for {member_id} failed: {rollback_err}", exc_info=True)
+
     try:
         # Mark status first so on_member_update (fired by the role changes)
         # sees 'moderated' and doesn't re-add a tier role mid-swap.
@@ -266,6 +289,13 @@ async def mute_speaker_member(
                 prior_status=prior_status,
                 prior_can_message_bot=prior_can_message_bot,
             )
+            if not result['timed_mute_scheduled'] and rollback_on_timer_failure:
+                # Roles + status committed but no restore row — without it the
+                # member is stuck Moderated forever (exact restore and the
+                # 5-min loop both no-op). Undo the whole mute.
+                await _rollback("timed-mute record failed")
+                result.update(success=False, error="Failed to record the timed mute — mute rolled back.")
+                return result
         elif was_already_muted and mute_end_at is None and db_handler:
             # Converting an existing timed mute back to permanent: clear the timer.
             db_handler.delete_timed_mute(member_id, guild_id)
@@ -279,15 +309,11 @@ async def mute_speaker_member(
         return result
     except Exception as e:
         logger.error(f"[speaker_mute] Error muting {member_id}: {e}", exc_info=True)
-        # The role swap failed after the DB status was written — roll the status
-        # back so the member isn't stuck 'moderated' in the DB with no timed
-        # mute (which would otherwise need a manual /unmute to clear).
-        if status_written and db_handler:
-            try:
-                db_handler.set_member_status(member_id, guild_id, prior_status)
-                logger.info(f"[speaker_mute] Rolled back member_status for {member_id} to {prior_status} after mute failure")
-            except Exception as rollback_err:
-                logger.error(f"[speaker_mute] Rollback of member_status for {member_id} failed: {rollback_err}", exc_info=True)
+        # The role swap failed after the DB status was written — roll the mute
+        # back so the member isn't stuck 'moderated' with no timed mute (which
+        # would otherwise need a manual /unmute to clear).
+        if status_written:
+            await _rollback("mute failed after status write")
         if isinstance(e, discord.Forbidden):
             result.update(success=False, error="I don't have permission to change that user's roles.")
         else:
