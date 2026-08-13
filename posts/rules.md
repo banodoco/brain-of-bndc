@@ -29,6 +29,5 @@
 > • Moderators may exercise subjective judgment to preserve the atmosphere of the community.
 > • We will always explain our reasoning on any moderation decisions publicly in <#1475121919484366962> and aim to be as sparing and fair as possible.
 
-> ### 6. The Rules Channel is a Honeypot:
-> • **Don't post in this channel.** Any post here gets a **1-hour timeout** — this channel is a honeypot for spammers.
-> • Questions belong in <#1163250319107555388> and introductions in <#1138861011206688829>.
+> ### 6. This Channel is a Honeypot for Spammers:
+> • Don't post in this channel. Any post here gets a 1-hour timeout — this channel is a honeypot for spammers.
