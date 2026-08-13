@@ -5,8 +5,7 @@ from typing import Optional
 from discord.ext import commands, tasks
 from discord import app_commands
 import os
-from datetime import datetime, timedelta, timezone
-import re
+from datetime import datetime, timezone
 import random
 import aiohttp
 import asyncio
@@ -138,118 +137,14 @@ class AdminUpdateSocialsModal(discord.ui.Modal):
             else:
                 await interaction.followup.send("An error occurred after the initial response while updating your preferences.", ephemeral=True)
 
-def _parse_duration(duration_str: str) -> Optional[timedelta]:
-    """Parse a duration string like '7d', '24h', '2w' into a timedelta.
-
-    Returns None if the string is not a valid duration.
-    """
-    match = re.fullmatch(r'(\d+)(h|d|w)', duration_str.strip().lower())
-    if not match:
-        return None
-    value, unit = int(match.group(1)), match.group(2)
-    if unit == 'h':
-        return timedelta(hours=value)
-    elif unit == 'd':
-        return timedelta(days=value)
-    elif unit == 'w':
-        return timedelta(weeks=value)
-    return None
-
-
-# Moderation log channel for mute notices. Override with MODERATION_CHANNEL_ID env var.
-_DEFAULT_MODERATION_CHANNEL_ID = 1475121919484366962
-
-
-def _get_moderation_channel_id() -> Optional[int]:
-    raw = os.getenv('MODERATION_CHANNEL_ID')
-    if raw:
-        try:
-            return int(raw)
-        except ValueError:
-            logger.warning(f"Invalid MODERATION_CHANNEL_ID env var: {raw!r}")
-    return _DEFAULT_MODERATION_CHANNEL_ID
-
-
-async def post_mute_to_moderation(
-    bot,
-    *,
-    target_user_id: int,
-    target_username: str,
-    actor_user_id: Optional[int],
-    actor_label: str,
-    duration: Optional[str],
-    mute_end_at_iso: Optional[str],
-    reason: str,
-) -> bool:
-    """Post a mute notice to the moderation channel. Returns True on success.
-
-    Never raises — failures are logged and reported via the bool return value so
-    the calling mute action is never short-circuited by a logging hiccup.
-    """
-    try:
-        channel_id = _get_moderation_channel_id()
-        if not channel_id:
-            return False
-        channel = bot.get_channel(channel_id)
-        if channel is None:
-            try:
-                channel = await bot.fetch_channel(channel_id)
-            except discord.NotFound:
-                logger.error(f"Moderation channel {channel_id} not found")
-                return False
-            except discord.Forbidden:
-                logger.error(f"Bot lacks access to moderation channel {channel_id}")
-                return False
-            except discord.HTTPException as e:
-                logger.error(f"Could not fetch moderation channel {channel_id}: {e}")
-                return False
-
-        actor_part = f"<@{actor_user_id}>" if actor_user_id else actor_label
-        if duration:
-            duration_part = f"for **{duration}**"
-            if mute_end_at_iso:
-                try:
-                    ts = int(datetime.fromisoformat(mute_end_at_iso.replace('Z', '+00:00')).timestamp())
-                    duration_part += f" — unmute <t:{ts}:R>"
-                except (ValueError, TypeError):
-                    pass
-        else:
-            duration_part = "**permanently**"
-
-        content = (
-            f"🔇 **Speaker muted**\n"
-            f"User: <@{target_user_id}> ({target_username})\n"
-            f"By: {actor_part}\n"
-            f"Duration: {duration_part}\n"
-            f"Reason: {reason}"
-        )
-
-        # Forum channels can't accept plain messages — they require a thread.
-        if isinstance(channel, discord.ForumChannel):
-            thread_name = f"Mute: {target_username} — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
-            # Forum thread names are capped at 100 chars by Discord.
-            thread_name = thread_name[:100]
-            try:
-                await channel.create_thread(
-                    name=thread_name,
-                    content=content,
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
-                return True
-            except discord.HTTPException as e:
-                logger.error(f"Failed to create forum thread in moderation channel: {e}", exc_info=True)
-                return False
-
-        # Regular text channel / thread / news channel — plain send works.
-        try:
-            await channel.send(content, allowed_mentions=discord.AllowedMentions.none())
-            return True
-        except discord.HTTPException as e:
-            logger.error(f"Failed to post mute notice to moderation channel: {e}", exc_info=True)
-            return False
-    except Exception as e:
-        logger.error(f"Unexpected error posting mute notice to moderation channel: {e}", exc_info=True)
-        return False
+# Duration parsing, the moderation-channel notice, and the mute core live in
+# src/common/speaker_mute.py (shared with the admin-chat tool and the auto-mute
+# guard). Re-exported here so existing imports and test patches keep working.
+from src.common.speaker_mute import (  # noqa: E402
+    _parse_duration,
+    mute_speaker_member,
+    post_mute_to_moderation,
+)
 
 
 # --- Direct-invite channel picker (works from DMs too) ---
@@ -784,7 +679,7 @@ class AdminCog(commands.Cog):
     @app_commands.describe(
         user="The user to mute",
         reason="Why this user is being muted — required, posted to moderation log.",
-        duration="Optional duration (e.g. 1h, 7d, 2w). Omit for permanent.",
+        duration="Optional duration (e.g. 5m, 1h, 7d, 2w). Omit for permanent.",
     )
     async def mute_user(self, interaction: discord.Interaction, user: discord.Member, reason: str, duration: Optional[str] = None):
         """Move a user to the Moderated tier: swap Newbie/Speaker -> Moderated."""
@@ -821,85 +716,61 @@ class AdminCog(commands.Cog):
             td = _parse_duration(duration)
             if td is None:
                 await interaction.response.send_message(
-                    f"Invalid duration `{duration}`. Use a number + h/d/w (e.g. `1h`, `7d`, `2w`).",
+                    f"Invalid duration `{duration}`. Use a number + m/h/d/w (e.g. `5m`, `1h`, `7d`, `2w`).",
                     ephemeral=True,
                 )
                 return
 
-        prior_status = 'speaker'
-        prior_can_message_bot = None
-        if self.db_handler:
-            prior_status = self.db_handler.get_member_status(user.id, guild_id=interaction.guild_id)
-            if prior_status not in ('newbie', 'speaker'):
-                prior_status = 'speaker'
-            prior_can_message_bot = self.db_handler.get_member_can_message_bot(user.id)
+        result = await mute_speaker_member(
+            self.db_handler,
+            guild=interaction.guild,
+            member=user,
+            tier_roles=roles,
+            reason=reason,
+            actor_label=interaction.user.name,
+            actor_user_id=interaction.user.id,
+            duration=duration,
+            mute_end_at=(datetime.now(timezone.utc) + td) if td else None,
+            allow_update=False,
+            invalidate_dm_cache=lambda mid: self._dm_access_cache.pop(mid, None),
+        )
 
-        try:
-            # Mark as moderated in DB first so on_member_update won't re-add tier roles
-            if self.db_handler:
-                self.db_handler.set_member_status(
-                    user.id, interaction.guild_id, 'moderated',
-                    prior_status=prior_status, set_prior=True,
-                )
+        if not result['success']:
+            await interaction.response.send_message(f"Error: {result.get('error')}", ephemeral=True)
+            return
 
-            audit_reason = f"Muted by {interaction.user.name}: {reason}" + (f" (for {duration})" if duration else "")
-            # Swap whichever tier role they held -> Moderated
-            roles_to_remove = [r for r in (newbie_role, speaker_role) if r in user.roles]
-            if roles_to_remove:
-                await user.remove_roles(*roles_to_remove, reason=audit_reason[:512])
-            if moderated_role not in user.roles:
-                await user.add_roles(moderated_role, reason=audit_reason[:512])
-
-            # Revoke DM-to-bot access (appeals go through the moderation channel)
-            if self.db_handler:
-                self.db_handler.set_member_can_message_bot(user.id, False, username=user.name)
-            self._dm_access_cache.pop(user.id, None)
-
-            # Record timed mute in DB
-            mute_end_iso: Optional[str] = None
-            timed_saved = False
-            if td and self.db_handler:
-                mute_end = datetime.now(timezone.utc) + td
-                mute_end_iso = mute_end.isoformat()
-                timed_saved = self.db_handler.create_timed_mute(
-                    member_id=user.id,
-                    guild_id=interaction.guild_id,
-                    mute_end_at=mute_end_iso,
-                    reason=reason,
-                    muted_by_id=interaction.user.id,
-                    prior_status=prior_status,
-                    prior_can_message_bot=prior_can_message_bot,
-                )
-                if timed_saved:
-                    await interaction.response.send_message(
-                        f"Muted {user.mention} for {duration} — moved to Moderated. Unmute <t:{int(mute_end.timestamp())}:R>.",
-                        ephemeral=True,
-                    )
-                else:
-                    await interaction.response.send_message(
-                        f"Muted {user.mention} — moved to Moderated, but failed to schedule auto-unmute. Use `/unmute` manually.",
-                        ephemeral=True,
-                    )
-            else:
-                await interaction.response.send_message(f"Muted {user.mention} — moved to Moderated.", ephemeral=True)
-
-            await post_mute_to_moderation(
-                self.bot,
-                target_user_id=user.id,
-                target_username=user.name,
-                actor_user_id=interaction.user.id,
-                actor_label=interaction.user.name,
-                duration=duration,
-                mute_end_at_iso=mute_end_iso,
-                reason=reason,
+        mute_end_iso = result.get('mute_end_at')
+        mute_end_ts = None
+        if mute_end_iso:
+            try:
+                mute_end_ts = int(datetime.fromisoformat(mute_end_iso.replace('Z', '+00:00')).timestamp())
+            except (ValueError, TypeError):
+                pass
+        if td and result['timed_mute_scheduled'] and mute_end_ts:
+            await interaction.response.send_message(
+                f"Muted {user.mention} for {duration} — moved to Moderated. Unmute <t:{mute_end_ts}:R>.",
+                ephemeral=True,
             )
+        elif td and not result['timed_mute_scheduled']:
+            await interaction.response.send_message(
+                f"Muted {user.mention} — moved to Moderated, but failed to schedule auto-unmute. Use `/unmute` manually.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(f"Muted {user.mention} — moved to Moderated.", ephemeral=True)
 
-            logger.info(f"Admin {interaction.user.id} muted user {user.id} ({user.name})" + (f" for {duration}" if duration else " permanently") + f" — reason: {reason}")
-        except discord.Forbidden:
-            await interaction.response.send_message("I don't have permission to change that user's roles.", ephemeral=True)
-        except Exception as e:
-            logger.error(f"Error muting user {user.id}: {e}", exc_info=True)
-            await interaction.response.send_message(f"Error: {e}", ephemeral=True)
+        await post_mute_to_moderation(
+            self.bot,
+            target_user_id=user.id,
+            target_username=user.name,
+            actor_user_id=interaction.user.id,
+            actor_label=interaction.user.name,
+            duration=duration,
+            mute_end_at_iso=mute_end_iso,
+            reason=reason,
+        )
+
+        logger.info(f"Admin {interaction.user.id} muted user {user.id} ({user.name})" + (f" for {duration}" if duration else " permanently") + f" — reason: {reason}")
 
     @app_commands.command(name="unmute", description="Restore a user from Moderated to their prior tier (Admin only)")
     @app_commands.describe(user="The user to unmute")

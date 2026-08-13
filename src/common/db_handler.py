@@ -5322,6 +5322,26 @@ class DatabaseHandler:
             logger.error(f"Error fetching expired mutes: {e}", exc_info=True)
             return []
 
+    def get_timed_mute(self, member_id: int, guild_id: int) -> Optional[Dict]:
+        """Return the active timed-mute row for a member, or None."""
+        if not self.storage_handler or not self.storage_handler.supabase_client:
+            logger.error("Supabase client not initialized for get_timed_mute")
+            return None
+
+        try:
+            result = (
+                self.storage_handler.supabase_client.table('timed_mutes')
+                .select('*')
+                .eq('member_id', member_id)
+                .eq('guild_id', guild_id)
+                .limit(1)
+                .execute()
+            )
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error(f"Error fetching timed mute for member {member_id}: {e}", exc_info=True)
+            return None
+
     def delete_timed_mute(self, member_id: int, guild_id: int) -> bool:
         """Delete a timed mute record."""
         if not self._gate_check(guild_id):

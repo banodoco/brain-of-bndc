@@ -898,7 +898,7 @@ TOOLS = [
         "description": (
             "Remove the Speaker role from a member, or update the duration of an existing "
             "mute. Mirrors the /mute slash command. Pass an optional `duration` like "
-            "'1h', '7d', '2w' for an auto-unmute; omit for a permanent mute. If the user "
+            "'5m', '1h', '7d', '2w' for an auto-unmute; omit for a permanent mute. If the user "
             "is already muted, this updates/replaces their timed-mute record (e.g. "
             "convert a permanent mute to a 30-day mute, or extend a 7-day to 30-day). "
             "`reason` is required and is posted to the moderation log channel."
@@ -916,7 +916,7 @@ TOOLS = [
                 },
                 "duration": {
                     "type": "string",
-                    "description": "Optional duration like '1h', '7d', '2w'. Omit for a permanent mute."
+                    "description": "Optional duration like '5m', '1h', '7d', '2w'. Omit for a permanent mute."
                 }
             },
             "required": ["user_id", "reason"]
@@ -4242,125 +4242,83 @@ async def execute_mute_speaker(
         if td is None:
             return {
                 "success": False,
-                "error": f"Invalid duration {duration!r}. Use a number + h/d/w (e.g. '1h', '7d', '2w').",
+                "error": f"Invalid duration {duration!r}. Use a number + m/h/d/w (e.g. '5m', '1h', '7d', '2w').",
             }
 
     admin_user_id = params.get('admin_user_id')
     actor_label = f"admin {admin_user_id}" if admin_user_id else "admin chat"
-    audit_reason = (
-        f"Muted by {actor_label}: {reason_text}" + (f" (for {duration})" if duration else "")
+
+    from src.common.speaker_mute import mute_speaker_member
+    result = await mute_speaker_member(
+        db_handler,
+        guild=guild,
+        member=member,
+        tier_roles={'newbie': newbie_role, 'speaker': speaker_role, 'moderated': moderated_role},
+        reason=reason_text,
+        actor_label=actor_label,
+        actor_user_id=int(admin_user_id) if admin_user_id else None,
+        duration=duration,
+        mute_end_at=(datetime.now(timezone.utc) + td) if td else None,
+        allow_update=True,
+        invalidate_dm_cache=lambda mid: _invalidate_dm_cache(bot, mid),
+    )
+    if not result['success']:
+        logger.error(f"[AdminChat] mute_speaker failed for {member_id}: {result.get('error')}")
+        return {"success": False, "error": result.get('error') or 'mute failed'}
+
+    mute_end_iso = result.get('mute_end_at')
+    timed_saved = result['timed_mute_scheduled']
+    was_already_muted = result['was_already_muted']
+
+    mod_log_posted = await post_mute_to_moderation(
+        bot,
+        target_user_id=member_id,
+        target_username=member.name,
+        actor_user_id=int(admin_user_id) if admin_user_id else None,
+        actor_label=actor_label,
+        duration=duration,
+        mute_end_at_iso=mute_end_iso,
+        reason=reason_text,
     )
 
-    was_already_muted = moderated_role in member.roles
-    if not was_already_muted and db_handler:
-        was_already_muted = db_handler.get_member_status(member_id, guild_id=guild_id) == 'moderated'
+    action_verb = "updated mute on" if was_already_muted else "muted"
+    logger.info(
+        f"[AdminChat] mute_speaker: {action_verb} {member_id} ({member.name}) by {actor_label}"
+        + (f" for {duration}" if duration else " permanently")
+        + f" — reason: {reason_text}"
+    )
 
-    prior_status = 'speaker'
-    prior_can_message_bot = None
-    if db_handler:
-        if was_already_muted:
-            # Preserve the ORIGINAL snapshot so re-muting doesn't clobber the
-            # prior tier / DM value the member is restored to on unmute.
-            existing = db_handler.get_guild_member(member_id, guild_id)
-            prior_status = (existing or {}).get('prior_status') or 'speaker'
-            if prior_status not in ('newbie', 'speaker'):
-                prior_status = 'speaker'
-            prior_can_message_bot = (existing or {}).get('prior_can_message_bot')
+    if was_already_muted:
+        if duration and timed_saved:
+            msg = f"<@{member_id}> was already muted — updated to expire after {duration}."
+        elif duration and not timed_saved:
+            msg = f"<@{member_id}> was already muted — but the {duration} auto-unmute couldn't be scheduled."
         else:
-            prior_status = db_handler.get_member_status(member_id, guild_id=guild_id)
-            if prior_status not in ('newbie', 'speaker'):
-                prior_status = 'speaker'
-            prior_can_message_bot = db_handler.get_member_can_message_bot(member_id)
-
-    try:
-        if db_handler:
-            db_handler.set_member_status(member_id, guild_id, 'moderated',
-                                         prior_status=prior_status, set_prior=not was_already_muted)
-
-        # Swap whichever tier role they held -> Moderated
-        roles_to_remove = [r for r in (newbie_role, speaker_role) if r in member.roles]
-        if roles_to_remove:
-            await member.remove_roles(*roles_to_remove, reason=audit_reason[:512])
-        if moderated_role not in member.roles:
-            await member.add_roles(moderated_role, reason=audit_reason[:512])
-
-        # Revoke DM-to-bot access
-        if db_handler:
-            db_handler.set_member_can_message_bot(member_id, False, username=member.name)
-        _invalidate_dm_cache(bot, member_id)
-
-        mute_end_iso = None
-        timed_saved = False
-        if td and db_handler:
-            mute_end = datetime.now(timezone.utc) + td
-            mute_end_iso = mute_end.isoformat()
-            timed_saved = db_handler.create_timed_mute(
-                member_id=member_id,
-                guild_id=guild_id,
-                mute_end_at=mute_end_iso,
-                reason=reason_text,
-                muted_by_id=int(admin_user_id) if admin_user_id else None,
-                prior_status=prior_status,
-                prior_can_message_bot=prior_can_message_bot,
-            )
-        elif was_already_muted and not td and db_handler:
-            # Converting an existing timed mute back to permanent: clear the timer.
-            db_handler.delete_timed_mute(member_id, guild_id)
-
-        mod_log_posted = await post_mute_to_moderation(
-            bot,
-            target_user_id=member_id,
-            target_username=member.name,
-            actor_user_id=int(admin_user_id) if admin_user_id else None,
-            actor_label=actor_label,
-            duration=duration,
-            mute_end_at_iso=mute_end_iso,
-            reason=reason_text,
-        )
-
-        action_verb = "updated mute on" if was_already_muted else "muted"
-        logger.info(
-            f"[AdminChat] mute_speaker: {action_verb} {member_id} ({member.name}) by {actor_label}"
-            + (f" for {duration}" if duration else " permanently")
-            + f" — reason: {reason_text}"
-        )
-
-        if was_already_muted:
-            if duration and timed_saved:
-                msg = f"<@{member_id}> was already muted — updated to expire after {duration}."
-            elif duration and not timed_saved:
-                msg = f"<@{member_id}> was already muted — but the {duration} auto-unmute couldn't be scheduled."
-            else:
-                msg = f"<@{member_id}> was already muted — converted to permanent (cleared any timer)."
+            msg = f"<@{member_id}> was already muted — converted to permanent (cleared any timer)."
+    else:
+        if duration and timed_saved:
+            msg = f"Muted <@{member_id}> for {duration} — moved to Moderated."
+        elif duration and not timed_saved:
+            msg = f"Muted <@{member_id}> — moved to Moderated, but auto-unmute couldn't be scheduled."
         else:
-            if duration and timed_saved:
-                msg = f"Muted <@{member_id}> for {duration} — moved to Moderated."
-            elif duration and not timed_saved:
-                msg = f"Muted <@{member_id}> — moved to Moderated, but auto-unmute couldn't be scheduled."
-            else:
-                msg = f"Muted <@{member_id}> — moved to Moderated."
+            msg = f"Muted <@{member_id}> — moved to Moderated."
 
-        if not mod_log_posted:
-            msg += " (Note: couldn't post to the moderation log channel — check bot permissions / channel type.)"
+    if not mod_log_posted:
+        msg += " (Note: couldn't post to the moderation log channel — check bot permissions / channel type.)"
 
-        return {
-            "success": True,
-            "user_id": str(member_id),
-            "username": member.name,
-            "duration": duration,
-            "permanent": duration is None,
-            "mute_end_at": mute_end_iso,
-            "timed_mute_scheduled": timed_saved,
-            "was_already_muted": was_already_muted,
-            "reason": reason_text,
-            "moderation_log_posted": mod_log_posted,
-            "message": msg,
-        }
-    except discord.Forbidden:
-        return {"success": False, "error": "I don't have permission to change that user's roles."}
-    except Exception as e:
-        logger.error(f"[AdminChat] Error in mute_speaker for {member_id}: {e}", exc_info=True)
-        return {"success": False, "error": str(e)}
+    return {
+        "success": True,
+        "user_id": str(member_id),
+        "username": member.name,
+        "duration": duration,
+        "permanent": duration is None,
+        "mute_end_at": mute_end_iso,
+        "timed_mute_scheduled": timed_saved,
+        "was_already_muted": was_already_muted,
+        "reason": reason_text,
+        "moderation_log_posted": mod_log_posted,
+        "message": msg,
+    }
 
 
 async def execute_unmute_speaker(

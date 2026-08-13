@@ -285,6 +285,11 @@ async def main_async(args):
         except Exception as e:
             logger.warning(f"Failed to load GatingCog (skipping): {e}")
         try:
+            from src.features.auto_moderation.auto_mute_cog import AutoMuteCog
+            await bot.add_cog(AutoMuteCog(bot))
+        except Exception as e:
+            logger.warning(f"Failed to load AutoMuteCog (skipping): {e}")
+        try:
             from src.features.grants.grants_cog import GrantsCog
             await bot.add_cog(GrantsCog(bot))
         except Exception as e:

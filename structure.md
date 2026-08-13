@@ -69,6 +69,7 @@
 
 | Feature | Location | Purpose |
 |---------|----------|---------|
+| **Auto Moderation** | `src/features/auto_moderation/` | Auto-mutes Speakers who post 4+ image attachments with no text (timed mute + DM + exact-time restore) |
 | **Admin** | `src/features/admin/` | Owner commands: reload cogs, diagnostics, sync management |
 | **Admin Chat** | `src/features/admin_chat/` | Claude-powered DM chat for ADMIN_USER_ID with tool use (search messages, share to social, etc.) |
 | **Answering** | `src/features/answering/` | RAG-based Q&A over archived messages |
@@ -106,6 +107,7 @@
     │   ├── error_handler.py             # @handle_errors decorator
     │   ├── log_handler.py               # Centralized logging setup
     │   ├── schema.py                    # Pydantic models for DB tables
+    │   ├── speaker_mute.py              # Shared mute core + moderation notice (used by /mute, admin chat, auto-mute)
     │   ├── storage_handler.py           # Supabase write operations
     │   ├── openmuse_interactor.py       # OpenMuse media uploads
     │   └── llm/                         # LLM client abstractions
@@ -117,6 +119,8 @@
     └── features/                    # Bot capabilities (one per subdirectory)
         ├── admin/
         │   └── admin_cog.py
+        ├── auto_moderation/
+        │   └── auto_mute_cog.py
         ├── admin_chat/
         │   ├── admin_chat_cog.py    # Discord DM listener for ADMIN_USER_ID
         │   ├── agent.py              # Claude agent with tool use loop (Arnold pattern)
