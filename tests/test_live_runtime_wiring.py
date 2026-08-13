@@ -264,6 +264,7 @@ def test_production_live_pass_can_be_disabled_without_disabling_digest(monkeypat
     )
     cog.run_live_pass = FakeLoop()
     cog.run_daily_digest = FakeLoop()
+    cog.run_workflow_source_scan = FakeLoop()
     cog.__init__(
         bot,
         live_update_editor=FakeLiveEditor(),
@@ -276,6 +277,7 @@ def test_production_live_pass_can_be_disabled_without_disabling_digest(monkeypat
     assert cog.daily_digest_enabled is True
     assert cog.run_live_pass.started is False
     assert cog.run_daily_digest.started is True
+    assert cog.run_workflow_source_scan.started is True
 
 
 def test_production_live_loops_disabled_when_explicitly_off(monkeypatch):
@@ -291,6 +293,7 @@ def test_production_live_loops_disabled_when_explicitly_off(monkeypatch):
     )
     cog.run_live_pass = FakeLoop()
     cog.run_daily_digest = FakeLoop()
+    cog.run_workflow_source_scan = FakeLoop()
     cog.__init__(
         bot,
         live_update_editor=FakeLiveEditor(),
@@ -303,6 +306,7 @@ def test_production_live_loops_disabled_when_explicitly_off(monkeypatch):
     assert cog.daily_digest_enabled is True
     assert cog.run_live_pass.started is False
     assert cog.run_daily_digest.started is True
+    assert cog.run_workflow_source_scan.started is True
 
 
 def test_daily_digest_can_be_disabled_by_env(monkeypatch):
@@ -317,6 +321,7 @@ def test_daily_digest_can_be_disabled_by_env(monkeypatch):
     )
     cog.run_live_pass = FakeLoop()
     cog.run_daily_digest = FakeLoop()
+    cog.run_workflow_source_scan = FakeLoop()
     cog.__init__(
         bot,
         live_update_editor=FakeLiveEditor(),
@@ -326,6 +331,7 @@ def test_daily_digest_can_be_disabled_by_env(monkeypatch):
 
     assert cog.daily_digest_enabled is False
     assert cog.run_daily_digest.started is False
+    assert cog.run_workflow_source_scan.started is True
 
 
 def test_dev_live_loops_run_hourly_without_env(monkeypatch):
@@ -340,6 +346,7 @@ def test_dev_live_loops_run_hourly_without_env(monkeypatch):
     )
     cog.run_live_pass = FakeLoop()
     cog.run_daily_digest = FakeLoop()
+    cog.run_workflow_source_scan = FakeLoop()
     cog.__init__(
         bot,
         live_update_editor=FakeLiveEditor(),
@@ -353,6 +360,7 @@ def test_dev_live_loops_run_hourly_without_env(monkeypatch):
     assert cog.run_live_pass.started is True
     assert cog.run_live_pass.interval_minutes == 60
     assert cog.run_daily_digest.started is True
+    assert cog.run_workflow_source_scan.started is True
 
 
 def test_live_top_creations_enabled_by_default(monkeypatch):

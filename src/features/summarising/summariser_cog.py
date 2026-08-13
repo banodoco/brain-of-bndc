@@ -81,8 +81,9 @@ class SummarizerCog(commands.Cog):
         # it only as an emergency off switch.
         self.daily_digest_enabled = _env_flag("DAILY_DIGEST_ENABLED", True)
         # Daily workflow-source scan for the hivemind corpus (same cadence as
-        # the digest). Off by default; enable with WORKFLOW_SOURCE_SCAN_ENABLED=true.
-        self.workflow_source_scan_enabled = _env_flag("WORKFLOW_SOURCE_SCAN_ENABLED", False)
+        # the digest). On by default; emergency off switch via
+        # WORKFLOW_SOURCE_SCAN_ENABLED=false.
+        self.workflow_source_scan_enabled = _env_flag("WORKFLOW_SOURCE_SCAN_ENABLED", True)
         self.live_pass_interval_minutes = _env_int("LIVE_PASS_INTERVAL_MINUTES", 60)
         dry_run_lookback_hours = _env_int("LIVE_UPDATE_DEV_LOOKBACK_HOURS", 6)
         self.live_update_editor = live_update_editor or self._build_live_update_editor(
@@ -242,7 +243,6 @@ class SummarizerCog(commands.Cog):
             "Daily digest run starting: guild=%s env=%s channel=%s model=%s",
             guild_id, environment, channel_id, model,
         )
-        digest_ok = False
         try:
             result = await daily_digest_run(
                 self.bot,
@@ -253,18 +253,15 @@ class SummarizerCog(commands.Cog):
                 llm_client=llm_client,
                 model=model,
             )
-            digest_ok = (result or {}).get("status") == "ok"
             logger.info("Daily digest run finished: %s", result)
         except Exception as e:
             logger.error("Error during daily digest run: %s", e, exc_info=True)
-        # After the summary: agentic workflow-source scan (hermes agent with
-        # terminal tools; explores repos, git clones, finds new workflows and
-        # ingests them into the Hivemind corpus). Runs only when
-        # AGENTIC_SCAN_CMD is configured — the host needs the vibecomfy
-        # checkout + hermes launcher + API keys, so this is off on Railway
-        # unless deliberately set.
+        # Agentic workflow-source scan (hermes agent with terminal tools;
+        # explores repos, git clones, finds new workflows and ingests them
+        # into the Hivemind corpus). Runs whenever AGENTIC_SCAN_CMD is
+        # configured — independent of whether the digest posted.
         agentic_cmd = os.getenv("AGENTIC_SCAN_CMD")
-        if agentic_cmd and digest_ok:
+        if agentic_cmd:
             logger.info("Agentic workflow scan starting: %s", agentic_cmd)
             try:
                 proc = await asyncio.create_subprocess_shell(
@@ -276,8 +273,6 @@ class SummarizerCog(commands.Cog):
                 logger.info("Agentic workflow scan finished (rc=%s): %s", proc.returncode, (stdout or b"")[-500:].decode(errors="replace"))
             except Exception as e:
                 logger.error("Error during agentic workflow scan: %s", e, exc_info=True)
-        elif agentic_cmd:
-            logger.info("Agentic workflow scan skipped: digest did not complete (status ok required).")
 
     @run_daily_digest.before_loop
     async def before_run_daily_digest(self):
