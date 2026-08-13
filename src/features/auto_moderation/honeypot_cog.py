@@ -26,11 +26,10 @@ from src.common.speaker_mute import _parse_duration, mute_speaker_member, post_m
 logger = logging.getLogger('DiscordBot')
 
 DEFAULT_HONEYPOT_DURATION = '1h'
-HONEYPOT_DM_MESSAGE = (
-    "You posted in the rules channel — that's a honeypot: any post there gets "
-    "an hour-long timeout. Your speaking role has been removed for 1 hour and "
-    "comes back automatically. If you have a question, ask in a support channel "
-    "instead.\nYour message: {url}"
+HONEYPOT_NOTICE_MESSAGE = (
+    "{mention} — this channel is a honeypot for spammers. Your message was "
+    "deleted and your speaking role is removed for 1 hour — it comes back "
+    "automatically. If you have a question, ask in a support channel instead."
 )
 
 
@@ -231,7 +230,10 @@ class HoneypotCog(commands.Cog):
             mute_end_at_iso=result.get('mute_end_at'),
             reason=reason,
         )
-        await self._dm_notice(message.author, message.jump_url)
+
+        # Delete the spam, then tag the poster IN the channel (never DM).
+        await self._delete_spam(message)
+        await self._channel_notice(message)
 
         # Exact-time restore; the check_expired_mutes loop covers bot restarts.
         asyncio.create_task(self._restore_after_mute(
@@ -241,15 +243,28 @@ class HoneypotCog(commands.Cog):
         ))
         logger.info(
             f"HoneypotCog: trapped {message.author.id} ({message.author.name}) "
-            f"for {duration} — posted in rules channel (msg {message.id})"
+            f"for {duration} — posted in rules channel, message deleted (msg {message.id})"
         )
 
-    async def _dm_notice(self, member, jump_url: str) -> None:
+    async def _delete_spam(self, message: discord.Message) -> None:
+        """Delete the offending message. Never breaks the flow on failure."""
         try:
-            await member.send(HONEYPOT_DM_MESSAGE.format(url=jump_url))
+            await message.delete()
+        except discord.NotFound:
+            pass  # already gone
         except Exception as e:
-            # Never break the mute flow over a DM failure (DMs closed, blocked).
-            logger.info(f"HoneypotCog: DM to {member.id} failed: {e}")
+            logger.warning(f"HoneypotCog: could not delete trapped message {message.id}: {e}")
+
+    async def _channel_notice(self, message: discord.Message) -> None:
+        """Tag the poster in the rules channel itself."""
+        try:
+            await message.channel.send(
+                HONEYPOT_NOTICE_MESSAGE.format(mention=message.author.mention),
+                allowed_mentions=discord.AllowedMentions(users=[message.author]),
+            )
+        except Exception as e:
+            # Never break the mute flow over a notice failure.
+            logger.info(f"HoneypotCog: channel notice to {message.author.id} failed: {e}")
 
     # ------------------------------------------------------------------
     # Exact-time restore

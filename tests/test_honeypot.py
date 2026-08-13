@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from src.features.auto_moderation.honeypot_cog import HONEYPOT_DM_MESSAGE, is_honeypot_post
+from src.features.auto_moderation.honeypot_cog import HONEYPOT_NOTICE_MESSAGE, is_honeypot_post
 
 RULES_CHANNEL = 1138515622582562947
 
@@ -211,18 +211,20 @@ def _make_cog(honeypot_channel_id=RULES_CHANNEL, duration='1h'):
 
 
 def _guild_msg(member, *, channel_id=RULES_CHANNEL, parent_id=None):
-    return SimpleNamespace(
+    msg = SimpleNamespace(
         id=222,
         guild=SimpleNamespace(id=456),
         author=member,
-        channel=SimpleNamespace(id=channel_id, parent_id=parent_id),
+        channel=SimpleNamespace(id=channel_id, parent_id=parent_id, send=AsyncMock()),
         jump_url='https://discord.com/channels/456/1138515622582562947/222',
     )
+    msg.delete = AsyncMock()
+    return msg
 
 
 def _speaker_member():
     member = SimpleNamespace(
-        id=111, name='testuser', bot=False,
+        id=111, name='testuser', mention='<@111>', bot=False,
         roles=[_tier_roles()['speaker']],
         guild_permissions=SimpleNamespace(manage_messages=False, administrator=False, moderate_members=False),
     )
@@ -246,8 +248,11 @@ def test_on_message_traps_speaker_in_rules_channel():
     created = [c[1] for c in cog.db_handler.calls if c[0] == 'create_timed_mute'][0]
     end = datetime.fromisoformat(created['mute_end_at'])
     assert timedelta(minutes=59) <= end - datetime.now(timezone.utc) <= timedelta(hours=1, minutes=1)
-    member.send.assert_awaited_once()
-    assert 'discord.com/channels' in member.send.call_args.args[0]
+    # spam deleted, tagged notice posted IN the rules channel, no DM
+    msg.delete.assert_awaited_once()
+    msg.channel.send.assert_awaited_once()
+    assert member.mention in msg.channel.send.call_args.args[0]
+    member.send.assert_not_called()
     modlog.assert_awaited_once()
     assert 'honeypot' in modlog.call_args.kwargs['reason'].lower()
 
@@ -365,24 +370,25 @@ def test_on_message_in_flight_guard_prevents_second_trap():
     assert not member.send.called
 
 
-def test_on_message_dm_failure_does_not_break_trap():
+def test_on_message_notice_failure_does_not_break_trap():
     cog = _make_cog()
     member = _speaker_member()
-    member.send = AsyncMock(side_effect=Exception('DMs closed'))
     msg = _guild_msg(member)
+    msg.channel.send = AsyncMock(side_effect=Exception('channel gone'))
 
     with patch('src.features.auto_moderation.honeypot_cog.post_mute_to_moderation', new=AsyncMock(return_value=True)):
         asyncio.run(cog.on_message(msg))
 
     assert member.remove_roles.call_args.args[0].id == 2
+    assert msg.delete.await_count == 1  # deletion still happened
     assert any(c[0] == 'create_timed_mute' for c in cog.db_handler.calls)
 
 
-def test_dm_message_is_formattable():
-    text = HONEYPOT_DM_MESSAGE.format(url='https://discord.com/channels/x')
-    assert 'rules channel' in text
+def test_notice_message_is_formattable():
+    text = HONEYPOT_NOTICE_MESSAGE.format(mention='<@111>')
+    assert '<@111>' in text
     assert '1 hour' in text
-    assert 'discord.com/channels' in text
+    assert 'deleted' in text
     assert '<#' not in text  # no broken mentions
 
 
