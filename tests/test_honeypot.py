@@ -392,6 +392,15 @@ def test_notice_message_is_formattable():
     assert '<#' not in text  # no broken mentions
 
 
+def test_delete_notice_after_removes_own_message():
+    cog = _make_cog()
+    notice = SimpleNamespace(id=999)
+    notice.delete = AsyncMock()
+    with patch('src.features.auto_moderation.honeypot_cog.asyncio.sleep', new=AsyncMock()):
+        asyncio.run(cog._delete_notice_after(notice))
+    notice.delete.assert_awaited_once()
+
+
 # ═══════════════════════════════════════════════════════════════════
 # Exact-time restore guard
 # ═══════════════════════════════════════════════════════════════════

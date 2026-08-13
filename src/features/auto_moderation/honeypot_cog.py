@@ -26,6 +26,9 @@ from src.common.speaker_mute import _parse_duration, mute_speaker_member, post_m
 logger = logging.getLogger('DiscordBot')
 
 DEFAULT_HONEYPOT_DURATION = '1h'
+# How long the tagged notice stays visible in the rules channel before the bot
+# deletes its own message (keeps the honeypot looking unmoderated).
+NOTICE_LIFETIME_SECONDS = 60.0
 HONEYPOT_NOTICE_MESSAGE = (
     "{mention} — this channel is a honeypot for spammers. Your message was "
     "deleted and your speaking role is removed for 1 hour — it comes back "
@@ -256,15 +259,26 @@ class HoneypotCog(commands.Cog):
             logger.warning(f"HoneypotCog: could not delete trapped message {message.id}: {e}")
 
     async def _channel_notice(self, message: discord.Message) -> None:
-        """Tag the poster in the rules channel itself."""
+        """Tag the poster in the rules channel itself, then delete the notice."""
         try:
-            await message.channel.send(
+            notice = await message.channel.send(
                 HONEYPOT_NOTICE_MESSAGE.format(mention=message.author.mention),
                 allowed_mentions=discord.AllowedMentions(users=[message.author]),
             )
+            asyncio.create_task(self._delete_notice_after(notice))
         except Exception as e:
             # Never break the mute flow over a notice failure.
             logger.info(f"HoneypotCog: channel notice to {message.author.id} failed: {e}")
+
+    async def _delete_notice_after(self, notice, delay: float = NOTICE_LIFETIME_SECONDS) -> None:
+        """Delete the bot's own notice message after a short lifetime."""
+        await asyncio.sleep(delay)
+        try:
+            await notice.delete()
+        except discord.NotFound:
+            pass  # already gone
+        except Exception as e:
+            logger.warning(f"HoneypotCog: could not delete own notice {getattr(notice, 'id', '?')}: {e}")
 
     # ------------------------------------------------------------------
     # Exact-time restore
