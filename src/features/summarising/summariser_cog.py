@@ -8,6 +8,7 @@ import time
 from discord.ext import tasks
 
 from .daily_digest import daily_digest_run
+from .workflow_source_scan import run_workflow_source_scan
 from .live_update_editor import LiveUpdateEditor as LegacyLiveUpdateEditor
 from .topic_editor import TopicEditor
 from .live_top_creations import LiveTopCreations
@@ -79,6 +80,9 @@ class SummarizerCog(commands.Cog):
         # Daily digest is part of the live-update runtime; allow env to disable
         # it only as an emergency off switch.
         self.daily_digest_enabled = _env_flag("DAILY_DIGEST_ENABLED", True)
+        # Daily workflow-source scan for the hivemind corpus (same cadence as
+        # the digest). Off by default; enable with WORKFLOW_SOURCE_SCAN_ENABLED=true.
+        self.workflow_source_scan_enabled = _env_flag("WORKFLOW_SOURCE_SCAN_ENABLED", False)
         self.live_pass_interval_minutes = _env_int("LIVE_PASS_INTERVAL_MINUTES", 60)
         dry_run_lookback_hours = _env_int("LIVE_UPDATE_DEV_LOOKBACK_HOURS", 6)
         self.live_update_editor = live_update_editor or self._build_live_update_editor(
@@ -104,12 +108,21 @@ class SummarizerCog(commands.Cog):
                 logger.info(
                     "Daily digest loop disabled by DAILY_DIGEST_ENABLED=false."
                 )
+            self.run_workflow_source_scan.change_interval(time=digest_time)
+            if self.workflow_source_scan_enabled:
+                self.run_workflow_source_scan.start()
+            else:
+                logger.info(
+                    "Workflow source scan loop disabled by WORKFLOW_SOURCE_SCAN_ENABLED=false."
+                )
 
     def cog_unload(self):
         if self.run_live_pass.is_running():
             self.run_live_pass.cancel()
         if self.run_daily_digest.is_running():
             self.run_daily_digest.cancel()
+        if self.run_workflow_source_scan.is_running():
+            self.run_workflow_source_scan.cancel()
 
     @tasks.loop(minutes=60)
     async def run_live_pass(self):
@@ -229,6 +242,7 @@ class SummarizerCog(commands.Cog):
             "Daily digest run starting: guild=%s env=%s channel=%s model=%s",
             guild_id, environment, channel_id, model,
         )
+        digest_ok = False
         try:
             result = await daily_digest_run(
                 self.bot,
@@ -239,12 +253,54 @@ class SummarizerCog(commands.Cog):
                 llm_client=llm_client,
                 model=model,
             )
+            digest_ok = (result or {}).get("status") == "ok"
             logger.info("Daily digest run finished: %s", result)
         except Exception as e:
             logger.error("Error during daily digest run: %s", e, exc_info=True)
+        # After the summary: agentic workflow-source scan (hermes agent with
+        # terminal tools; explores repos, git clones, finds new workflows and
+        # ingests them into the Hivemind corpus). Runs only when
+        # AGENTIC_SCAN_CMD is configured — the host needs the vibecomfy
+        # checkout + hermes launcher + API keys, so this is off on Railway
+        # unless deliberately set.
+        agentic_cmd = os.getenv("AGENTIC_SCAN_CMD")
+        if agentic_cmd and digest_ok:
+            logger.info("Agentic workflow scan starting: %s", agentic_cmd)
+            try:
+                proc = await asyncio.create_subprocess_shell(
+                    agentic_cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=3600)
+                logger.info("Agentic workflow scan finished (rc=%s): %s", proc.returncode, (stdout or b"")[-500:].decode(errors="replace"))
+            except Exception as e:
+                logger.error("Error during agentic workflow scan: %s", e, exc_info=True)
+        elif agentic_cmd:
+            logger.info("Agentic workflow scan skipped: digest did not complete (status ok required).")
 
     @run_daily_digest.before_loop
     async def before_run_daily_digest(self):
+        await self.bot.wait_until_ready()
+
+    @tasks.loop(hours=24)
+    async def run_workflow_source_scan(self):
+        """Daily hivemind workflow-source scan (sibling to the digest)."""
+        dev_mode = bool(getattr(self.bot, "dev_mode", False))
+        environment = "dev" if dev_mode else "prod"
+        logger.info("Workflow source scan starting (env=%s)", environment)
+        try:
+            result = await run_workflow_source_scan(
+                self.bot,
+                self._digest_storage(),
+                environment=environment,
+            )
+            logger.info("Workflow source scan finished: %s", result)
+        except Exception as e:
+            logger.error("Error during workflow source scan: %s", e, exc_info=True)
+
+    @run_workflow_source_scan.before_loop
+    async def before_run_workflow_source_scan(self):
         await self.bot.wait_until_ready()
 
     def _digest_storage(self):
