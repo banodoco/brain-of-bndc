@@ -1,22 +1,22 @@
-"""Auto-mute guard: Speakers who post many image attachments with no text get a
-short timed mute (Speaker -> Moderated) plus an explanatory DM.
+"""Honeypot: posting in the rules channel earns a 1-hour timed mute.
 
-Trigger: >= 4 image attachments (by content-type OR file extension) and no
-non-whitespace text. Disabled unless a guild opts in (server_config
-``auto_mute_enabled`` or env ``AUTO_MUTE_ENABLED``) AND speaker management is
-enabled — without speaker management the ``check_expired_mutes`` loop would not
-restore the tier, so the mute could be permanent.
+The rules channel is bait — the pinned rules text itself warns that posting
+there gets an hour-long timeout ("honeypot for spammers"). Anyone holding a
+tier role (Newbie or Speaker) who posts in the honeypot channel gets
+Speaker/Newbie -> Moderated for 1 hour: a DM, a moderation-channel notice,
+and an exact-time in-process restore (the 5-min check_expired_mutes loop
+stays as a crash backstop). Staff (manage_messages / administrator /
+moderate_members) are never trapped.
 
-The restore is exact-time (in-process task) with the 5-minute loop left as a
-crash backstop. The offending message is NOT deleted — the mute only blocks
-further posting.
+Disabled unless a guild opts in (server_config ``honeypot_enabled`` or env
+``HONEYPOT_ENABLED``) AND speaker management is enabled — without speaker
+management the restore backstop would not run.
 """
 import asyncio
-import json
 import logging
 import os
 from datetime import datetime, timezone
-from typing import FrozenSet, Optional
+from typing import Optional
 
 import discord
 from discord.ext import commands
@@ -25,53 +25,24 @@ from src.common.speaker_mute import _parse_duration, mute_speaker_member, post_m
 
 logger = logging.getLogger('DiscordBot')
 
-DEFAULT_MIN_IMAGES = 4
-DEFAULT_DURATION = '5m'
-DEFAULT_DM_MESSAGE = (
-    "Heads up: you just posted {count} images with no text, which reads as "
-    "low-effort spam. As a nudge your Speaker role has been removed for "
-    "{duration} — it comes back automatically. Next time, add a sentence or two "
-    "of context (what you made, what you're asking). If you think this was a "
-    "mistake, ping a mod in the server.\nYour message: {url}"
+DEFAULT_HONEYPOT_DURATION = '1h'
+HONEYPOT_DM_MESSAGE = (
+    "You posted in the rules channel — that's a honeypot: any post there gets "
+    "an hour-long timeout. Your speaking role has been removed for 1 hour and "
+    "comes back automatically. If you have a question, ask in a support channel "
+    "instead.\nYour message: {url}"
 )
 
-_IMAGE_EXTENSIONS = frozenset({
-    'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'heic', 'heif', 'avif', 'apng',
-})
 
+def is_honeypot_post(message, honeypot_channel_id: Optional[int]) -> bool:
+    """Pure detector: a non-bot, non-staff Member posting in the honeypot
+    channel (or a thread whose parent is it). Any content counts — the trap
+    fires on the act of posting there.
 
-def image_attachment_count(message) -> int:
-    """Count attachments that are images, by content-type OR filename extension.
-
-    Discord's ``content_type`` is often None on older/lazy-loaded attachments,
-    so the extension fallback matters.
+    Testable without discord: relies only on attribute access.
     """
-    count = 0
-    for att in (getattr(message, 'attachments', None) or []):
-        ctype = (getattr(att, 'content_type', '') or '').lower()
-        if ctype.startswith('image/'):
-            count += 1
-            continue
-        filename = (getattr(att, 'filename', '') or '').lower()
-        ext = filename.rsplit('.', 1)[-1] if '.' in filename else ''
-        if ext in _IMAGE_EXTENSIONS:
-            count += 1
-    return count
-
-
-def should_auto_mute(
-    message,
-    *,
-    min_images: int = DEFAULT_MIN_IMAGES,
-    exempt_channel_ids: FrozenSet[int] = frozenset(),
-) -> bool:
-    """Pure detector: guild, non-bot, Member author, staff-excluded, >=min
-    image attachments, no text content, channel (or thread parent) not exempt.
-
-    Testable without discord: relies only on attribute access. Non-Member
-    authors (e.g. a User object in a DM-ish context) have no ``roles`` and are
-    skipped defensively.
-    """
+    if not honeypot_channel_id:
+        return False
     if not getattr(message, 'guild', None):
         return False
     author = message.author
@@ -82,30 +53,21 @@ def should_auto_mute(
     perms = getattr(author, 'guild_permissions', None)
     if perms is not None and (perms.manage_messages or perms.administrator or perms.moderate_members):
         return False
-
-    # Exempt the channel itself and, for threads/forums, the parent channel —
-    # help/grant threads would otherwise false-positive.
     channel = message.channel
-    channel_ids = {getattr(channel, 'id', None), getattr(channel, 'parent_id', None)}
-    channel_ids.discard(None)
-    if channel_ids & set(exempt_channel_ids):
-        return False
-
-    if (getattr(message, 'content', None) or '').strip():
-        return False
-    return image_attachment_count(message) >= min_images
+    ids = {getattr(channel, 'id', None), getattr(channel, 'parent_id', None)}
+    return honeypot_channel_id in ids
 
 
-class AutoMuteCog(commands.Cog):
-    """Mutes Speakers who post many image attachments with no text."""
+class HoneypotCog(commands.Cog):
+    """Timeouts anyone who posts in the honeypot (rules) channel."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.db_handler = getattr(bot, 'db_handler', None)
         self.server_config = getattr(self.db_handler, 'server_config', None) if self.db_handler else None
-        # (guild_id, member_id) with an auto-mute in flight — guards the
-        # pre-await window so two rapid posts can't both pass the
-        # "not already moderated" check.
+        # (guild_id, member_id) with a trap in flight — guards the pre-await
+        # window so two rapid posts can't both pass the "not already muted"
+        # check.
         self._in_flight: set = set()
 
     # ------------------------------------------------------------------
@@ -125,51 +87,40 @@ class AutoMuteCog(commands.Cog):
         return False
 
     def _is_enabled(self, guild_id: Optional[int]) -> bool:
-        """Opt-in: auto_mute_enabled AND speaker management (or restores can't run)."""
+        """Opt-in: honeypot_enabled AND speaker management (or restores can't run)."""
         if guild_id is None:
             return False
         if not self._is_speaker_management_enabled(guild_id):
             return False
         if self.server_config:
             server = self.server_config.get_server(guild_id)
-            if server and server.get('auto_mute_enabled') is not None:
-                return bool(server.get('auto_mute_enabled'))
-        env = os.getenv('AUTO_MUTE_ENABLED')
+            if server and server.get('honeypot_enabled') is not None:
+                return bool(server.get('honeypot_enabled'))
+        env = os.getenv('HONEYPOT_ENABLED')
         return bool(env and env.strip().lower() in ('1', 'true', 'yes', 'on'))
 
-    def _get_exempt_channels(self, guild_id: int) -> FrozenSet[int]:
-        raw = None
+    def _get_channel_id(self, guild_id: int) -> Optional[int]:
+        value = None
+        if self.server_config:
+            value = self.server_config.get_server_field(guild_id, 'honeypot_channel_id', cast=int)
+        if value is None:
+            env_value = os.getenv('HONEYPOT_CHANNEL_ID') or os.getenv('RULES_CHANNEL_ID')
+            if env_value:
+                try:
+                    value = int(env_value)
+                except ValueError:
+                    value = None
+        return value
+
+    def _get_duration(self, guild_id: int) -> str:
+        value = None
         if self.server_config:
             server = self.server_config.get_server(guild_id)
             if server:
-                raw = server.get('auto_mute_exempt_channels')
-        if raw is None:
-            raw = os.getenv('AUTO_MUTE_EXEMPT_CHANNELS')
-        return self._parse_channel_ids(raw) if raw else frozenset()
-
-    @staticmethod
-    def _parse_channel_ids(raw) -> FrozenSet[int]:
-        """Accept a JSON list (jsonb), a Python list, or comma-separated ids."""
-        if isinstance(raw, str):
-            text = raw.strip()
-            if text.startswith('['):
-                try:
-                    items = json.loads(text)
-                except ValueError:
-                    items = []
-            else:
-                items = [part for part in text.replace(',', ' ').split() if part.strip()]
-        elif isinstance(raw, (list, tuple, set)):
-            items = raw
-        else:
-            items = []
-        out = set()
-        for item in items:
-            try:
-                out.add(int(item))
-            except (TypeError, ValueError):
-                continue
-        return frozenset(out)
+                value = server.get('honeypot_duration')
+        if not value:
+            value = os.getenv('HONEYPOT_DURATION')
+        return str(value or DEFAULT_HONEYPOT_DURATION)
 
     # ------------------------------------------------------------------
     # Role resolution (mirrors AdminCog._resolve_tier_roles)
@@ -204,56 +155,53 @@ class AutoMuteCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        # Never let the guard break the live message pipeline — any failure here
-        # is logged and swallowed.
+        # Never let the trap break the live message pipeline.
         try:
-            await self._maybe_auto_mute(message)
+            await self._maybe_trap(message)
         except Exception as e:
-            logger.error(f"AutoMuteCog: on_message error for msg {getattr(message, 'id', '?')}: {e}", exc_info=True)
+            logger.error(f"HoneypotCog: on_message error for msg {getattr(message, 'id', '?')}: {e}", exc_info=True)
 
-    async def _maybe_auto_mute(self, message: discord.Message) -> None:
+    async def _maybe_trap(self, message: discord.Message) -> None:
         if message.author.bot or not message.guild:
             return
         member = message.author
         if (message.guild.id, member.id) in self._in_flight:
             return
-        if not self._is_enabled(message.guild.id):
+        guild_id = message.guild.id
+        if not self._is_enabled(guild_id):
+            return
+
+        honeypot_channel_id = self._get_channel_id(guild_id)
+        if not is_honeypot_post(message, honeypot_channel_id):
             return
 
         roles = self._resolve_tier_roles(message.guild)
         if not roles:
             return
-        # Duck-typed: a guild message author is always a Member (has .roles),
-        # but be defensive — a User has no roles and must not crash or mute.
+        # Duck-typed: a guild message author is always a Member (has .roles).
         member_roles = getattr(member, 'roles', [])
-        if roles['speaker'] not in member_roles:
-            return
         if roles['moderated'] in member_roles:
-            return
-
-        exempt = self._get_exempt_channels(message.guild.id)
-        if not should_auto_mute(message, exempt_channel_ids=exempt):
-            return
+            return  # already muted — can't post in the rules channel anyway
+        if roles['speaker'] not in member_roles and roles['newbie'] not in member_roles:
+            return  # no tier role — nothing to remove (and can't post there)
 
         self._in_flight.add((message.guild.id, member.id))
         try:
-            await self._auto_mute(message, roles)
+            await self._trap(message, roles)
         finally:
             self._in_flight.discard((message.guild.id, member.id))
 
-    async def _auto_mute(self, message: discord.Message, tier_roles: dict) -> None:
-        """Mute the author for the default duration + DM them, then schedule an
-        exact-time restore (the 5-min loop stays as a crash backstop)."""
+    async def _trap(self, message: discord.Message, tier_roles: dict) -> None:
+        """Timeout the author for the configured duration + DM + exact-time restore."""
         if message.guild is None:
             return
-        duration = DEFAULT_DURATION
+        duration = self._get_duration(message.guild.id)
         td = _parse_duration(duration)
         if td is None:
-            logger.warning(f"AutoMuteCog: invalid default duration {duration!r} — skipping")
+            logger.warning(f"HoneypotCog: invalid honeypot_duration {duration!r} — skipping")
             return
-        image_count = image_attachment_count(message)
         mute_end_at = datetime.now(timezone.utc) + td
-        reason = f"Posted {image_count} images with no text (auto-mute guard): {message.jump_url}"
+        reason = f"Posted in the rules channel (honeypot): {message.jump_url}"
 
         result = await mute_speaker_member(
             self.db_handler,
@@ -261,18 +209,16 @@ class AutoMuteCog(commands.Cog):
             member=message.author,
             tier_roles=tier_roles,
             reason=reason,
-            actor_label='Auto-mute guard',
+            actor_label='Honeypot guard',
             duration=duration,
             mute_end_at=mute_end_at,
             allow_update=False,
             invalidate_dm_cache=lambda mid: self._invalidate_dm_cache(mid),
         )
         if not result['success']:
-            logger.warning(f"AutoMuteCog: mute failed for {message.author.id}: {result.get('error')}")
+            logger.warning(f"HoneypotCog: mute failed for {message.author.id}: {result.get('error')}")
             return
         if result['already_muted']:
-            # Already Moderated — nothing to do (guarded earlier, but keep the
-            # race-safe path explicit).
             return
 
         await post_mute_to_moderation(
@@ -280,12 +226,12 @@ class AutoMuteCog(commands.Cog):
             target_user_id=message.author.id,
             target_username=message.author.name,
             actor_user_id=None,
-            actor_label='Auto-mute guard',
+            actor_label='Honeypot guard',
             duration=duration,
             mute_end_at_iso=result.get('mute_end_at'),
             reason=reason,
         )
-        await self._dm_notice(message.author, image_count, message.jump_url)
+        await self._dm_notice(message.author, message.jump_url)
 
         # Exact-time restore; the check_expired_mutes loop covers bot restarts.
         asyncio.create_task(self._restore_after_mute(
@@ -294,16 +240,16 @@ class AutoMuteCog(commands.Cog):
             result.get('prior_can_message_bot'), tier_roles,
         ))
         logger.info(
-            f"AutoMuteCog: auto-muted {message.author.id} ({message.author.name}) "
-            f"for {duration} — {image_count} images, no text (msg {message.id})"
+            f"HoneypotCog: trapped {message.author.id} ({message.author.name}) "
+            f"for {duration} — posted in rules channel (msg {message.id})"
         )
 
-    async def _dm_notice(self, member, image_count: int, jump_url: str) -> None:
+    async def _dm_notice(self, member, jump_url: str) -> None:
         try:
-            await member.send(DEFAULT_DM_MESSAGE.format(count=image_count, duration=DEFAULT_DURATION, url=jump_url))
+            await member.send(HONEYPOT_DM_MESSAGE.format(url=jump_url))
         except Exception as e:
             # Never break the mute flow over a DM failure (DMs closed, blocked).
-            logger.info(f"AutoMuteCog: DM to {member.id} failed: {e}")
+            logger.info(f"HoneypotCog: DM to {member.id} failed: {e}")
 
     # ------------------------------------------------------------------
     # Exact-time restore
@@ -331,7 +277,7 @@ class AutoMuteCog(commands.Cog):
                 prior_can_message_bot, tier_roles,
             )
         except Exception as e:
-            logger.error(f"AutoMuteCog: restore task failed for {member_id}: {e}", exc_info=True)
+            logger.error(f"HoneypotCog: restore task failed for {member_id}: {e}", exc_info=True)
 
     async def _restore_if_still_muted(
         self,
@@ -371,16 +317,16 @@ class AutoMuteCog(commands.Cog):
 
         if self.db_handler:
             self.db_handler.set_member_status(member_id, guild_id, prior_status)
-        await member.remove_roles(tier_roles['moderated'], reason="Auto-mute expired")
+        await member.remove_roles(tier_roles['moderated'], reason="Honeypot timeout expired")
         restore_role = tier_roles['speaker'] if prior_status == 'speaker' else tier_roles['newbie']
         if restore_role not in member.roles:
-            await member.add_roles(restore_role, reason="Auto-mute expired")
+            await member.add_roles(restore_role, reason="Honeypot timeout expired")
         if self.db_handler:
             if prior_can_message_bot is not None:
                 self.db_handler.set_member_can_message_bot(member_id, prior_can_message_bot, username=member.name)
             self.db_handler.delete_timed_mute(member_id, guild_id)
         self._invalidate_dm_cache(member_id)
-        logger.info(f"AutoMuteCog: auto-restored {member_id} to {prior_status} after auto-mute")
+        logger.info(f"HoneypotCog: auto-restored {member_id} to {prior_status} after honeypot timeout")
 
     def _invalidate_dm_cache(self, member_id: int) -> None:
         """Best-effort: drop the AdminCog's 60s DM-access cache for this member."""

@@ -69,7 +69,7 @@
 
 | Feature | Location | Purpose |
 |---------|----------|---------|
-| **Auto Moderation** | `src/features/auto_moderation/` | Auto-mutes Speakers who post 4+ image attachments with no text (timed mute + DM + exact-time restore) |
+| **Auto Moderation** | `src/features/auto_moderation/` | Rules-channel honeypot: posting there earns a 1-hour timed mute + DM |
 | **Admin** | `src/features/admin/` | Owner commands: reload cogs, diagnostics, sync management |
 | **Admin Chat** | `src/features/admin_chat/` | Claude-powered DM chat for ADMIN_USER_ID with tool use (search messages, share to social, etc.) |
 | **Answering** | `src/features/answering/` | RAG-based Q&A over archived messages |
@@ -120,7 +120,7 @@
         ├── admin/
         │   └── admin_cog.py
         ├── auto_moderation/
-        │   └── auto_mute_cog.py
+        │   └── honeypot_cog.py
         ├── admin_chat/
         │   ├── admin_chat_cog.py    # Discord DM listener for ADMIN_USER_ID
         │   ├── agent.py              # Claude agent with tool use loop (Arnold pattern)
