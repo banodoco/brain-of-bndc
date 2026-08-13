@@ -15,7 +15,7 @@ management the restore backstop would not run.
 import asyncio
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import discord
@@ -29,6 +29,10 @@ DEFAULT_HONEYPOT_DURATION = '1h'
 # How long the tagged notice stays visible in the rules channel before the bot
 # deletes its own message (keeps the honeypot looking unmoderated).
 NOTICE_LIFETIME_SECONDS = 60.0
+# How far back the background purge sweeps the poster's messages (spam window).
+RECENT_SWEEP_MINUTES = 10
+# Max concurrent channel history scans during the sweep.
+SWEEP_CONCURRENCY = 8
 HONEYPOT_NOTICE_MESSAGE = (
     "{mention} — this channel is a honeypot for spammers. Your message was "
     "deleted and your speaking role is removed for 1 hour — it comes back "
@@ -238,6 +242,10 @@ class HoneypotCog(commands.Cog):
         await self._delete_spam(message)
         await self._channel_notice(message)
 
+        # Background purge of the poster's messages from the last 10 minutes
+        # (best-effort; never blocks the trap flow).
+        asyncio.create_task(self._sweep_recent_messages(message.guild, message.author))
+
         # Exact-time restore; the check_expired_mutes loop covers bot restarts.
         asyncio.create_task(self._restore_after_mute(
             message.guild.id, message.author.id,
@@ -279,6 +287,68 @@ class HoneypotCog(commands.Cog):
             pass  # already gone
         except Exception as e:
             logger.warning(f"HoneypotCog: could not delete own notice {getattr(notice, 'id', '?')}: {e}")
+
+    # ------------------------------------------------------------------
+    # Recent-message purge
+    # ------------------------------------------------------------------
+
+    async def _sweep_recent_messages(self, guild, member) -> None:
+        """Best-effort background purge of the poster's messages from the last
+        10 minutes, across every text channel and thread the bot can see.
+
+        Runs detached from the trap flow; failures are logged per channel and
+        never propagate. The trapped message itself is usually already deleted
+        by ``_delete_spam`` (a NotFound here is harmless).
+        """
+        try:
+            cutoff = datetime.now(timezone.utc) - timedelta(minutes=RECENT_SWEEP_MINUTES)
+            channels = []
+            seen = set()
+            for ch in list(getattr(guild, 'text_channels', []) or []) + list(getattr(guild, 'threads', []) or []):
+                if ch.id not in seen:
+                    seen.add(ch.id)
+                    channels.append(ch)
+
+            sem = asyncio.Semaphore(SWEEP_CONCURRENCY)
+            deleted_total = 0
+
+            async def sweep_one(channel):
+                nonlocal deleted_total
+                try:
+                    async with sem:
+                        deleted = await self._sweep_one_channel(channel, member.id, cutoff)
+                    deleted_total += deleted
+                except Exception as e:
+                    logger.warning(f"HoneypotCog: sweep failed in #{getattr(channel, 'name', channel.id)}: {e}")
+
+            if channels:
+                await asyncio.gather(*(sweep_one(ch) for ch in channels))
+            logger.info(
+                f"HoneypotCog: swept {len(channels)} channels for {member.id} "
+                f"(last {RECENT_SWEEP_MINUTES} min) — deleted {deleted_total} messages"
+            )
+        except Exception as e:
+            logger.error(f"HoneypotCog: recent-message sweep failed: {e}", exc_info=True)
+
+    async def _sweep_one_channel(self, channel, member_id: int, cutoff) -> int:
+        """Delete one author's messages in a channel since ``cutoff``. Returns count."""
+        deleted = 0
+        try:
+            async for message in channel.history(limit=100, after=cutoff):
+                if message.author.id != member_id:
+                    continue
+                try:
+                    await message.delete()
+                    deleted += 1
+                except discord.NotFound:
+                    pass
+                except discord.HTTPException as e:
+                    logger.warning(f"HoneypotCog: delete failed for msg {message.id}: {e}")
+        except discord.Forbidden:
+            logger.info(f"HoneypotCog: no history access in {getattr(channel, 'name', channel.id)} — skipping")
+        except Exception as e:
+            logger.warning(f"HoneypotCog: history failed in {getattr(channel, 'name', channel.id)}: {e}")
+        return deleted
 
     # ------------------------------------------------------------------
     # Exact-time restore

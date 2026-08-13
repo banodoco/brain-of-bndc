@@ -402,6 +402,59 @@ def test_delete_notice_after_removes_own_message():
 
 
 # ═══════════════════════════════════════════════════════════════════
+# Recent-message sweep
+# ═══════════════════════════════════════════════════════════════════
+
+def _msg_in_history(mid, author_id):
+    m = SimpleNamespace(id=mid, author=SimpleNamespace(id=author_id))
+    m.delete = AsyncMock()
+    return m
+
+
+def test_sweep_one_channel_deletes_author_messages_only():
+    from src.features.auto_moderation.honeypot_cog import RECENT_SWEEP_MINUTES
+    cog = _make_cog()
+    target = _msg_in_history(1, 111)
+    other = _msg_in_history(2, 999)
+    calls = {}
+
+    def fake_history(**kwargs):
+        calls['kwargs'] = kwargs
+        async def gen():
+            yield target
+            yield other
+        return gen()
+
+    ch = SimpleNamespace(id=10, name='ch1', history=fake_history)
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=RECENT_SWEEP_MINUTES)
+    deleted = asyncio.run(cog._sweep_one_channel(ch, 111, cutoff))
+
+    assert deleted == 1
+    target.delete.assert_awaited_once()
+    other.delete.assert_not_called()
+    assert calls['kwargs']['after'] == cutoff
+
+
+def test_sweep_recent_messages_across_channels():
+    cog = _make_cog()
+    target = _msg_in_history(1, 111)
+    ch1 = SimpleNamespace(id=10, name='ch1', history=lambda **kw: _agen(target))
+    ch2 = SimpleNamespace(id=11, name='ch2', history=lambda **kw: _agen())
+    guild = SimpleNamespace(id=456, text_channels=[ch1, ch2], threads=[])
+
+    asyncio.run(cog._sweep_recent_messages(guild, SimpleNamespace(id=111)))
+
+    target.delete.assert_awaited_once()
+
+
+def _agen(*items):
+    async def gen():
+        for item in items:
+            yield item
+    return gen()
+
+
+# ═══════════════════════════════════════════════════════════════════
 # Exact-time restore guard
 # ═══════════════════════════════════════════════════════════════════
 
