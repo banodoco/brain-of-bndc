@@ -692,9 +692,10 @@ def test_post_digest_top_gens_thread_opening_shown_rest_inside():
         )
     )
 
-    # opening message (the #1 gen) is the only channel post and shows the top gen
-    assert len(channel.sends) == 1
-    opening = channel.sends[0]
+    # section header first, then the opening message (the #1 gen) — both in the channel
+    assert len(channel.sends) == 2
+    assert channel.sends[0]["content"] == "## Top generations of the past 24 hours!"
+    opening = channel.sends[1]
     assert "By **alice**" in opening["content"]
     assert "12 unique reactions" in opening["content"]
     # thread created on the opening message, named with the date
@@ -707,7 +708,7 @@ def test_post_digest_top_gens_thread_opening_shown_rest_inside():
     thread_contents = " ".join(s["content"] for s in thread.sends)
     assert "By **bob**" in thread_contents
     assert "By **carol**" in thread_contents
-    assert len(mapping["top_gens"]) == 3  # opening + 2 in-thread
+    assert len(mapping["top_gens"]) == 4  # header + opening + 2 in-thread
 
 
 def test_post_digest_single_top_gen_posts_inline_without_thread():
@@ -718,11 +719,12 @@ def test_post_digest_single_top_gen_posts_inline_without_thread():
         post_digest(FakeBot(channel), [], 123, FakeStorage(), top_gens=candidates)
     )
 
-    assert len(channel.sends) == 1
-    assert "By **solo**" in channel.sends[0]["content"]
-    assert channel.sends[0]["message"].thread is None
+    assert len(channel.sends) == 2
+    assert channel.sends[0]["content"] == "## Top generations of the past 24 hours!"
+    assert "By **solo**" in channel.sends[1]["content"]
+    assert channel.sends[1]["message"].thread is None
     assert "top_gens_thread" not in mapping
-    assert len(mapping["top_gens"]) == 1
+    assert len(mapping["top_gens"]) == 2  # header + inline gen
 
 
 def test_post_digest_welcome_new_speakers_mentions_granted_members():
@@ -738,7 +740,7 @@ def test_post_digest_welcome_new_speakers_mentions_granted_members():
 
     msg = channel.sends[0]
     assert "Welcome to new speakers!" in msg["content"]
-    assert "<@111>, <@222>" in msg["content"]
+    assert "<@111> & <@222>" in msg["content"]
     assert len(mapping["new_speakers"]) == 1
 
 
@@ -763,12 +765,14 @@ def test_post_digest_section_order_stories_then_gens_then_welcome_then_footer():
     )
 
     contents = [s["content"] for s in channel.sends]
-    # header, news story, top-gen opening, welcome section, footer
-    assert contents[0] == "# Daily Update"
-    assert any(c.startswith("## News") for c in contents)
-    assert any("By **alice**" in c for c in contents)
-    assert any("Welcome to new speakers!" in c for c in contents)
-    assert contents[-1].startswith("---")
+    header_idx = contents.index("# Daily Update")
+    news_idx = next(i for i, c in enumerate(contents) if c.startswith("## News"))
+    gens_hdr_idx = next(i for i, c in enumerate(contents) if c.startswith("## Top generations"))
+    opening_idx = next(i for i, c in enumerate(contents) if "By **alice**" in c)
+    welcome_idx = next(i for i, c in enumerate(contents) if "Welcome to new speakers!" in c)
+    footer_idx = next(i for i, c in enumerate(contents) if c.startswith("---"))
+    # header, news story, gens header + opening, welcome section, footer
+    assert header_idx < news_idx < gens_hdr_idx < opening_idx < welcome_idx < footer_idx
     assert "footer" in mapping
 
 
@@ -779,8 +783,18 @@ def test_format_new_speakers_message_dedupes_and_preserves_order():
         {"member_id": 2, "approved_at": "2026-05-24T09:00:00+00:00"},
         {"member_id": 2, "approved_at": "2026-05-24T10:00:00+00:00"},
     ]
-    assert _format_new_speakers_message(rows) == "## Welcome to new speakers!\n\n<@1>, <@2>"
+    assert _format_new_speakers_message(rows) == "## Welcome to new speakers!\n\n<@1> & <@2>"
     assert _format_new_speakers_message([]) == ""
+    # three speakers: comma-separated with an ampersand before the last
+    three = [
+        {"member_id": 1, "approved_at": "a"},
+        {"member_id": 2, "approved_at": "b"},
+        {"member_id": 3, "approved_at": "c"},
+    ]
+    assert _format_new_speakers_message(three) == "## Welcome to new speakers!\n\n<@1>, <@2> & <@3>"
+    assert _format_new_speakers_message([{"member_id": 9, "approved_at": "a"}]) == (
+        "## Welcome to new speakers!\n\n<@9>"
+    )
 
 
 def _archived_message(msg_id, reactions, *, content="wow", channel="gens"):
@@ -904,7 +918,7 @@ def test_daily_digest_run_posts_top_gens_thread_and_welcome():
     )
 
     assert result["status"] == "ok"
-    assert result["top_gens_posted"] == 2
+    assert result["top_gens_posted"] == 3  # header + opening + 1 in-thread
     assert result["top_gens_thread_id"] is not None
     assert result["new_speakers_posted"] == 1
     # window anchored to the trailing 24 h from the injected now
@@ -975,10 +989,11 @@ def test_post_digest_top_gens_send_failure_does_not_abort_digest():
     )
 
     # stories + welcome + footer survive; the failed gens section is dropped
+    # but keeps the header id it already posted
     assert 0 in mapping
     assert "footer" in mapping
     assert "new_speakers" in mapping
-    assert "top_gens" not in mapping
+    assert "top_gens" in mapping and len(mapping["top_gens"]) == 1  # header only
     assert "top_gens_thread" not in mapping
     contents = [s["content"] for s in channel.sends]
     assert any(c.startswith("## News") for c in contents)

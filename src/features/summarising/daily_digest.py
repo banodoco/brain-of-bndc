@@ -47,6 +47,10 @@ DEFAULT_DIGEST_TOP_GENS_THREAD_MIN = 2
 # (pending_intros -> approved) in the trailing 24 h.
 DEFAULT_DIGEST_WELCOME_SPEAKERS_ENABLED = True
 
+# Section header posted before the top-gens thread, matching the news
+# stories' "## " headline style.
+TOP_GENS_SECTION_HEADER = "## Top generations of the past 24 hours!"
+
 
 def _env_flag(name: str, default: bool = False) -> bool:
     """Parse a boolean env var (mirrors summariser_cog._env_flag)."""
@@ -1107,7 +1111,12 @@ def _format_new_speakers_message(rows: List[Dict[str, Any]]) -> str:
             member_ids.append(mid)
     if not member_ids:
         return ""
-    mentions = ", ".join(f"<@{mid}>" for mid in member_ids)
+    # Comma-separated with an ampersand before the last speaker:
+    # "<@a>, <@b> & <@c>" (single speaker: just "<@a>").
+    mentions = ", ".join(f"<@{mid}>" for mid in member_ids[:-1])
+    if member_ids[:-1]:
+        mentions += " & "
+    mentions += f"<@{member_ids[-1]}>"
     return f"## Welcome to new speakers!\n\n{mentions}"
 
 
@@ -1334,12 +1343,18 @@ async def _post_top_gens_thread(
     guild_id: Optional[int],
     now: datetime,
 ) -> Tuple[Optional[int], List[int]]:
-    """Post the top-gens list as a thread: #1 shown in the channel, rest inside.
+    """Post the top-gens section: header + #1 shown in the channel, rest in a thread.
 
-    The opening message (the top gen) stays visible in the digest channel, and
-    a thread is created on it holding the remaining gens. When only one gen
-    qualifies (or the channel cannot host threads), everything is posted inline
-    and no thread is created.
+    A ``## Top generations of the past 24 hours!`` header message is posted
+    first (matching the news stories' headline style), then the top gen as the
+    thread-opening message — visible in the digest channel — with a thread
+    created on it holding the remaining gens. When only one gen qualifies (or
+    the channel cannot host threads), everything is posted inline and no thread
+    is created.
+
+    Any mid-way send failure is contained: the ids posted so far are returned
+    so the caller can record them, and the section is dropped rather than
+    aborting the digest.
 
     Returns ``(thread_id, sent_message_ids)``; ``thread_id`` is ``None`` when
     no thread was created.
@@ -1347,35 +1362,47 @@ async def _post_top_gens_thread(
     from src.features.summarising.topic_editor import chunk_text_for_discord  # noqa: PLC0415
 
     sent_ids: List[int] = []
-    first_chunks = chunk_text_for_discord(LiveTopCreations._format_post(candidates[0], guild_id))
-    opening = await _send_without_mentions(channel, first_chunks[0]) if first_chunks else None
-    if opening is not None:
-        sent_ids.append(opening.id)
-
     thread = None
-    if len(candidates) >= DEFAULT_DIGEST_TOP_GENS_THREAD_MIN and opening is not None:
-        try:
-            thread = await opening.create_thread(
-                name=_top_gens_thread_name(now),
-                auto_archive_duration=1440,
-            )
-        except Exception:
-            logger.debug(
-                "daily_digest: thread creation failed for top gens; posting inline",
-                exc_info=True,
-            )
-            thread = None
+    try:
+        header_msg = await _send_without_mentions(channel, TOP_GENS_SECTION_HEADER)
+        if header_msg is not None:
+            sent_ids.append(header_msg.id)
 
-    target = thread if thread is not None else channel
-    for chunk in first_chunks[1:]:
-        msg = await _send_without_mentions(target, chunk)
-        if msg is not None:
-            sent_ids.append(msg.id)
-    for candidate in candidates[1:]:
-        for chunk in chunk_text_for_discord(LiveTopCreations._format_post(candidate, guild_id)):
+        first_chunks = chunk_text_for_discord(LiveTopCreations._format_post(candidates[0], guild_id))
+        opening = await _send_without_mentions(channel, first_chunks[0]) if first_chunks else None
+        if opening is not None:
+            sent_ids.append(opening.id)
+
+        if len(candidates) >= DEFAULT_DIGEST_TOP_GENS_THREAD_MIN and opening is not None:
+            try:
+                thread = await opening.create_thread(
+                    name=_top_gens_thread_name(now),
+                    auto_archive_duration=1440,
+                )
+            except Exception:
+                logger.debug(
+                    "daily_digest: thread creation failed for top gens; posting inline",
+                    exc_info=True,
+                )
+                thread = None
+
+        target = thread if thread is not None else channel
+        for chunk in first_chunks[1:]:
             msg = await _send_without_mentions(target, chunk)
             if msg is not None:
                 sent_ids.append(msg.id)
+        for candidate in candidates[1:]:
+            for chunk in chunk_text_for_discord(LiveTopCreations._format_post(candidate, guild_id)):
+                msg = await _send_without_mentions(target, chunk)
+                if msg is not None:
+                    sent_ids.append(msg.id)
+    except Exception:
+        logger.warning(
+            "daily_digest: top-gens posting failed mid-way; kept %d of %d messages",
+            len(sent_ids),
+            1 + len(candidates),
+            exc_info=True,
+        )
     return (thread.id if thread is not None else None), sent_ids
 
 
