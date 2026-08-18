@@ -999,3 +999,49 @@ def test_post_digest_top_gens_send_failure_does_not_abort_digest():
     assert any(c.startswith("## News") for c in contents)
     assert any("Welcome to new speakers!" in c for c in contents)
     assert contents[-1].startswith("---")
+
+
+def test_daily_digest_run_omits_empty_sections():
+    class EmptyStorage(FakeStorage):
+        def __init__(self, topics=None):
+            super().__init__(topics)
+            self.window_calls = 0
+            self.intro_calls = 0
+
+        async def get_archived_messages_for_window(self, **kwargs):
+            self.window_calls += 1
+            return []
+
+        async def get_recently_approved_intros(self, hours=24, guild_id=None):
+            self.intro_calls += 1
+            return []
+
+    topic = {
+        "headline": "News",
+        "state": "posted",
+        "last_published_at": "2026-05-23T12:00:00+00:00",
+        "summary": {"blocks": [{"type": "intro", "text": "Intro"}]},
+    }
+    storage = EmptyStorage(topics=[topic])
+    channel = FakeChannel()
+
+    result = asyncio.run(
+        daily_digest_run(
+            FakeBot(channel), storage,
+            guild_id=1, channel_id=123,
+            now=datetime(2026, 5, 24, tzinfo=timezone.utc),
+            include_top_gens=True,
+            include_new_speakers=True,
+        )
+    )
+
+    assert result["status"] == "ok"
+    assert result["top_gens_posted"] == 0
+    assert result["new_speakers_posted"] == 0
+    # sections were evaluated but empty — neither the gens header nor the
+    # welcome message may appear; the news stories still post
+    contents = [s["content"] for s in channel.sends]
+    assert not any("Top generations" in (c or "") for c in contents)
+    assert not any("Welcome to new speakers!" in (c or "") for c in contents)
+    assert any(c.startswith("## News") for c in contents)
+    assert storage.window_calls == 1 and storage.intro_calls == 1
