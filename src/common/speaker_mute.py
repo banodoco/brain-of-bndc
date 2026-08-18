@@ -66,6 +66,7 @@ async def post_mute_to_moderation(
     duration: Optional[str],
     mute_end_at_iso: Optional[str],
     reason: str,
+    channel_id: Optional[int] = None,
 ) -> bool:
     """Post a mute notice to the moderation channel. Returns True on success.
 
@@ -73,7 +74,7 @@ async def post_mute_to_moderation(
     the calling mute action is never short-circuited by a logging hiccup.
     """
     try:
-        channel_id = _get_moderation_channel_id()
+        channel_id = channel_id or _get_moderation_channel_id()
         if not channel_id:
             return False
         channel = bot.get_channel(channel_id)

@@ -131,6 +131,18 @@ class HoneypotCog(commands.Cog):
             value = os.getenv('HONEYPOT_DURATION')
         return str(value or DEFAULT_HONEYPOT_DURATION)
 
+    def _get_moderation_channel_id(self, guild_id: int) -> Optional[int]:
+        """Per-guild moderation notice channel (mute log), else env/default.
+
+        Without this, every guild's mute notices land in BNDC's moderation
+        channel — cross-guild noise for any second server running the honeypot.
+        """
+        if self.server_config:
+            value = self.server_config.get_server_field(guild_id, 'moderation_channel_id', cast=int)
+            if value is not None:
+                return value
+        return None
+
     # ------------------------------------------------------------------
     # Role resolution (mirrors AdminCog._resolve_tier_roles)
     # ------------------------------------------------------------------
@@ -243,6 +255,7 @@ class HoneypotCog(commands.Cog):
             duration=duration,
             mute_end_at_iso=result.get('mute_end_at'),
             reason=reason,
+            channel_id=self._get_moderation_channel_id(message.guild.id),
         )
 
         # Delete the spam, then tag the poster IN the channel (never DM).

@@ -1,5 +1,6 @@
 """Tests for the rules-channel honeypot and the shared speaker-mute helper."""
 import asyncio
+import os
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -431,6 +432,67 @@ def test_on_message_notice_failure_does_not_break_trap():
     assert member.remove_roles.call_args.args[0].id == 2
     assert msg.delete.await_count == 1  # deletion still happened
     assert any(c[0] == 'create_timed_mute' for c in cog.db_handler.calls)
+
+
+def test_on_message_passes_guild_moderation_channel():
+    cog = _make_cog()
+    cog.server_config = SimpleNamespace(
+        get_server_field=lambda guild_id, field, cast=None: 424242 if field == 'moderation_channel_id' else None,
+    )
+    member = _speaker_member()
+    msg = _guild_msg(member)
+
+    with patch('src.features.auto_moderation.honeypot_cog.post_mute_to_moderation', new=AsyncMock(return_value=True)) as modlog:
+        asyncio.run(cog.on_message(msg))
+
+    modlog.assert_awaited_once()
+    assert modlog.call_args.kwargs['channel_id'] == 424242
+
+
+def test_on_message_moderation_channel_none_without_config():
+    cog = _make_cog()  # server_config is None — falls back to env/default at post time
+    member = _speaker_member()
+    msg = _guild_msg(member)
+
+    with patch('src.features.auto_moderation.honeypot_cog.post_mute_to_moderation', new=AsyncMock(return_value=True)) as modlog:
+        asyncio.run(cog.on_message(msg))
+
+    modlog.assert_awaited_once()
+    assert modlog.call_args.kwargs['channel_id'] is None
+
+
+def test_post_mute_to_moderation_explicit_channel_beats_env():
+    import src.common.speaker_mute as sm
+    os.environ['MODERATION_CHANNEL_ID'] = '555'
+    try:
+        ch = SimpleNamespace(id=777, send=AsyncMock())
+        bot = SimpleNamespace(get_channel=lambda cid: ch)
+        ok = asyncio.run(sm.post_mute_to_moderation(
+            bot, target_user_id=111, target_username='u', actor_user_id=None,
+            actor_label='Honeypot guard', duration='1h', mute_end_at_iso=None,
+            reason='test', channel_id=777,
+        ))
+        assert ok is True
+        assert ch.send.await_count == 1
+    finally:
+        del os.environ['MODERATION_CHANNEL_ID']
+
+
+def test_post_mute_to_moderation_env_fallback_when_no_channel():
+    import src.common.speaker_mute as sm
+    os.environ['MODERATION_CHANNEL_ID'] = '555'
+    try:
+        ch = SimpleNamespace(id=555, send=AsyncMock())
+        bot = SimpleNamespace(get_channel=lambda cid: ch)
+        ok = asyncio.run(sm.post_mute_to_moderation(
+            bot, target_user_id=111, target_username='u', actor_user_id=None,
+            actor_label='Honeypot guard', duration='1h', mute_end_at_iso=None,
+            reason='test',
+        ))
+        assert ok is True
+        assert ch.send.await_count == 1
+    finally:
+        del os.environ['MODERATION_CHANNEL_ID']
 
 
 def test_notice_message_is_formattable():
