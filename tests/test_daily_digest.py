@@ -11,6 +11,9 @@ from src.features.summarising.daily_digest import (
     post_digest,
     resolve_media_urls,
     topics_to_legacy_daily_summary_items,
+    _fetch_new_speakers,
+    _fetch_top_gens,
+    _format_new_speakers_message,
     _parse_digest_response,
 )
 
@@ -179,10 +182,22 @@ class FakeMessage:
     def __init__(self):
         FakeMessage._next_id += 1
         self.id = FakeMessage._next_id
+        self.thread = None
+
+    async def create_thread(self, name=None, auto_archive_duration=None, **kwargs):
+        self.thread = FakeThread(self.id, name, auto_archive_duration)
+        return self.thread
 
 
-class FakeChannel:
-    def __init__(self):
+class FakeThread:
+    _next_id = 5000
+
+    def __init__(self, starter_message_id, name, auto_archive_duration):
+        FakeThread._next_id += 1
+        self.id = FakeThread._next_id
+        self.starter_message_id = starter_message_id
+        self.name = name
+        self.auto_archive_duration = auto_archive_duration
         self.sends = []
 
     async def send(self, content=None, files=None):
@@ -190,9 +205,22 @@ class FakeChannel:
         return FakeMessage()
 
 
+class FakeChannel:
+    def __init__(self):
+        self.sends = []
+
+    async def send(self, content=None, files=None):
+        msg = FakeMessage()
+        self.sends.append({"content": content, "files": files, "message": msg})
+        return msg
+
+
 class FakeBot:
     def __init__(self, channel):
         self.channel = channel
+
+    def get_channel(self, channel_id):
+        return self.channel
 
     def get_channel(self, channel_id):
         return self.channel
@@ -628,3 +656,331 @@ def test_daily_digest_run_uses_curated_items_end_to_end():
     assert all(sub["included_in_main"] is True for sub in item["subTopics"])
     assert "[[1]](https://discord.com/channels/1/12/222)" in item["mainText"]
     json.dumps(item)  # legacy row must be JSON-serializable
+
+
+# ---------------------------------------------------------------------------
+# Top-gens thread + welcome-new-speakers sections
+# ---------------------------------------------------------------------------
+
+def _top_gen_candidate(author, reactions, msg_id, content="nice"):
+    return {
+        "author_name": author,
+        "channel_name": "gens",
+        "reaction_count": reactions,
+        "content": content,
+        "media_refs": [{"url": f"https://x/{msg_id}.mp4", "type": "video"}],
+        "source_channel_id": 10,
+        "source_message_id": msg_id,
+        "thread_id": None,
+    }
+
+
+def test_post_digest_top_gens_thread_opening_shown_rest_inside():
+    channel = FakeChannel()
+    candidates = [
+        _top_gen_candidate("alice", 12, 101),
+        _top_gen_candidate("bob", 9, 102),
+        _top_gen_candidate("carol", 7, 103),
+    ]
+
+    mapping = asyncio.run(
+        post_digest(
+            FakeBot(channel), [], 123, FakeStorage(),
+            guild_id=1,
+            top_gens=candidates,
+            now=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        )
+    )
+
+    # opening message (the #1 gen) is the only channel post and shows the top gen
+    assert len(channel.sends) == 1
+    opening = channel.sends[0]
+    assert "By **alice**" in opening["content"]
+    assert "12 unique reactions" in opening["content"]
+    # thread created on the opening message, named with the date
+    thread = opening["message"].thread
+    assert thread is not None
+    assert thread.name == "Top gens · May 24"
+    assert thread.auto_archive_duration == 1440
+    assert mapping["top_gens_thread"] == thread.id
+    # gens 2..N live inside the thread, not the channel
+    thread_contents = " ".join(s["content"] for s in thread.sends)
+    assert "By **bob**" in thread_contents
+    assert "By **carol**" in thread_contents
+    assert len(mapping["top_gens"]) == 3  # opening + 2 in-thread
+
+
+def test_post_digest_single_top_gen_posts_inline_without_thread():
+    channel = FakeChannel()
+    candidates = [_top_gen_candidate("solo", 5, 201)]
+
+    mapping = asyncio.run(
+        post_digest(FakeBot(channel), [], 123, FakeStorage(), top_gens=candidates)
+    )
+
+    assert len(channel.sends) == 1
+    assert "By **solo**" in channel.sends[0]["content"]
+    assert channel.sends[0]["message"].thread is None
+    assert "top_gens_thread" not in mapping
+    assert len(mapping["top_gens"]) == 1
+
+
+def test_post_digest_welcome_new_speakers_mentions_granted_members():
+    channel = FakeChannel()
+    rows = [
+        {"member_id": 111, "approved_at": "2026-05-24T08:00:00+00:00"},
+        {"member_id": 222, "approved_at": "2026-05-24T09:00:00+00:00"},
+    ]
+
+    mapping = asyncio.run(
+        post_digest(FakeBot(channel), [], 123, FakeStorage(), new_speakers=rows)
+    )
+
+    msg = channel.sends[0]
+    assert "Welcome to new speakers!" in msg["content"]
+    assert "<@111>, <@222>" in msg["content"]
+    assert len(mapping["new_speakers"]) == 1
+
+
+def test_post_digest_section_order_stories_then_gens_then_welcome_then_footer():
+    channel = FakeChannel()
+    items = [{"title": "News", "mainText": "story", "subTopics": []}]
+    candidates = [
+        _top_gen_candidate("alice", 12, 101),
+        _top_gen_candidate("bob", 9, 102),
+    ]
+    rows = [{"member_id": 111, "approved_at": "2026-05-24T08:00:00+00:00"}]
+
+    mapping = asyncio.run(
+        post_digest(
+            FakeBot(channel), items, 555, FakeStorage(),
+            header="# Daily Update",
+            guild_id=999,
+            top_gens=candidates,
+            new_speakers=rows,
+            now=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        )
+    )
+
+    contents = [s["content"] for s in channel.sends]
+    # header, news story, top-gen opening, welcome section, footer
+    assert contents[0] == "# Daily Update"
+    assert any(c.startswith("## News") for c in contents)
+    assert any("By **alice**" in c for c in contents)
+    assert any("Welcome to new speakers!" in c for c in contents)
+    assert contents[-1].startswith("---")
+    assert "footer" in mapping
+
+
+def test_format_new_speakers_message_dedupes_and_preserves_order():
+    # the fetch orders by approved_at; the formatter keeps given order + dedupes
+    rows = [
+        {"member_id": 1, "approved_at": "2026-05-24T08:00:00+00:00"},
+        {"member_id": 2, "approved_at": "2026-05-24T09:00:00+00:00"},
+        {"member_id": 2, "approved_at": "2026-05-24T10:00:00+00:00"},
+    ]
+    assert _format_new_speakers_message(rows) == "## Welcome to new speakers!\n\n<@1>, <@2>"
+    assert _format_new_speakers_message([]) == ""
+
+
+def _archived_message(msg_id, reactions, *, content="wow", channel="gens"):
+    return {
+        "message_id": msg_id,
+        "channel_id": 10,
+        "channel_name": channel,
+        "content": content,
+        "created_at": "2026-05-23T12:00:00+00:00",
+        "reaction_count": reactions,
+        "reactors": [],
+        "attachments": [
+            {"url": f"https://cdn.test/{msg_id}.mp4", "filename": f"{msg_id}.mp4",
+             "content_type": "video/mp4"}
+        ],
+        "embeds": [],
+        "author_name": "alice",
+        "author_context_snapshot": {"username": "alice"},
+        "thread_id": None,
+    }
+
+
+class WindowStorage:
+    def __init__(self, messages=None):
+        self.messages = messages or []
+        self.kwargs = None
+
+    async def get_archived_messages_for_window(self, **kwargs):
+        self.kwargs = kwargs
+        return list(self.messages)
+
+
+def test_fetch_top_gens_ranks_by_reactions_and_respects_min():
+    storage = WindowStorage(
+        [
+            _archived_message(1, 3),   # below min_reactions -> dropped
+            _archived_message(2, 20),
+            _archived_message(3, 12),
+        ]
+    )
+
+    gens = asyncio.run(
+        _fetch_top_gens(
+            storage, 1,
+            now=datetime(2026, 5, 24, tzinfo=timezone.utc),
+            count=2, min_reactions=5,
+        )
+    )
+
+    assert [g["source_message_id"] for g in gens] == [2, 3]  # ranked desc, capped at 2
+    assert storage.kwargs["start"] == "2026-05-23T00:00:00+00:00"
+    assert storage.kwargs["end"] == "2026-05-24T00:00:00+00:00"
+    # max supported limit so the ascending query doesn't drop the newest gens
+    assert storage.kwargs["limit"] == 5000
+
+
+def test_fetch_new_speakers_dedupes_and_orders():
+    class IntroStorage:
+        def __init__(self, rows):
+            self.rows = rows
+
+        async def get_recently_approved_intros(self, hours=24, guild_id=None):
+            return list(self.rows)
+
+    rows = [
+        {"member_id": 2, "approved_at": "2026-05-24T09:00:00+00:00"},
+        {"member_id": 1, "approved_at": "2026-05-24T08:00:00+00:00"},
+        {"member_id": 2, "approved_at": "2026-05-24T10:00:00+00:00"},
+    ]
+    out = asyncio.run(_fetch_new_speakers(IntroStorage(rows), 1))
+    assert [r["member_id"] for r in out] == [1, 2]
+
+
+def test_daily_digest_run_posts_top_gens_thread_and_welcome():
+    class DigestStorage(FakeStorage):
+        def __init__(self, topics=None, window_messages=None, intros=None):
+            super().__init__(topics)
+            self.window_messages = window_messages or []
+            self.intros = intros or []
+            self.window_kwargs = None
+            self.intros_kwargs = None
+
+        async def get_archived_messages_for_window(self, **kwargs):
+            self.window_kwargs = kwargs
+            return list(self.window_messages)
+
+        async def get_recently_approved_intros(self, hours=24, guild_id=None):
+            self.intros_kwargs = (hours, guild_id)
+            return list(self.intros)
+
+    topic = {
+        "headline": "News",
+        "state": "posted",
+        "last_published_at": "2026-05-23T12:00:00+00:00",
+        "summary": {"blocks": [
+            {"type": "intro", "text": "Intro", "source_message_ids": ["222"],
+             "media_refs": [{"message_id": "222", "index": 0}]}
+        ]},
+    }
+    storage = DigestStorage(
+        topics=[topic],
+        window_messages=[
+            _archived_message(2, 20),
+            _archived_message(3, 12),
+        ],
+        intros=[
+            {"member_id": 111, "approved_at": "2026-05-24T08:00:00+00:00"},
+            {"member_id": 222, "approved_at": "2026-05-24T09:00:00+00:00"},
+        ],
+    )
+    channel = FakeChannel()
+
+    result = asyncio.run(
+        daily_digest_run(
+            FakeBot(channel),
+            storage,
+            guild_id=1,
+            channel_id=123,
+            now=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        )
+    )
+
+    assert result["status"] == "ok"
+    assert result["top_gens_posted"] == 2
+    assert result["top_gens_thread_id"] is not None
+    assert result["new_speakers_posted"] == 1
+    # window anchored to the trailing 24 h from the injected now
+    assert storage.window_kwargs["start"] == "2026-05-23T00:00:00+00:00"
+    assert storage.window_kwargs["end"] == "2026-05-24T00:00:00+00:00"
+    assert storage.intros_kwargs == (24, 1)
+    # stored row records every message the digest created (clean deletion)
+    item = storage.rows[0]["full_summary"][0]
+    assert item["posted_message_ids"]  # header + top-gens + welcome + story ids
+
+
+def test_daily_digest_run_skips_sections_when_disabled():
+    topic = {
+        "headline": "News",
+        "state": "posted",
+        "last_published_at": "2026-05-23T12:00:00+00:00",
+        "summary": {"blocks": [{"type": "intro", "text": "Intro"}]},
+    }
+    storage = FakeStorage(topics=[topic])
+    channel = FakeChannel()
+
+    result = asyncio.run(
+        daily_digest_run(
+            FakeBot(channel),
+            storage,
+            guild_id=1,
+            channel_id=123,
+            now=datetime(2026, 5, 24, tzinfo=timezone.utc),
+            include_top_gens=False,
+            include_new_speakers=False,
+        )
+    )
+
+    assert result["status"] == "ok"
+    assert result["top_gens_posted"] == 0
+    assert result["new_speakers_posted"] == 0
+    assert "top_gens_thread_id" not in result or result["top_gens_thread_id"] is None
+    # no thread, no welcome message — only header + story + footer
+    contents = [s["content"] for s in channel.sends]
+    assert not any("By **" in (c or "") for c in contents)
+    assert not any("Welcome to new speakers!" in (c or "") for c in contents)
+
+
+def test_post_digest_top_gens_send_failure_does_not_abort_digest():
+    class FailingChannel(FakeChannel):
+        async def send(self, content=None, files=None):
+            if (content or "").startswith("By **"):
+                raise RuntimeError("gen send failed")
+            return await super().send(content=content, files=files)
+
+    channel = FailingChannel()  # only the top-gens posts fail
+    items = [{"title": "News", "mainText": "story", "subTopics": []}]
+    candidates = [
+        _top_gen_candidate("alice", 12, 101),
+        _top_gen_candidate("bob", 9, 102),
+    ]
+    rows = [{"member_id": 111, "approved_at": "2026-05-24T08:00:00+00:00"}]
+
+    mapping = asyncio.run(
+        post_digest(
+            FakeBot(channel), items, 555, FakeStorage(),
+            header="# Daily Update",
+            guild_id=999,
+            top_gens=candidates,
+            new_speakers=rows,
+            now=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        )
+    )
+
+    # stories + welcome + footer survive; the failed gens section is dropped
+    assert 0 in mapping
+    assert "footer" in mapping
+    assert "new_speakers" in mapping
+    assert "top_gens" not in mapping
+    assert "top_gens_thread" not in mapping
+    contents = [s["content"] for s in channel.sends]
+    assert any(c.startswith("## News") for c in contents)
+    assert any("Welcome to new speakers!" in c for c in contents)
+    assert contents[-1].startswith("---")

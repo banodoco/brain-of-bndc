@@ -15,6 +15,8 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from .live_top_creations import LiveTopCreations, _send_without_mentions
+
 logger = logging.getLogger(__name__)
 
 # Default number of curated stories the daily digest condenses the day into.
@@ -30,6 +32,29 @@ DEFAULT_DIGEST_MAX_TOKENS = int(os.getenv("DAILY_DIGEST_MAX_TOKENS", "32000") or
 # one busy story can't dump a dozen images/clips.
 DEFAULT_DIGEST_MAX_MEDIA_PER_STORY = int(os.getenv("DAILY_DIGEST_MAX_MEDIA_PER_STORY", "3") or "3")
 
+# Top-gens thread: after the news stories, the digest posts the best gens of
+# the trailing 24 h as a Discord thread whose opening message (the #1 gen)
+# stays visible in the channel. Selection mirrors the #top-gens service
+# (reaction-ranked candidates over archived messages).
+DEFAULT_DIGEST_TOP_GENS_ENABLED = True
+DEFAULT_DIGEST_TOP_GENS_COUNT = int(os.getenv("DAILY_DIGEST_TOP_GENS_COUNT", "5") or "5")
+DEFAULT_DIGEST_TOP_GENS_MIN_REACTIONS = int(os.getenv("DAILY_DIGEST_TOP_GENS_MIN_REACTIONS", "5") or "5")
+# A single gen still gets posted (as the thread opening message); the thread
+# itself is only created when there is more than one gen to put inside it.
+DEFAULT_DIGEST_TOP_GENS_THREAD_MIN = 2
+
+# "Welcome to new speakers!" section: mentions everyone granted Speaker
+# (pending_intros -> approved) in the trailing 24 h.
+DEFAULT_DIGEST_WELCOME_SPEAKERS_ENABLED = True
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    """Parse a boolean env var (mirrors summariser_cog._env_flag)."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
 
 def _resolve_digest_model(model: Optional[str] = None) -> str:
     """Resolve the editorial LLM model for the daily digest.
@@ -40,7 +65,7 @@ def _resolve_digest_model(model: Optional[str] = None) -> str:
     """
     if model:
         return model
-    from src.features.summarising.live_update_prompts import DEFAULT_LIVE_UPDATE_MODEL  # noqa: PLC0415
+    from src.features.summarising.editor_models import DEFAULT_LIVE_UPDATE_MODEL  # noqa: PLC0415
 
     return (
         os.getenv("DAILY_DIGEST_MODEL")
@@ -994,6 +1019,99 @@ def enrich_items(
 
 
 # ---------------------------------------------------------------------------
+# Top gens + new speakers — trailing-24h collections for the digest post
+# ---------------------------------------------------------------------------
+
+async def _fetch_top_gens(
+    storage_handler: Any,
+    guild_id: Optional[int],
+    *,
+    now: datetime,
+    count: int = DEFAULT_DIGEST_TOP_GENS_COUNT,
+    min_reactions: int = DEFAULT_DIGEST_TOP_GENS_MIN_REACTIONS,
+    art_channel_id: Optional[int] = None,
+    hours: int = 24,
+) -> List[Dict[str, Any]]:
+    """Return the top gens of the trailing ``hours`` window, reaction-ranked.
+
+    Reuses the #top-gens service's candidate selection over archived messages
+    (attachments, non-NSFW, >= ``min_reactions`` reactions) so the digest's
+    "top gens" match what the top-gens channel would feature. ``art_channel_id``
+    is optional: without it only video generations qualify (images in the art
+    channel are not classified), which is the right default for a gens thread.
+
+    Best-effort: any failure returns ``[]`` so the digest still posts.
+    """
+    if storage_handler is None or not hasattr(storage_handler, "get_archived_messages_for_window"):
+        return []
+    start = (now - timedelta(hours=hours)).isoformat()
+    end = now.isoformat()
+    # The storage query orders ascending, so a low limit would rank only the
+    # OLDEST messages of the window and silently drop the newest gens. Use the
+    # maximum the query supports (5000) — still bounded, but a busy day's
+    # window stays covered for ranking.
+    messages = await storage_handler.get_archived_messages_for_window(
+        guild_id=guild_id,
+        start=start,
+        end=end,
+        limit=5000,
+    )
+    if not messages:
+        return []
+    selector = LiveTopCreations(None, guild_id=guild_id, min_reactions=min_reactions)
+    candidates = selector._select_candidates(messages, guild_id, art_channel_id)
+    return candidates[: max(1, int(count))]
+
+
+async def _fetch_new_speakers(
+    storage_handler: Any,
+    guild_id: Optional[int],
+    *,
+    hours: int = 24,
+) -> List[Dict[str, Any]]:
+    """Return members granted Speaker in the trailing ``hours`` window.
+
+    Source of truth is ``pending_intros`` rows approved (``status == 'approved'``,
+    ``approved_at`` in window) — the same rows the gating flow writes when an
+    approver admits a member. Rows are deduped by ``member_id`` and ordered by
+    ``approved_at`` ascending so the welcome mentions read oldest-to-newest.
+
+    Best-effort: any failure returns ``[]`` so the digest still posts.
+    """
+    if storage_handler is None or not hasattr(storage_handler, "get_recently_approved_intros"):
+        return []
+    rows = await storage_handler.get_recently_approved_intros(hours=hours, guild_id=guild_id)
+    seen: Set[int] = set()
+    ordered: List[Dict[str, Any]] = []
+    for row in sorted(rows or [], key=lambda r: str(r.get("approved_at") or "")):
+        member_id = row.get("member_id")
+        if member_id is None or member_id in seen:
+            continue
+        seen.add(member_id)
+        ordered.append(row)
+    return ordered
+
+
+def _format_new_speakers_message(rows: List[Dict[str, Any]]) -> str:
+    """Render the welcome section: a header plus one mention per granted member.
+
+    Defensively dedupes by ``member_id`` (the fetch already does, but the
+    formatter is also reachable directly through ``post_digest``).
+    """
+    seen: Set[str] = set()
+    member_ids: List[str] = []
+    for row in rows:
+        mid = str(row.get("member_id")) if row.get("member_id") is not None else ""
+        if mid and mid not in seen:
+            seen.add(mid)
+            member_ids.append(mid)
+    if not member_ids:
+        return ""
+    mentions = ", ".join(f"<@{mid}>" for mid in member_ids)
+    return f"## Welcome to new speakers!\n\n{mentions}"
+
+
+# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
@@ -1205,6 +1323,84 @@ def _format_digest_header(now: datetime) -> str:
     return f"# Daily Update - {now.strftime('%A, %B')} {now.day}"
 
 
+def _top_gens_thread_name(now: datetime) -> str:
+    """Thread name for the top-gens thread, e.g. 'Top gens · May 24'."""
+    return f"Top gens · {now.strftime('%B %d')}"
+
+
+async def _post_top_gens_thread(
+    channel: Any,
+    candidates: List[Dict[str, Any]],
+    guild_id: Optional[int],
+    now: datetime,
+) -> Tuple[Optional[int], List[int]]:
+    """Post the top-gens list as a thread: #1 shown in the channel, rest inside.
+
+    The opening message (the top gen) stays visible in the digest channel, and
+    a thread is created on it holding the remaining gens. When only one gen
+    qualifies (or the channel cannot host threads), everything is posted inline
+    and no thread is created.
+
+    Returns ``(thread_id, sent_message_ids)``; ``thread_id`` is ``None`` when
+    no thread was created.
+    """
+    from src.features.summarising.topic_editor import chunk_text_for_discord  # noqa: PLC0415
+
+    sent_ids: List[int] = []
+    first_chunks = chunk_text_for_discord(LiveTopCreations._format_post(candidates[0], guild_id))
+    opening = await _send_without_mentions(channel, first_chunks[0]) if first_chunks else None
+    if opening is not None:
+        sent_ids.append(opening.id)
+
+    thread = None
+    if len(candidates) >= DEFAULT_DIGEST_TOP_GENS_THREAD_MIN and opening is not None:
+        try:
+            thread = await opening.create_thread(
+                name=_top_gens_thread_name(now),
+                auto_archive_duration=1440,
+            )
+        except Exception:
+            logger.debug(
+                "daily_digest: thread creation failed for top gens; posting inline",
+                exc_info=True,
+            )
+            thread = None
+
+    target = thread if thread is not None else channel
+    for chunk in first_chunks[1:]:
+        msg = await _send_without_mentions(target, chunk)
+        if msg is not None:
+            sent_ids.append(msg.id)
+    for candidate in candidates[1:]:
+        for chunk in chunk_text_for_discord(LiveTopCreations._format_post(candidate, guild_id)):
+            msg = await _send_without_mentions(target, chunk)
+            if msg is not None:
+                sent_ids.append(msg.id)
+    return (thread.id if thread is not None else None), sent_ids
+
+
+async def _post_new_speakers_message(
+    channel: Any,
+    rows: List[Dict[str, Any]],
+) -> List[int]:
+    """Post the 'Welcome to new speakers!' section (mentions granted members)."""
+    from src.features.summarising.topic_editor import chunk_text_for_discord  # noqa: PLC0415
+
+    text = _format_new_speakers_message(rows)
+    if not text:
+        return []
+    sent_ids: List[int] = []
+    for chunk in chunk_text_for_discord(text):
+        try:
+            import discord  # type: ignore
+
+            msg = await channel.send(chunk, allowed_mentions=discord.AllowedMentions(users=True))
+        except TypeError:
+            msg = await channel.send(chunk)
+        sent_ids.append(msg.id)
+    return sent_ids
+
+
 async def post_digest(
     bot: Any,
     items: List[Dict[str, Any]],
@@ -1214,12 +1410,18 @@ async def post_digest(
     header: Optional[str] = None,
     guild_id: Optional[int] = None,
     footer_label: str = "**Click here to jump to the beginning of today's summary:**",
+    top_gens: Optional[List[Dict[str, Any]]] = None,
+    new_speakers: Optional[List[Dict[str, Any]]] = None,
+    now: Optional[datetime] = None,
 ) -> Dict[Any, List[int]]:
     """Post the digest to channel_id.
 
-    Posts an optional dated ``header`` first, then one message/contiguous-chunk
-    -group per item, then (when the header was posted and ``guild_id`` is known)
-    a footer with a masked jump-link back to that header message.
+    Post order: optional dated ``header``, then one message/contiguous-chunk
+    -group per item (the news stories), then — when provided — the top-gens
+    thread (opening post = the #1 gen in the channel, the rest inside a thread
+    attached to it), then the "Welcome to new speakers!" section, and finally
+    (when the header was posted and ``guild_id`` is known) a footer with a
+    masked jump-link back to that header message.
 
     Each item's text is rendered as plain Discord text and chunked to
     Discord's 2000-char limit via the existing ``chunk_text_for_discord``
@@ -1230,7 +1432,9 @@ async def post_digest(
     dict
         ``{item_index: [sent_msg.id, ...]}`` for each item, plus the special
         keys ``"header"`` and ``"footer"`` carrying their message ids (when
-        posted). Entries that produce no text are omitted.
+        posted), ``"top_gens"``/``"new_speakers"`` with the ids of the messages
+        they posted, and ``"top_gens_thread"`` with the created thread's id
+        (when a thread was created). Entries that produce no text are omitted.
     """
     from src.features.summarising.topic_editor import chunk_text_for_discord  # noqa: PLC0415
 
@@ -1263,6 +1467,37 @@ async def post_digest(
         if sent_ids:
             result[idx] = sent_ids
 
+    # --- Top-gens thread: opening post (#1 gen) shown in the channel, the
+    #     rest inside a thread attached to it. Best-effort like the fetch: a
+    #     send failure drops the section (retaining any ids already posted),
+    #     never the digest itself. ---
+    if top_gens:
+        try:
+            thread_id, thread_ids = await _post_top_gens_thread(
+                channel, top_gens, guild_id, now or datetime.now(timezone.utc)
+            )
+            if thread_ids:
+                result["top_gens"] = thread_ids
+            if thread_id is not None:
+                result["top_gens_thread"] = thread_id
+        except Exception:
+            logger.warning(
+                "daily_digest: top-gens thread posting failed; continuing without it",
+                exc_info=True,
+            )
+
+    # --- Welcome to new speakers! (best-effort, same contract) ---
+    if new_speakers:
+        try:
+            welcome_ids = await _post_new_speakers_message(channel, new_speakers)
+            if welcome_ids:
+                result["new_speakers"] = welcome_ids
+        except Exception:
+            logger.warning(
+                "daily_digest: new-speakers section posting failed; continuing without it",
+                exc_info=True,
+            )
+
     # --- Footer jump-link back to the header ---
     if first_message_id is not None and guild_id is not None:
         from src.common.urls import message_jump_url  # noqa: PLC0415
@@ -1289,6 +1524,11 @@ async def daily_digest_run(
     llm_client: Any = None,
     model: Optional[str] = None,
     max_stories: int = DEFAULT_DIGEST_MAX_STORIES,
+    include_top_gens: Optional[bool] = None,
+    include_new_speakers: Optional[bool] = None,
+    top_gens_count: Optional[int] = None,
+    min_reactions: Optional[int] = None,
+    art_channel_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Orchestrate the daily digest: query → curate (LLM) → enrich → post → upsert.
 
@@ -1306,13 +1546,30 @@ async def daily_digest_run(
         ``'prod'`` or ``'dev'``.
     now : datetime | None
         Override for "now"; defaults to current UTC time.  Inject in tests.
+    include_top_gens : bool | None
+        Whether to append the top-gens thread after the news stories. Defaults
+        to ``DAILY_DIGEST_TOP_GENS_ENABLED`` (on).
+    include_new_speakers : bool | None
+        Whether to append the "Welcome to new speakers!" section. Defaults to
+        ``DAILY_DIGEST_WELCOME_SPEAKERS_ENABLED`` (on).
+    top_gens_count : int | None
+        How many gens to feature (default ``DAILY_DIGEST_TOP_GENS_COUNT`` = 5).
+    min_reactions : int | None
+        Minimum reactions a gen needs to qualify (default
+        ``DAILY_DIGEST_TOP_GENS_MIN_REACTIONS`` = 5).
+    art_channel_id : int | None
+        Optional art channel id so image art-shares qualify as candidates too.
+        When omitted only video generations qualify (the default for a gens
+        thread).
 
     Returns
     -------
     dict
         ``{status:'ok', upserts:1, items_posted:<n>, date:<str>}`` on success,
-        or ``{status:'skipped', reason:'no_topics_in_window', upserts:0}`` when
-        no posted topics fall within the trailing 24 h window.
+        plus ``top_gens_posted`` / ``top_gens_thread_id`` / ``new_speakers_posted``
+        counts when those sections ran; or ``{status:'skipped',
+        reason:'no_topics_in_window', upserts:0}`` when no posted topics fall
+        within the trailing 24 h window.
     """
     if now is None:
         now = datetime.now(timezone.utc)
@@ -1400,7 +1657,48 @@ async def daily_digest_run(
             exc_info=True,
         )
 
-    # 6. Post to Discord — dated header, one chunk-group per item, footer jump-link
+    # 5c. Collect the trailing-24h top gens and newly granted speakers. Both
+    #     are best-effort — a failure drops the section, never the digest.
+    if include_top_gens is None:
+        include_top_gens = _env_flag(
+            "DAILY_DIGEST_TOP_GENS_ENABLED", DEFAULT_DIGEST_TOP_GENS_ENABLED
+        )
+    if include_new_speakers is None:
+        include_new_speakers = _env_flag(
+            "DAILY_DIGEST_WELCOME_SPEAKERS_ENABLED", DEFAULT_DIGEST_WELCOME_SPEAKERS_ENABLED
+        )
+    top_gens: List[Dict[str, Any]] = []
+    new_speakers: List[Dict[str, Any]] = []
+    if include_top_gens:
+        try:
+            top_gens = await _fetch_top_gens(
+                storage_handler,
+                guild_id,
+                now=now,
+                count=top_gens_count if top_gens_count is not None else DEFAULT_DIGEST_TOP_GENS_COUNT,
+                min_reactions=(
+                    min_reactions if min_reactions is not None else DEFAULT_DIGEST_TOP_GENS_MIN_REACTIONS
+                ),
+                art_channel_id=art_channel_id,
+            )
+        except Exception:
+            logger.warning(
+                "daily_digest_run: top-gens collection failed; posting digest without it",
+                exc_info=True,
+            )
+            top_gens = []
+    if include_new_speakers:
+        try:
+            new_speakers = await _fetch_new_speakers(storage_handler, guild_id)
+        except Exception:
+            logger.warning(
+                "daily_digest_run: new-speakers collection failed; posting digest without it",
+                exc_info=True,
+            )
+            new_speakers = []
+
+    # 6. Post to Discord — dated header, one chunk-group per item (news stories),
+    #    top-gens thread, welcome-new-speakers section, footer jump-link
     post_mapping = await post_digest(
         bot,
         items,
@@ -1408,6 +1706,9 @@ async def daily_digest_run(
         storage_handler,
         header=_format_digest_header(now),
         guild_id=guild_id,
+        top_gens=top_gens or None,
+        new_speakers=new_speakers or None,
+        now=now,
     )
 
     # 7. Assign posted_message_ids from the post_digest mapping
@@ -1418,7 +1719,10 @@ async def daily_digest_run(
         item["posted_message_ids"] = list(post_mapping.get(idx, []))
     if items:
         items[0]["posted_message_ids"] = (
-            list(post_mapping.get("header", [])) + items[0]["posted_message_ids"]
+            list(post_mapping.get("header", []))
+            + list(post_mapping.get("top_gens", []))
+            + list(post_mapping.get("new_speakers", []))
+            + items[0]["posted_message_ids"]
         )
         items[-1]["posted_message_ids"] = (
             items[-1]["posted_message_ids"] + list(post_mapping.get("footer", []))
@@ -1456,4 +1760,7 @@ async def daily_digest_run(
         "upserts": 1,
         "items_posted": len(items),
         "date": date_str,
+        "top_gens_posted": len(post_mapping.get("top_gens", [])),
+        "top_gens_thread_id": post_mapping.get("top_gens_thread"),
+        "new_speakers_posted": len(post_mapping.get("new_speakers", [])),
     }
