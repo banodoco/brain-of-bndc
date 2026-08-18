@@ -1750,6 +1750,38 @@ class TestEditorialDecisionPosting:
         msg.delete.assert_awaited()
 
     @pytest.mark.asyncio
+    async def test_editorial_decisions_channel_found_by_name(self, monkeypatch):
+        """Without env/server_config, the channel is found by name —
+        including the literal `editorial_decisions` spelling used in BNDC."""
+        cog, db, calls = _build_cog(monkeypatch)
+        # No env, no server_config field → name fallback.
+        monkeypatch.delenv("EDITORIAL_DECISIONS_CHANNEL_ID", raising=False)
+
+        decision_channel = _make_decision_channel()
+        decision_channel.name = "editorial_decisions"
+        decision_channel.id = 1316024582041243668
+        msg = _make_mock_message(
+            content="fix this",
+            author_id=424242,
+            reference_message_id=9001,
+            mentions=[],
+        )
+        # Fake guild channel list with the underscore-spelled channel; no
+        # env/server_config id resolves, so the name fallback must pick it.
+        msg.guild.channels = [decision_channel]
+        msg.guild.get_channel = MagicMock(return_value=None)
+
+        cog.agent.chat.return_value = AdminChatResult(replies=["ok"], actions=[])
+        db._get_topic_result = _make_topic()
+        db._get_feedback_result = _make_feedback_row()
+
+        await cog._handle_admin_message(msg)
+
+        # The name fallback resolved the underscore channel and the decision
+        # post landed there.
+        decision_channel.send.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_no_decision_post_when_channel_unresolvable(self, monkeypatch):
         """No editorial-decisions channel → the post is skipped but the reply
         is still acked/deleted (feedback is never stranded)."""

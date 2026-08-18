@@ -1500,10 +1500,14 @@ class AdminChatCog(commands.Cog):
             channel = guild.get_channel(channel_id)
             if channel:
                 return channel
-        # Name fallback (case-insensitive) so the feature works without config.
+        # Name fallback (case-insensitive) so the feature works without
+        # config. The BNDC channel is literally named `editorial_decisions`;
+        # accept both spellings.
         try:
             for channel in (getattr(guild, 'channels', None) or []):
-                if getattr(channel, 'name', '').casefold() == 'editorial-decisions':
+                if getattr(channel, 'name', '').casefold() in (
+                    'editorial-decisions', 'editorial_decisions',
+                ):
                     return channel
         except TypeError:
             pass
