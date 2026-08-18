@@ -1048,7 +1048,7 @@ TOOLS = [
     },
     {
         "name": "log_live_update_feedback",
-        "description": "Log structured feedback for a live update (topic). Use this to record a disposition (e.g., 'approved', 'needs_revision', 'duplicate') and free-text feedback for the live update that the admin is replying to. The topic_id, environment, admin_user_id, and replied_to_message_id are injected from context — you only need to supply feedback_text and optionally disposition.",
+        "description": "Log structured feedback for a live update (topic). Use this to record a disposition (e.g., 'correction', 'approval', 'deletion-request', 'no_change') and free-text feedback for the live update that the person replying to it gave. Optionally include a one-line `verdict` summarising your ground-truth sense-check (shown in the editorial-decisions post). The topic_id, environment, admin_user_id, and replied_to_message_id are injected from context — you only need to supply feedback_text and optionally disposition/verdict.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -1062,10 +1062,32 @@ TOOLS = [
                 },
                 "disposition": {
                     "type": "string",
-                    "description": "Optional structured disposition: 'approved', 'needs_revision', 'duplicate', 'rejected', etc."
+                    "description": "Optional structured disposition: 'correction', 'approval', 'deletion-request', 'no_change', etc."
+                },
+                "verdict": {
+                    "type": "string",
+                    "description": "Optional one-line sense-check conclusion: does the feedback hold against the ground truth (source messages)? e.g. 'Feedback matches the source — edited the headline.' or 'Feedback not supported by sources; no change.'"
                 }
             },
             "required": ["topic_id", "feedback_text"]
+        }
+    },
+    {
+        "name": "get_live_update_ground_truth",
+        "description": "Fetch the verbatim source Discord messages a live update (topic) was built from — the GROUND TRUTH for fact-checking. Compare the posted update's claims against these messages before deciding whether to edit or delete it. The topic_id, guild_id, and environment are injected from context.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "topic_id": {
+                    "type": "string",
+                    "description": "UUID of the live update (topic) whose sources to fetch"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum source messages to return (default 30, max 50)"
+                }
+            },
+            "required": ["topic_id"]
         }
     },
     {
@@ -5032,6 +5054,7 @@ async def execute_log_live_update_feedback(
     topic_id = params.get('topic_id', '').strip()
     feedback_text = params.get('feedback_text', '').strip()
     disposition = params.get('disposition', '').strip() or None
+    verdict = params.get('verdict', '').strip() or None
 
     if not topic_id:
         return {"success": False, "error": "topic_id is required"}
@@ -5052,6 +5075,7 @@ async def execute_log_live_update_feedback(
             'feedback_text': feedback_text,
             'replied_to_message_id': replied_to_message_id,
             'disposition': disposition,
+            'verdict': verdict,
         }
         row = db_handler.store_live_update_feedback(feedback, environment=environment)
         if row is None:
@@ -5059,6 +5083,43 @@ async def execute_log_live_update_feedback(
         return {"success": True, "feedback_id": row.get('feedback_id')}
     except Exception as e:
         logger.error("[AdminChat] log_live_update_feedback failed: %s", e, exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+async def execute_get_live_update_ground_truth(
+    db_handler,
+    params: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Return the verbatim source messages a live update (topic) was built from.
+
+    topic_id is injected from context — the LLM does not pick it. guild_id and
+    environment are injected by the agent loop before the tool runs.
+    """
+    topic_id = str(params.get('topic_id') or '').strip()
+    if not topic_id:
+        return {"success": False, "error": "topic_id is required"}
+    try:
+        limit = max(1, min(int(params.get('limit') or 30), 50))
+    except (TypeError, ValueError):
+        limit = 30
+    guild_id = params.get('guild_id')
+    environment = params.get('environment') or 'prod'
+    try:
+        rows = await asyncio.to_thread(
+            db_handler.get_topic_ground_truth,
+            topic_id,
+            guild_id,
+            environment,
+            limit,
+        )
+        return {
+            "success": True,
+            "topic_id": topic_id,
+            "source_count": len(rows or []),
+            "ground_truth": rows or [],
+        }
+    except Exception as e:
+        logger.error("[AdminChat] get_live_update_ground_truth failed: %s", e, exc_info=True)
         return {"success": False, "error": str(e)}
 
 
@@ -5708,6 +5769,8 @@ async def execute_tool(
         return await execute_delete_message(bot, trusted_tool_input)
     elif tool_name == "log_live_update_feedback":
         return await execute_log_live_update_feedback(db_handler, trusted_tool_input)
+    elif tool_name == "get_live_update_ground_truth":
+        return await execute_get_live_update_ground_truth(db_handler, trusted_tool_input)
     elif tool_name == "upload_file":
         return await execute_upload_file(bot, trusted_tool_input)
     elif tool_name == "resolve_user":

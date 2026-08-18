@@ -317,13 +317,16 @@ def _make_topic(*, topic_id: str = "t-1",
 
 def _make_feedback_row(*, feedback_id: str = "fb-1",
                        topic_id: str = "t-1",
-                       disposition: str = "correction"):
+                       disposition: str = "correction",
+                       verdict: str = None,
+                       feedback_text: str = "Needs fix"):
     return {
         "feedback_id": feedback_id,
         "topic_id": topic_id,
         "disposition": disposition,
+        "verdict": verdict,
         "admin_user_id": 999,
-        "feedback_text": "Needs fix",
+        "feedback_text": feedback_text,
         "replied_to_message_id": 9001,
     }
 
@@ -356,14 +359,19 @@ def _build_cog(monkeypatch, *, dev_mode: bool = False,
     db.dev_mode = dev_mode
     db.server_config = MagicMock()
     db.server_config.get_channel_agent_guidance = MagicMock(return_value=None)
+    db.server_config.get_server_field = MagicMock(return_value=None)
 
     # Default reader methods
     db.get_topic_by_discord_message_id = MagicMock(return_value=None)
+    db.get_topic_ground_truth = MagicMock(return_value=[])
+    db.get_author_context_snapshots = MagicMock(return_value={})
+    db.get_topic_editor_author_profile = MagicMock(return_value={})
     db.get_live_update_feedback_for = MagicMock(return_value=None)
     db.store_live_update_feedback = MagicMock(return_value={"feedback_id": "fb-1"})
     db.update_topic = MagicMock(
         return_value={"topic_id": "t-1", "state": "deleted"})
     db.try_claim_bot_event = MagicMock(return_value=True)
+    db.get_active_intent_for_recipient = MagicMock(return_value=None)
 
     db._live_write_allowed = MagicMock(return_value=live_write_allowed)
 
@@ -1527,3 +1535,457 @@ class TestBusyQueueReplayNotDropped:
 
         db.try_claim_bot_event.assert_called_once()
         cog.agent.chat.assert_called_once()
+
+
+# ── Community live-update feedback (any member) + editorial-decisions ───────
+
+
+def _make_decision_channel():
+    """Mock text channel whose send records the decision embed."""
+    channel = MagicMock()
+    channel.send = AsyncMock(return_value=SimpleNamespace(id=888))
+    return channel
+
+
+class TestCommunityFeedbackRouting:
+    """Anyone — not just admins — replying to a live-update post triggers the
+    feedback sense-check turn; regular non-admin messages stay untouched."""
+
+    @pytest.mark.asyncio
+    async def test_non_admin_reply_to_live_update_runs_turn(self, monkeypatch):
+        """A non-admin reply whose parent resolves to a topic runs the full
+        feedback turn (agent chat + ✅ + delete), no @mention required."""
+        cog, db, calls = _build_cog(monkeypatch)
+        db._get_topic_result = _make_topic()
+        db._get_feedback_result = _make_feedback_row()
+
+        cog.agent.chat.return_value = AdminChatResult(replies=["ok"], actions=[])
+
+        msg = _make_mock_message(
+            content="this update is wrong",
+            author_id=424242,  # NOT an admin
+            reference_message_id=9001,
+            mentions=[],
+        )
+
+        await cog.on_message(msg)
+
+        cog.agent.chat.assert_awaited_once()
+        # Feedback row confirmed → ✅ + delete the reply in the live channel.
+        msg.add_reaction.assert_awaited()
+        msg.delete.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_non_admin_reply_to_non_update_no_turn(self, monkeypatch):
+        """A non-admin reply whose parent does NOT resolve to a topic gets no
+        agent turn and no deletion."""
+        cog, db, calls = _build_cog(monkeypatch)
+        db._get_topic_result = None  # not a live-update reply
+
+        cog.agent.chat.return_value = AdminChatResult(replies=["ok"], actions=[])
+
+        msg = _make_mock_message(
+            content="hello there",
+            author_id=424242,
+            reference_message_id=9001,
+            mentions=[],
+        )
+
+        await cog.on_message(msg)
+
+        cog.agent.chat.assert_not_called()
+        msg.delete.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_non_admin_non_reply_message_no_turn(self, monkeypatch):
+        """A plain (non-reply) non-admin message is not feedback and is not
+        routed to the agent."""
+        cog, db, calls = _build_cog(monkeypatch)
+        cog.agent.chat.return_value = AdminChatResult(replies=["ok"], actions=[])
+
+        msg = _make_mock_message(
+            content="hello there",
+            author_id=424242,
+            mentions=[],
+        )
+
+        await cog.on_message(msg)
+
+        cog.agent.chat.assert_not_called()
+        msg.delete.assert_not_called()
+
+
+class TestEditorialDecisionPosting:
+    """The sense-check outcome is posted to the editorial-decisions channel
+    with the user tagged, a copy of their feedback, and the precise edit."""
+
+    def _run_turn(self, cog, db, msg, actions):
+        cog.agent.chat.return_value = AdminChatResult(replies=["ok"], actions=actions)
+        return msg
+
+    @pytest.mark.asyncio
+    async def test_decision_posted_with_precise_edit_and_mention(self, monkeypatch):
+        """Edit action → decision post carries before/after diff, tags the
+        author, and the reply is still ✅-reacted + deleted."""
+        monkeypatch.setenv("EDITORIAL_DECISIONS_CHANNEL_ID", "777")
+        cog, db, calls = _build_cog(monkeypatch)
+        db._get_topic_result = _make_topic()
+        db._get_feedback_result = _make_feedback_row(
+            verdict="Feedback matches the source — fixed the version number.",
+            feedback_text="Wan version is wrong",
+        )
+
+        decision_channel = _make_decision_channel()
+        msg = _make_mock_message(
+            content="Wan version is wrong",
+            author_id=424242,
+            reference_message_id=9001,
+            mentions=[],
+        )
+        msg.guild.get_channel = MagicMock(return_value=decision_channel)
+
+        self._run_turn(cog, db, msg, [
+            {"tool": "log_live_update_feedback",
+             "input": {"topic_id": "t-1", "feedback_text": "Wan version is wrong"},
+             "result": {"success": True, "feedback_id": "fb-1"}},
+            {"tool": "edit_message",
+             "input": {"message_id": "9001", "content": "Corrected: Wan 2.5"},
+             "result": {"success": True, "message_id": "9001"}},
+        ])
+
+        await cog._handle_admin_message(msg)
+
+        decision_channel.send.assert_awaited_once()
+        call_kwargs = decision_channel.send.call_args.kwargs
+        assert call_kwargs["content"] == "<@424242>", "decision post must tag the author"
+        embed = call_kwargs["embed"]
+        assert "Edited" in embed.title
+        fields = {f.name: f.value for f in embed.fields}
+        assert "Their feedback" in fields
+        assert "Wan version is wrong" in fields["Their feedback"]
+        assert "Sense-check verdict" in fields
+        assert "Feedback matches the source" in fields["Sense-check verdict"]
+        precise = fields["Precise edit"]
+        assert "Original update post" in precise  # before = replied-to content
+        assert "Corrected: Wan 2.5" in precise    # after = edit input content
+        # Original reply still acked + deleted from the live channel.
+        msg.add_reaction.assert_awaited()
+        msg.delete.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_decision_posted_on_delete_and_topic_soft_deleted(self, monkeypatch):
+        """Delete action → 'Deleted' decision post + topics.state='deleted'."""
+        monkeypatch.setenv("EDITORIAL_DECISIONS_CHANNEL_ID", "777")
+        cog, db, calls = _build_cog(monkeypatch)
+        db._get_topic_result = _make_topic()
+        db._get_feedback_result = _make_feedback_row(disposition="deletion-request")
+
+        decision_channel = _make_decision_channel()
+        msg = _make_mock_message(
+            content="remove this, it's wrong",
+            author_id=424242,
+            reference_message_id=9001,
+            mentions=[],
+        )
+        msg.guild.get_channel = MagicMock(return_value=decision_channel)
+
+        self._run_turn(cog, db, msg, [
+            {"tool": "log_live_update_feedback",
+             "input": {"topic_id": "t-1", "feedback_text": "remove this"},
+             "result": {"success": True, "feedback_id": "fb-1"}},
+            {"tool": "delete_message",
+             "input": {"message_id": "9001"},
+             "result": {"success": True, "deleted": 1, "deleted_ids": ["9001"]}},
+        ])
+
+        await cog._handle_admin_message(msg)
+
+        decision_channel.send.assert_awaited_once()
+        embed = decision_channel.send.call_args.kwargs["embed"]
+        assert "Deleted" in embed.title
+        # Soft-delete: update_topic called with state='deleted'.
+        update_calls = [c for c in calls if c[0] == "update_topic"]
+        assert len(update_calls) >= 1
+        assert update_calls[0][1][1] == {"state": "deleted"}
+        msg.delete.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_decision_posted_no_change_with_feedback_copy(self, monkeypatch):
+        """No edit/delete → 'No change' decision post carrying the feedback
+        copy and the author mention; reply still removed."""
+        monkeypatch.setenv("EDITORIAL_DECISIONS_CHANNEL_ID", "777")
+        cog, db, calls = _build_cog(monkeypatch)
+        db._get_topic_result = _make_topic()
+        db._get_feedback_result = _make_feedback_row(
+            disposition="no_change",
+            verdict="Feedback not supported by the source messages; no change.",
+        )
+
+        decision_channel = _make_decision_channel()
+        msg = _make_mock_message(
+            content="this headline is clickbait",
+            author_id=424242,
+            reference_message_id=9001,
+            mentions=[],
+        )
+        msg.guild.get_channel = MagicMock(return_value=decision_channel)
+
+        self._run_turn(cog, db, msg, [
+            {"tool": "log_live_update_feedback",
+             "input": {"topic_id": "t-1", "feedback_text": "this headline is clickbait"},
+             "result": {"success": True, "feedback_id": "fb-1"}},
+        ])
+
+        await cog._handle_admin_message(msg)
+
+        decision_channel.send.assert_awaited_once()
+        call_kwargs = decision_channel.send.call_args.kwargs
+        assert call_kwargs["content"] == "<@424242>"
+        embed = call_kwargs["embed"]
+        assert "No change" in embed.title
+        fields = {f.name: f.value for f in embed.fields}
+        assert "Feedback not supported by the source messages" in fields["Sense-check verdict"]
+        assert "Needs fix" in fields["Their feedback"]
+        msg.add_reaction.assert_awaited()
+        msg.delete.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_decision_post_when_channel_unresolvable(self, monkeypatch):
+        """No editorial-decisions channel → the post is skipped but the reply
+        is still acked/deleted (feedback is never stranded)."""
+        cog, db, calls = _build_cog(monkeypatch)
+        db._get_topic_result = _make_topic()
+        db._get_feedback_result = _make_feedback_row()
+
+        # get_server_field returns None and env is unset → channel unresolvable.
+        msg = _make_mock_message(
+            content="fix this",
+            author_id=424242,
+            reference_message_id=9001,
+            mentions=[],
+        )
+
+        cog.agent.chat.return_value = AdminChatResult(replies=["ok"], actions=[])
+
+        await cog._handle_admin_message(msg)
+
+        msg.add_reaction.assert_awaited()
+        msg.delete.assert_awaited()
+
+
+class TestFeedbackTurnAllowlist:
+    """Executor-level barrier: feedback turns only expose the feedback tool
+    surface, never payment/moderation/upload/social tools."""
+
+    @pytest.mark.asyncio
+    async def test_feedback_turn_restricts_tool_surface(self, monkeypatch):
+        bot = SimpleNamespace(user=SimpleNamespace(id=999))
+        db = MagicMock()
+        sharer = MagicMock()
+        agent = AdminChatAgent(bot, db, sharer)
+
+        fake_client = MagicMock()
+        fake_client.generate_chat_completion = AsyncMock(
+            return_value=_make_response(_make_text_block("checked"))
+        )
+        agent.client = fake_client
+        _conversations.clear()
+
+        channel_context = {
+            "guild_id": "789",
+            "channel_id": "456",
+            "channel_name": "live-updates",
+            "environment": "prod",
+            "replied_to_message_id": "9001",
+            "live_update_topic": {"topic_id": "t-1", "headline": "Test Update"},
+            "channel_guidance": "feedback guidance",
+        }
+
+        await agent.chat(
+            user_id=7,
+            user_message="this update is wrong",
+            channel_context=channel_context,
+        )
+
+        names = {t["name"] for t in fake_client.generate_chat_completion.call_args.kwargs["tools"]}
+        # Feedback surface present.
+        assert {"log_live_update_feedback", "get_live_update_ground_truth",
+                "edit_message", "delete_message"} <= names
+        # Escalation surface absent.
+        assert names.isdisjoint({
+            "mute_speaker", "unmute_speaker", "upload_file", "send_message",
+            "publish_social_draft", "approve_social_draft", "update_member_socials",
+        })
+
+
+class TestFeedbackLLMResolver:
+    """LIVE_UPDATE_FEEDBACK_CLIENT / LIVE_UPDATE_FEEDBACK_MODEL drive the
+    sense-check LLM (e.g. GPT Sol via client=openai); defaults stay on the
+    admin-chat client/model."""
+
+    def _make_agent(self):
+        bot = SimpleNamespace(user=SimpleNamespace(id=999))
+        return AdminChatAgent(bot, MagicMock(), MagicMock())
+
+    def test_defaults_to_admin_client_and_model(self):
+        agent = self._make_agent()
+        client, model = agent._resolve_feedback_llm()
+        assert client is agent.client
+        assert model == agent.model
+
+    def test_model_override_keeps_admin_client(self, monkeypatch):
+        monkeypatch.setenv("LIVE_UPDATE_FEEDBACK_MODEL", "gpt-5.6-sol")
+        agent = self._make_agent()
+        client, model = agent._resolve_feedback_llm()
+        assert client is agent.client
+        assert model == "gpt-5.6-sol"
+
+    def test_openai_client_selected_for_feedback(self, monkeypatch):
+        class _FakeOpenAI:
+            tag = "openai"
+
+        # The tests conftest stubs src.common.llm as a namespace module, so
+        # patch the attribute on that module object directly.
+        import src.common.llm as _llm_stub
+        monkeypatch.setattr(
+            _llm_stub, "SUPPORTED_CLIENTS", {"openai": _FakeOpenAI}, raising=False,
+        )
+        monkeypatch.setenv("LIVE_UPDATE_FEEDBACK_CLIENT", "openai")
+        monkeypatch.setenv("LIVE_UPDATE_FEEDBACK_MODEL", "gpt-5.6-sol")
+        agent = self._make_agent()
+        client, model = agent._resolve_feedback_llm()
+        assert isinstance(client, _FakeOpenAI)
+        assert client.tag == "openai"
+        assert model == "gpt-5.6-sol"
+
+    def test_unknown_client_falls_back_to_admin_client(self, monkeypatch):
+        monkeypatch.setenv("LIVE_UPDATE_FEEDBACK_CLIENT", "martian")
+        agent = self._make_agent()
+        client, model = agent._resolve_feedback_llm()
+        assert client is agent.client
+        assert model == agent.model
+
+
+class TestFeedbackAuthorReputation:
+    """The sense-check sees the feedback author's editorial-archive reputation
+    (identity + roles + last-30d activity), like the topic editor sees for
+    source authors."""
+
+    @pytest.mark.asyncio
+    async def test_feedback_context_includes_author_reputation(self, monkeypatch):
+        cog, db, calls = _build_cog(monkeypatch)
+        db._get_topic_result = _make_topic()
+        db._get_feedback_result = _make_feedback_row()
+        db.get_author_context_snapshots = MagicMock(return_value={
+            424242: {
+                "member_id": 424242, "username": "alice",
+                "role_ids": [1, 2], "twitter_url": "https://x.com/alice",
+            },
+        })
+        db.get_topic_editor_author_profile = MagicMock(return_value={
+            "message_count_30d": 87, "average_reaction_count": 3.2,
+        })
+
+        captured_ctx = {}
+
+        async def _capture_chat(*, user_id, user_message, channel_context,
+                                channel=None, requester_id=None):
+            captured_ctx.update(channel_context or {})
+            return AdminChatResult(replies=["ok"], actions=[])
+
+        cog.agent.chat = _capture_chat
+
+        msg = _make_mock_message(
+            content="fix this",
+            author_id=424242,
+            reference_message_id=9001,
+            mentions=[],
+        )
+
+        await cog._handle_admin_message(msg)
+
+        author_ctx = captured_ctx.get("live_update_feedback_author") or {}
+        assert author_ctx.get("username") == "alice"
+        assert author_ctx.get("message_count_30d") == 87
+        assert author_ctx.get("average_reaction_count") == 3.2
+        assert author_ctx.get("twitter_url") == "https://x.com/alice"
+
+    @pytest.mark.asyncio
+    async def test_agent_prompt_renders_ground_truth_and_reputation(self, monkeypatch):
+        """The agent prompt carries the verbatim ground truth AND the feedback
+        author's reputation for the sense-check."""
+        bot = SimpleNamespace(user=SimpleNamespace(id=999))
+        agent = AdminChatAgent(bot, MagicMock(), MagicMock())
+
+        fake_client = MagicMock()
+        fake_client.generate_chat_completion = AsyncMock(
+            return_value=_make_response(_make_text_block("checked"))
+        )
+        agent.client = fake_client
+        _conversations.clear()
+
+        channel_context = {
+            "guild_id": "789",
+            "channel_id": "456",
+            "channel_name": "live-updates",
+            "environment": "prod",
+            "replied_to_message_id": "9001",
+            "live_update_topic": {"topic_id": "t-1", "headline": "Test Update"},
+            "live_update_ground_truth": [
+                {"message_id": "100", "created_at": "2026-08-18T00:00:00Z",
+                 "author_id": 42, "content": "source says Wan 2.5"},
+            ],
+            "live_update_feedback_author": {
+                "member_id": 424242, "username": "alice", "role_ids": [1, 2],
+                "message_count_30d": 87, "average_reaction_count": 3.2,
+            },
+            "channel_guidance": "feedback guidance",
+        }
+
+        await agent.chat(
+            user_id=7,
+            user_message="the version is wrong",
+            channel_context=channel_context,
+        )
+
+        # messages[0] is the rendered user turn (the loop appends to the same
+        # list after the call, so the last slot may be the assistant reply).
+        prompt = fake_client.generate_chat_completion.call_args.kwargs["messages"][0]["content"]
+        assert "Ground truth — verbatim source messages" in prompt
+        assert "source says Wan 2.5" in prompt
+        assert "Feedback author reputation" in prompt
+        assert "messages_30d=87" in prompt
+        assert "role_count=2" in prompt
+
+    @pytest.mark.asyncio
+    async def test_decision_post_includes_reputation_field(self, monkeypatch):
+        """The editorial-decisions post carries a compact reputation reference."""
+        monkeypatch.setenv("EDITORIAL_DECISIONS_CHANNEL_ID", "777")
+        cog, db, calls = _build_cog(monkeypatch)
+        db._get_topic_result = _make_topic()
+        db._get_feedback_result = _make_feedback_row()
+        db.get_author_context_snapshots = MagicMock(return_value={
+            424242: {"member_id": 424242, "username": "alice", "role_ids": [1, 2]},
+        })
+        db.get_topic_editor_author_profile = MagicMock(return_value={
+            "message_count_30d": 12, "average_reaction_count": 1.5,
+        })
+
+        decision_channel = _make_decision_channel()
+        msg = _make_mock_message(
+            content="fix this",
+            author_id=424242,
+            reference_message_id=9001,
+            mentions=[],
+        )
+        msg.guild.get_channel = MagicMock(return_value=decision_channel)
+        cog.agent.chat.return_value = AdminChatResult(replies=["ok"], actions=[])
+
+        await cog._handle_admin_message(msg)
+
+        embed = decision_channel.send.call_args.kwargs["embed"]
+        fields = {f.name: f.value for f in embed.fields}
+        reputation = fields.get("Reputation (editorial archive)") or ""
+        assert "alice" in reputation
+        assert "Messages (30d): 12" in reputation
+        assert "Roles: 2" in reputation

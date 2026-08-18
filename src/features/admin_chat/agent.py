@@ -269,6 +269,55 @@ class AdminChatAgent:
 
         self.client = DeepSeekClient()
         self.model = os.getenv("ADMIN_CHAT_MODEL", "deepseek-v4-pro")
+        # Cached non-default LLM client for live-update feedback turns
+        # (e.g. GPT Sol via LIVE_UPDATE_FEEDBACK_CLIENT=openai).
+        self._feedback_client = None
+        self._feedback_client_name: Optional[str] = None
+
+    def _resolve_feedback_llm(self) -> tuple:
+        """Return (client, model) for live-update feedback sense-check turns.
+
+        Configurable via env:
+        - LIVE_UPDATE_FEEDBACK_MODEL   — model name (default: ADMIN_CHAT_MODEL)
+        - LIVE_UPDATE_FEEDBACK_CLIENT  — provider key: deepseek (default) |
+          openai (GPT Sol) | claude | gemini
+
+        Falls back to the admin-chat client/model when unset or when the
+        provider cannot be initialized, so feedback turns never break.
+        """
+        model = os.getenv("LIVE_UPDATE_FEEDBACK_MODEL") or self.model
+        client_name = (os.getenv("LIVE_UPDATE_FEEDBACK_CLIENT") or "deepseek").strip().lower()
+        if client_name in ("", "deepseek"):
+            return self.client, model
+        if self._feedback_client is None or self._feedback_client_name != client_name:
+            # Lazy import: the tests conftest stubs src.common.llm as a
+            # namespace module without SUPPORTED_CLIENTS; fall back to {} there.
+            try:
+                from src.common.llm import SUPPORTED_CLIENTS
+            except Exception:
+                SUPPORTED_CLIENTS = {}
+            client_class = SUPPORTED_CLIENTS.get(client_name)
+            if client_class is None:
+                logger.error(
+                    "[AdminChat] Unknown LIVE_UPDATE_FEEDBACK_CLIENT=%r — "
+                    "falling back to deepseek for feedback turns",
+                    client_name,
+                )
+                self._feedback_client = None
+                self._feedback_client_name = None
+            else:
+                try:
+                    self._feedback_client = client_class()
+                    self._feedback_client_name = client_name
+                except Exception:
+                    logger.exception(
+                        "[AdminChat] Failed to init feedback client %r — "
+                        "falling back to deepseek",
+                        client_name,
+                    )
+                    self._feedback_client = None
+                    self._feedback_client_name = None
+        return (self._feedback_client or self.client), model
 
     def request_abort(self, user_id: int):
         """Signal the agent loop to stop for this user."""
@@ -429,9 +478,64 @@ class AdminChatAgent:
                     f"Failure: {social_failed_run.get('failure')}\n"
                     f"Draft text:\n---\n"
                     f"{social_failed_run.get('draft_text', '')}\n---\n"
-                    "The draft is preserved and still approved. Diagnose the "
-                    "cause (route? provider? media?), then retry with "
-                    "publish_social_draft once fixed, or edit/discard."
+                "The draft is preserved and still approved. Diagnose the "
+                "cause (route? provider? media?), then retry with "
+                "publish_social_draft once fixed, or edit/discard."
+            )
+
+            # ── Live-update feedback context (per-turn only) ──────────
+            # The topic the reply refers to, plus a compact verbatim slice of
+            # its source messages — the GROUND TRUTH for the sense-check.
+            live_update_topic = channel_context.get('live_update_topic')
+            if live_update_topic:
+                ctx_parts.append(
+                    f"\n\n[Live update (topic) — "
+                    f"{live_update_topic.get('headline') or '(untitled)'}]\n"
+                    f"summary: "
+                    f"{str(live_update_topic.get('summary') or '')[:500]}"
+                )
+            live_update_gt = channel_context.get('live_update_ground_truth')
+            if live_update_gt:
+                gt_parts = [
+                    "\n\n[Ground truth — verbatim source messages this live "
+                    "update was built from; fact-check the update against "
+                    "these before editing or deleting]"
+                ]
+                for gt_msg in live_update_gt:
+                    gt_parts.append(
+                        f"- [{gt_msg.get('message_id')}] "
+                        f"({gt_msg.get('created_at') or '?'}) "
+                        f"author={gt_msg.get('author_id')}: "
+                        f"{gt_msg.get('content') or ''}"
+                    )
+                ctx_parts.append("\n".join(gt_parts))
+
+            # ── Feedback author reputation (editorial-archive stats) ──
+            # Same signals the topic editor sees for source authors: identity,
+            # roles, and last-30-days activity. Weight feedback from
+            # established members accordingly; treat unknowns with care.
+            feedback_author = channel_context.get('live_update_feedback_author')
+            if feedback_author:
+                _name = (
+                    feedback_author.get('server_nick')
+                    or feedback_author.get('global_name')
+                    or feedback_author.get('username')
+                    or feedback_author.get('member_id')
+                )
+                _role_count = len(feedback_author.get('role_ids') or [])
+                _socials = []
+                if feedback_author.get('twitter_url'):
+                    _socials.append('twitter')
+                if feedback_author.get('reddit_url'):
+                    _socials.append('reddit')
+                ctx_parts.append(
+                    f"\n\n[Feedback author reputation — from the editorial "
+                    f"archive]\n"
+                    f"user={_name} (id={feedback_author.get('member_id')}), "
+                    f"role_count={_role_count}, "
+                    f"messages_30d={feedback_author.get('message_count_30d')}, "
+                    f"avg_reactions={feedback_author.get('average_reaction_count')}"
+                    + (f", socials={','.join(_socials)}" if _socials else "")
                 )
 
             full_message = "".join(ctx_parts) + "\n\n" + user_message
@@ -471,6 +575,26 @@ class AdminChatAgent:
             available_tools = [
                 t for t in TOOLS
                 if t.get("name") in review_allowed
+            ]
+        # ── live-update feedback allowlist ────────────────────────────
+        # Any member (not just admins) can reply to a live-update post, so the
+        # feedback turn is executor-scoped: log + sense-check + edit/delete the
+        # update + read-only research. Payment/moderation/upload/social tools
+        # are hidden so a feedback reply can never be escalated into other
+        # admin powers.
+        if channel_context and channel_context.get('live_update_topic'):
+            feedback_allowed = {
+                "reply", "end_turn",
+                "log_live_update_feedback", "get_live_update_ground_truth",
+                "edit_message", "delete_message",
+                # read/research
+                "find_messages", "inspect_message", "get_active_channels",
+                "query_table", "get_live_update_status", "get_bot_status",
+                "search_logs", "resolve_user",
+            }
+            available_tools = [
+                t for t in TOOLS
+                if t.get("name") in feedback_allowed
             ]
         allowed_tool_names = {tool["name"] for tool in available_tools}
         
@@ -519,20 +643,28 @@ class AdminChatAgent:
                 if channel_context and channel_context.get('channel_guidance'):
                     system += "\n\n## Channel Guidance\n\n" + channel_context['channel_guidance']
 
+                # Live-update feedback turns run on their own configured LLM
+                # (e.g. GPT Sol via LIVE_UPDATE_FEEDBACK_CLIENT=openai) — everything
+                # else keeps the admin-chat client/model.
+                active_client = self.client
+                active_model = self.model
+                if channel_context and channel_context.get('live_update_topic'):
+                    active_client, active_model = self._resolve_feedback_llm()
+
                 # Show "is typing..." during API call, stops when call completes
                 try:
                     if channel:
                         async with channel.typing():
-                            response = await self.client.generate_chat_completion(
-                                model=self.model,
+                            response = await active_client.generate_chat_completion(
+                                model=active_model,
                                 system_prompt=system,
                                 messages=messages,
                                 max_tokens=4096,
                                 tools=available_tools,
                             )
                     else:
-                        response = await self.client.generate_chat_completion(
-                            model=self.model,
+                        response = await active_client.generate_chat_completion(
+                            model=active_model,
                             system_prompt=system,
                             messages=messages,
                             max_tokens=4096,
@@ -628,6 +760,18 @@ class AdminChatAgent:
                             tool_input['replied_to_message_id'] = channel_context['replied_to_message_id']
                         # topic_id is injected from the resolved live-update topic,
                         # never picked by the LLM.
+                        if channel_context and channel_context.get('live_update_topic'):
+                            _topic_id = channel_context['live_update_topic'].get('topic_id')
+                            if _topic_id:
+                                tool_input['topic_id'] = _topic_id
+
+                    # Inject non-LLM context for get_live_update_ground_truth —
+                    # topic_id comes from the resolved topic, never the LLM.
+                    if tool_name == "get_live_update_ground_truth":
+                        if tool_input is tool_use.input:
+                            tool_input = dict(tool_input)
+                        if channel_context and channel_context.get('environment'):
+                            tool_input['environment'] = channel_context['environment']
                         if channel_context and channel_context.get('live_update_topic'):
                             _topic_id = channel_context['live_update_topic'].get('topic_id')
                             if _topic_id:

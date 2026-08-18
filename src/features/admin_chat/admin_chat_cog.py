@@ -6,7 +6,7 @@ import re
 import time
 from datetime import datetime, timedelta, timezone
 from collections import deque
-from typing import Dict, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 from uuid import uuid4
 import discord
 from discord.ext import commands, tasks
@@ -99,21 +99,28 @@ Strict rules:
 LIVE_UPDATE_FEEDBACK_GUIDANCE = """\
 ## Live Update Feedback Channel
 
-This channel is for admin feedback on live updates. When an admin replies to
-a bot-posted live-update message, you are handling that feedback turn.
+This channel carries community feedback on live updates. When anyone replies
+to a bot-posted live-update message, you are handling that feedback turn.
 
 - The replied-to message is part of a specific live update. You are given the
-  live update context — research it using your available tools as needed.
-- **Log the feedback** by calling `log_live_update_feedback` with the admin's
-  feedback text and an optional disposition (e.g. "correction", "approval",
-  "deletion-request"). The live update (topic_id) is injected from context.
-- If the feedback calls for a change, **act on the update itself**:
-  - Edit the update message(s) with `edit_message`.
+  live update context (topic) and its source messages as GROUND TRUTH — fetch
+  more verbatim sources with `get_live_update_ground_truth` when needed.
+- **Sense-check the feedback against the ground truth.** Only change the
+  update when the feedback is supported by what the source messages actually
+  say; otherwise record it as no-change.
+- **Log the feedback** by calling `log_live_update_feedback` with the person's
+  feedback text, a disposition (e.g. "correction", "approval",
+  "deletion-request", "no_change"), and a one-line `verdict` summarising the
+  sense-check conclusion. The live update (topic_id) is injected from context.
+- If the feedback is supported, **act on the update itself**:
+  - Edit the update message(s) with `edit_message` — supply the precise,
+    corrected content.
   - Delete the update message(s) with `delete_message` — the bot will
     soft-delete the live update (state "deleted"; row retained).
-- After you log the feedback, the admin's reply will be ✅ acknowledged
-  and then **removed** from the channel to keep it clean. This turn is a
-  silent action — do not send a separate confirmation reply."""
+- The decision (and the precise edit, if any) is then posted to the
+  editorial-decisions channel, the person is tagged, and their reply is
+  **removed** from this channel to keep it clean. This turn is a silent
+  action — do not send a separate confirmation reply."""
 
 SOCIAL_DRAFT_REVIEW_GUIDANCE = """\
 ## Social Draft Review Channel
@@ -1434,8 +1441,195 @@ class AdminChatCog(commands.Cog):
         finally:
             self._processing_intents.discard(intent_id)
 
-    async def _handle_admin_message(self, message: discord.Message):
-        """Process admin messages — DMs always, guild channels only when the bot is @mentioned."""
+    async def _resolve_live_update_topic(self, message: discord.Message) -> Optional[dict]:
+        """Reverse-lookup a reply's parent message against `topics`.
+
+        Returns the topic row backing the replied-to message, or None (not a
+        live-update reply / lookup failed). This is what marks a guild message
+        as live-update feedback — the table backing the live-updates channel.
+        """
+        parent_id = message.reference.message_id if message.reference else None
+        if not parent_id or not getattr(message, 'guild', None):
+            return None
+        try:
+            return await asyncio.to_thread(
+                self.db_handler.get_topic_by_discord_message_id,
+                parent_id,
+                message.guild.id,
+                self._live_environment(),
+            )
+        except Exception:
+            logger.exception(
+                "[AdminChat] live-update topic reverse-lookup failed for "
+                "parent_id=%s",
+                parent_id,
+            )
+            return None
+
+    def _resolve_editorial_decisions_channel_id(self, guild_id: Optional[int]) -> Optional[int]:
+        """Resolve the editorial-decisions channel id.
+
+        Order: EDITORIAL_DECISIONS_CHANNEL_ID env → server_config
+        `editorial_decisions_channel_id` field → None (caller falls back to a
+        channel named "editorial-decisions" in the guild).
+        """
+        raw = os.getenv('EDITORIAL_DECISIONS_CHANNEL_ID')
+        if raw:
+            try:
+                return int(raw)
+            except ValueError:
+                logger.warning("[AdminChat] Invalid EDITORIAL_DECISIONS_CHANNEL_ID: %r", raw)
+        sc = self.db_handler.server_config if self.db_handler else None
+        if sc and guild_id:
+            try:
+                value = sc.get_server_field(
+                    guild_id, 'editorial_decisions_channel_id', cast=int,
+                )
+                if value:
+                    return value
+            except Exception:
+                logger.exception("[AdminChat] editorial_decisions_channel_id lookup failed")
+        return None
+
+    async def _find_editorial_decisions_channel(self, guild) -> Optional[discord.TextChannel]:
+        """Resolve the editorial-decisions channel for a guild (or None)."""
+        channel_id = self._resolve_editorial_decisions_channel_id(
+            getattr(guild, 'id', None),
+        )
+        if channel_id:
+            channel = guild.get_channel(channel_id)
+            if channel:
+                return channel
+        # Name fallback (case-insensitive) so the feature works without config.
+        try:
+            for channel in (getattr(guild, 'channels', None) or []):
+                if getattr(channel, 'name', '').casefold() == 'editorial-decisions':
+                    return channel
+        except TypeError:
+            pass
+        return None
+
+    async def _post_editorial_decision(
+        self,
+        *,
+        message: discord.Message,
+        resolved_topic: Dict[str, Any],
+        parent_id: int,
+        user_id: int,
+        feedback_row: Dict[str, Any],
+        edit_diffs: List[Dict[str, Any]],
+        deleted_topic: bool,
+        parent_content_before: Optional[str],
+        author_ctx: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Post the sense-check outcome to the editorial-decisions channel.
+
+        Carries the precise edit (before/after) when the update was edited,
+        tags the feedback author, and includes a copy of their feedback — the
+        original reply is deleted from the live channel afterwards, so this
+        post is the durable trail.
+        """
+        channel = await self._find_editorial_decisions_channel(message.guild)
+        if channel is None:
+            logger.warning(
+                "[AdminChat] editorial-decisions channel not found (guild=%s) — "
+                "skipping decision post (feedback still logged)",
+                getattr(message.guild, 'id', None),
+            )
+            return
+
+        headline = str(resolved_topic.get('headline') or '(untitled)')
+        if edit_diffs:
+            decision_label = '✏️ Edited'
+            embed_color = 0xE67E22
+        elif deleted_topic:
+            decision_label = '🗑️ Deleted'
+            embed_color = 0xE74C3C
+        else:
+            decision_label = '✅ No change'
+            embed_color = 0x95A5A6
+
+        embed = discord.Embed(
+            title=f"Editorial decision — {decision_label}: {headline[:120]}",
+            color=embed_color,
+        )
+        try:
+            jump_url = (
+                f"https://discord.com/channels/{message.guild.id}/"
+                f"{message.channel.id}/{parent_id}"
+            )
+            embed.description = f"[Live update]({jump_url}) · feedback from <@{user_id}>"
+        except Exception:
+            embed.description = f"Live update feedback from <@{user_id}>"
+
+        feedback_text = str(feedback_row.get('feedback_text') or message.content or '').strip()
+        if feedback_text:
+            embed.add_field(
+                name="Their feedback",
+                value=_preview_text(feedback_text, 1024),
+                inline=False,
+            )
+        verdict = str(feedback_row.get('verdict') or '').strip()
+        if verdict:
+            embed.add_field(
+                name="Sense-check verdict",
+                value=_preview_text(verdict, 1024),
+                inline=False,
+            )
+        if edit_diffs:
+            parts = []
+            for diff in edit_diffs:
+                before = str(diff.get('before') or parent_content_before or '(unknown)')
+                after = str(diff.get('after') or '(empty)')
+                parts.append(
+                    f"**Before:**\n{_preview_text(before, 900)}\n\n"
+                    f"**After:**\n{_preview_text(after, 900)}"
+                )
+            embed.add_field(
+                name="Precise edit",
+                value="\n\n".join(parts)[:1024],
+                inline=False,
+            )
+        elif deleted_topic:
+            embed.add_field(
+                name="Action",
+                value=(
+                    "The live update was deleted (soft-deleted in the database; "
+                    "the row is retained for audit)."
+                ),
+                inline=False,
+            )
+        if author_ctx:
+            _name = (
+                author_ctx.get('server_nick')
+                or author_ctx.get('global_name')
+                or author_ctx.get('username')
+                or '(unknown)'
+            )
+            embed.add_field(
+                name="Reputation (editorial archive)",
+                value=(
+                    f"Member: {_name} (id={author_ctx.get('member_id')})\n"
+                    f"Roles: {len(author_ctx.get('role_ids') or [])}\n"
+                    f"Messages (30d): {author_ctx.get('message_count_30d')}\n"
+                    f"Avg reactions: {author_ctx.get('average_reaction_count')}"
+                ),
+                inline=False,
+            )
+
+        await channel.send(content=f"<@{user_id}>", embed=embed)
+
+    async def _handle_admin_message(
+        self,
+        message: discord.Message,
+        pre_resolved_topic: Optional[dict] = None,
+    ):
+        """Process admin messages — DMs always, guild channels only when the bot is @mentioned.
+
+        ``pre_resolved_topic``: for community live-update feedback (any member,
+        not just admins) the caller has already resolved the replied-to topic;
+        pass it here to skip the duplicate reverse-lookup.
+        """
         if message.author.bot:
             return
 
@@ -1446,28 +1640,18 @@ class AdminChatCog(commands.Cog):
         # Step 6 (T8): Reverse-lookup for live-update feedback replies BEFORE the
         # @mention gate.  A reply whose parent resolves to a `topics` row (the
         # table backing the live-updates channel) is feedback and bypasses the
-        # @mention requirement (SD1).
+        # @mention requirement (SD1). Anyone — not just admins — can trigger a
+        # feedback turn this way.
         is_live_update_feedback = False
-        resolved_topic = None
+        resolved_topic = pre_resolved_topic
         parent_id = None
 
         if not is_dm and message.reference:
             parent_id = message.reference.message_id
             if parent_id and message.guild:
-                try:
-                    resolved_topic = await asyncio.to_thread(
-                        self.db_handler.get_topic_by_discord_message_id,
-                        parent_id,
-                        message.guild.id,
-                        self._live_environment(),
-                    )
-                    is_live_update_feedback = resolved_topic is not None
-                except Exception:
-                    logger.exception(
-                        "[AdminChat] live-update topic reverse-lookup failed for "
-                        "parent_id=%s",
-                        parent_id,
-                    )
+                if resolved_topic is None:
+                    resolved_topic = await self._resolve_live_update_topic(message)
+                is_live_update_feedback = resolved_topic is not None
 
         if not is_dm and not is_live_update_feedback and self.bot.user.id not in [m.id for m in message.mentions]:
             return
@@ -1507,6 +1691,9 @@ class AdminChatCog(commands.Cog):
             self._ensure_agent()
 
             channel_context = None
+            # Content of the replied-to update message before the turn — the
+            # "before" side of the precise-edit record for the decision post.
+            parent_content_before = None
             if is_dm:
                 ch = message.channel
                 guild = self.bot.get_guild(resolved_guild_id) if resolved_guild_id else None
@@ -1562,6 +1749,7 @@ class AdminChatCog(commands.Cog):
                             "content": _preview_text(ref.content or '', 500),
                         }
                         channel_context["replied_to_anchor_note"] = "USER IS REPLYING TO THIS MESSAGE — treat it as the primary referent."
+                        parent_content_before = ref.content
 
                 try:
                     recent = []
@@ -1587,6 +1775,7 @@ class AdminChatCog(commands.Cog):
                 if not is_dm and message.reference.resolved is None and parent_id is not None:
                     try:
                         parent_msg = await message.channel.fetch_message(parent_id)
+                        parent_content_before = parent_msg.content
                         if "replied_to" not in channel_context:
                             channel_context["replied_to"] = {
                                 "message_id": str(parent_msg.id),
@@ -1613,6 +1802,47 @@ class AdminChatCog(commands.Cog):
                     else None
                 )
                 channel_context["channel_guidance"] = override or LIVE_UPDATE_FEEDBACK_GUIDANCE
+                # GROUND TRUTH for the sense-check: a compact slice of the
+                # topic's verbatim source messages (the agent can fetch more
+                # via get_live_update_ground_truth).
+                try:
+                    _gt_rows = await asyncio.to_thread(
+                        self.db_handler.get_topic_ground_truth,
+                        resolved_topic.get('topic_id'),
+                        resolved_guild_id,
+                        self._live_environment(),
+                        8,
+                    )
+                    if _gt_rows:
+                        for _gt in _gt_rows:
+                            _gt['content'] = _preview_text(_gt.get('content') or '', 300)
+                        channel_context["live_update_ground_truth"] = _gt_rows
+                except Exception:
+                    logger.exception(
+                        "[AdminChat] ground-truth fetch failed for topic_id=%s",
+                        resolved_topic.get('topic_id'),
+                    )
+                # Feedback author reputation — the same identity/activity
+                # signals the topic editor sees for source authors, so the
+                # sense-check can weight established members vs unknowns.
+                try:
+                    _snapshots = await asyncio.to_thread(
+                        self.db_handler.get_author_context_snapshots,
+                        [user_id], resolved_guild_id,
+                    )
+                    _author_ctx = dict(_snapshots.get(user_id) or {})
+                    if _author_ctx:
+                        _profile = await asyncio.to_thread(
+                            self.db_handler.get_topic_editor_author_profile,
+                            user_id, resolved_guild_id, self._live_environment(),
+                        )
+                        _author_ctx.update(_profile or {})
+                        channel_context["live_update_feedback_author"] = _author_ctx
+                except Exception:
+                    logger.exception(
+                        "[AdminChat] author-reputation fetch failed for user_id=%s",
+                        user_id,
+                    )
 
             # ── Social-draft DM binding (T7) ──────────────────────────
             # Only runs on DM replies to a bot message that might be a draft
@@ -1810,6 +2040,9 @@ class AdminChatCog(commands.Cog):
                 # for executed edit_message / delete_message calls.
                 discord_message_ids = resolved_topic.get('discord_message_ids') or []
                 discord_message_ids_str = {str(mid) for mid in discord_message_ids}
+                # Precise-edit record for the decision post: (message_id, before, after).
+                edit_diffs: List[Dict[str, Any]] = []
+                deleted_topic = False
 
                 for action in result.actions:
                     tool_name = action.get('tool', '')
@@ -1825,6 +2058,15 @@ class AdminChatCog(commands.Cog):
                             # NOTE: topics has no 'edited' state (valid states are
                             # posted/watching/discarded/deleted) — do NOT mutate
                             # topics.state on edit; only record the audit row.
+                            edit_diffs.append({
+                                'message_id': str(inp.get('message_id')) if inp.get('message_id') else None,
+                                'before': (
+                                    parent_content_before
+                                    if inp.get('message_id') and str(inp.get('message_id')) == str(parent_id)
+                                    else None
+                                ),
+                                'after': inp.get('content'),
+                            })
                             audit_row = await asyncio.to_thread(
                                 self.db_handler.get_live_update_feedback_for,
                                 replied_to_message_id, environment, 'edited',
@@ -1859,6 +2101,7 @@ class AdminChatCog(commands.Cog):
                         for mid in (res.get('deleted_ids') or []):
                             candidate_ids.add(str(mid))
                         if candidate_ids & discord_message_ids_str:
+                            deleted_topic = True
                             # Soft-delete the topic (NEVER hard-delete): set
                             # topics.state='deleted'.  The feedback migration
                             # extends topics_state_check to permit 'deleted'.
@@ -1897,6 +2140,24 @@ class AdminChatCog(commands.Cog):
                 # 8.5: ✅ reaction + reply deletion — ONLY after a confirmed
                 # feedback row exists (from 8.2, 8.3, or 8.4).
                 if feedback_row:
+                    # Post the sense-check decision (with the precise edit, if
+                    # any) to the editorial-decisions channel. The author is
+                    # tagged there and gets a copy of their feedback, so the
+                    # original reply can be removed from the live channel.
+                    try:
+                        await self._post_editorial_decision(
+                            message=message,
+                            resolved_topic=resolved_topic,
+                            parent_id=parent_id,
+                            user_id=user_id,
+                            feedback_row=feedback_row,
+                            edit_diffs=edit_diffs,
+                            deleted_topic=deleted_topic,
+                            parent_content_before=parent_content_before,
+                            author_ctx=channel_context.get('live_update_feedback_author'),
+                        )
+                    except Exception:
+                        logger.exception("[AdminChat] editorial-decision post failed")
                     try:
                         await message.add_reaction('\u2705')
                     except Exception:
@@ -1933,6 +2194,17 @@ class AdminChatCog(commands.Cog):
 
         if message.guild is None:
             return
+
+        # Community live-update feedback: ANY member replying to a bot-posted
+        # live update runs the feedback sense-check turn — no @mention needed.
+        # Feedback replies win over recipient-intent routing below.
+        # getattr guards: real discord.Message always has .reference/.content,
+        # but some test doubles only set the latter.
+        if getattr(message, 'reference', None) and getattr(message, 'content', None):
+            topic = await self._resolve_live_update_topic(message)
+            if topic is not None:
+                await self._handle_admin_message(message, pre_resolved_topic=topic)
+                return
 
         intent = self.db_handler.get_active_intent_for_recipient(
             message.guild.id,

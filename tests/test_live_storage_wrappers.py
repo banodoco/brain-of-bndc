@@ -48,82 +48,6 @@ def make_storage(calls):
     return storage
 
 
-def test_storage_live_update_candidate_preserves_author_context_and_audit_fields():
-    calls = []
-    storage = make_storage(calls)
-
-    row = asyncio.run(storage.store_live_update_candidate({
-        "run_id": "run-1",
-        "guild_id": 1,
-        "source_channel_id": 10,
-        "update_type": "release",
-        "title": "Demo shipped",
-        "body": "A new demo build shipped with better controls.",
-        "media_refs": [{"url": "https://cdn.example.test/demo.png"}],
-        "source_message_ids": [100, "101"],
-        "author_context_snapshot": {"member_id": 42, "username": "artist"},
-        "duplicate_key": "release:demo",
-        "confidence": 0.91,
-        "priority": 4,
-        "rationale": "high-signal release note",
-        "raw_agent_output": {"generator": "test"},
-    }))
-
-    assert row["_table"] == "live_update_candidates"
-    assert calls[-1][1] == "live_update_candidates"
-    payload = calls[-1][2]
-    assert payload["source_message_ids"] == [100, "101"]
-    assert payload["author_context_snapshot"] == {"member_id": 42, "username": "artist"}
-    assert payload["media_refs"] == [{"url": "https://cdn.example.test/demo.png"}]
-    assert payload["raw_agent_output"] == {"generator": "test"}
-    assert payload["status"] == "generated"
-
-
-def test_storage_live_update_feed_item_preserves_ordered_discord_message_ids():
-    calls = []
-    storage = make_storage(calls)
-
-    row = asyncio.run(storage.store_live_update_feed_item({
-        "run_id": "run-1",
-        "candidate_id": "candidate-1",
-        "guild_id": 1,
-        "channel_id": 20,
-        "update_type": "project_update",
-        "title": "Long update",
-        "body": "A long update was split into multiple Discord sends.",
-        "source_message_ids": ["100"],
-        "duplicate_key": "project:update",
-        "discord_message_ids": [9003, "9004", 9005],
-    }))
-
-    assert row["_table"] == "live_update_feed_items"
-    payload = calls[-1][2]
-    assert payload["live_channel_id"] == 20
-    assert payload["discord_message_ids"] == ["9003", "9004", "9005"]
-    assert payload["status"] == "posted"
-    assert payload["posted_at"]
-
-
-def test_storage_live_update_feed_item_message_update_preserves_ordered_ids_on_failure():
-    calls = []
-    storage = make_storage(calls)
-
-    row = asyncio.run(storage.update_live_update_feed_item_messages(
-        "feed-1",
-        [9010, "9011"],
-        status="failed",
-        post_error="discord send failed",
-    ))
-
-    assert row["_table"] == "live_update_feed_items"
-    assert calls[-1][:4] == ("update", "live_update_feed_items", "feed_item_id", "feed-1")
-    payload = calls[-1][4]
-    assert payload["discord_message_ids"] == ["9010", "9011"]
-    assert payload["status"] == "failed"
-    assert payload["post_error"] == "discord send failed"
-    assert payload["posted_at"] is None
-
-
 def test_storage_topic_editor_helpers_route_to_new_tables_without_touching_legacy():
     calls = []
     storage = make_storage(calls)
@@ -252,21 +176,9 @@ def test_db_handler_topic_editor_wrappers_are_reachable_through_storage_handler(
             calls.append(("checkpoint", checkpoint, environment))
             return {"checkpoint_key": checkpoint["checkpoint_key"]}
 
-        async def get_live_update_checkpoint(self, checkpoint_key, environment="prod"):
-            calls.append(("get-live-checkpoint", checkpoint_key, environment))
-            return {"checkpoint_key": checkpoint_key, "guild_id": 1}
-
         async def get_topic_editor_checkpoint(self, checkpoint_key, environment="prod"):
             calls.append(("get-topic-checkpoint", checkpoint_key, environment))
             return {"checkpoint_key": checkpoint_key, "guild_id": 1}
-
-        async def mirror_live_checkpoint_to_topic_editor(self, checkpoint_key, environment="prod"):
-            calls.append(("mirror-live-to-topic", checkpoint_key, environment))
-            return {"checkpoint_key": checkpoint_key}
-
-        async def mirror_topic_editor_checkpoint_to_live(self, checkpoint_key, environment="prod"):
-            calls.append(("mirror-topic-to-live", checkpoint_key, environment))
-            return {"checkpoint_key": checkpoint_key}
 
         async def create_topic_editor_draft(self, draft, environment="prod"):
             calls.append(("draft-create", draft, environment))
@@ -302,8 +214,6 @@ def test_db_handler_topic_editor_wrappers_are_reachable_through_storage_handler(
     }
     assert db.store_editorial_observation({"guild_id": 1, "run_id": "run-1", "reason": "near miss"}) == {"observation_id": "observation-1"}
     assert db.upsert_topic_editor_checkpoint({"guild_id": 1, "checkpoint_key": "live", "channel_id": 20}) == {"checkpoint_key": "live"}
-    assert db.mirror_live_checkpoint_to_topic_editor("live") == {"checkpoint_key": "live"}
-    assert db.mirror_topic_editor_checkpoint_to_live("live") == {"checkpoint_key": "live"}
     assert db.create_topic_editor_draft({"draft_id": "draft-1", "guild_id": 1, "topic_id": None}) == {
         "draft_id": "draft-1",
         "topic_id": None,
@@ -326,10 +236,6 @@ def test_db_handler_topic_editor_wrappers_are_reachable_through_storage_handler(
         "get-transitions",
         "observation",
         "checkpoint",
-        "get-live-checkpoint",
-        "mirror-live-to-topic",
-        "get-topic-checkpoint",
-        "mirror-topic-to-live",
         "draft-create",
         "draft-update",
         "draft-read",
@@ -627,26 +533,6 @@ def test_storage_get_live_update_feedback_for_filters_and_returns_none():
     assert disposition_box["value"] == "deletion-request"
 
 
-def test_storage_update_live_update_feed_item_status_only():
-    """update_live_update_feed_item_status writes ONLY status (no title/body)."""
-    calls = []
-    storage = make_storage(calls)
-
-    row = asyncio.run(
-        storage.update_live_update_feed_item_status(
-            "feed-1", "deleted", guild_id=1, environment="prod",
-        )
-    )
-
-    assert row is not None
-    # Check the update call
-    update_call = next(c for c in calls if c[0] == "update")
-    payload = update_call[4]  # (update, table, key, value, payload)
-    assert payload == {"status": "deleted"}
-    assert "title" not in payload
-    assert "body" not in payload
-
-
 # ── db_handler wrapper tests ────────────────────────────────────────────────
 
 
@@ -766,4 +652,216 @@ def test_db_handler_feedback_wrappers_called_synchronously():
     )
 
     assert len(calls) == 3
-    assert all(c == "storage-called" for c in calls)
+
+
+# ── Ground truth (community feedback sense-check) ──────────────────────────
+
+
+def test_storage_get_topic_sources_queries_topic_sources_by_id_and_env():
+    """get_topic_sources drives the real query builder against `topic_sources`,
+    filtering by topic_id + environment, newest first."""
+    captured = {}
+
+    class FakeQuery:
+        def select(self, cols, **_k):
+            captured["select"] = cols
+            return self
+
+        def eq(self, column, value):
+            captured.setdefault("eq", []).append((column, value))
+            return self
+
+        def order(self, column, **kwargs):
+            captured["order"] = (column, kwargs.get("desc"))
+            return self
+
+        def limit(self, n):
+            captured["limit"] = n
+            return self
+
+        def execute(self):
+            return type("Result", (), {"data": [
+                {"message_id": 200, "guild_id": 1, "added_in_run_id": "r2"},
+                {"message_id": 100, "guild_id": 1, "added_in_run_id": "r1"},
+            ]})()
+
+    class FakeSupabase:
+        def table(self, table):
+            captured["table"] = table
+            return FakeQuery()
+
+    storage = StorageHandler.__new__(StorageHandler)
+    storage.supabase_client = FakeSupabase()
+
+    rows = asyncio.run(
+        storage.get_topic_sources("t-1", environment="prod")
+    )
+
+    assert captured["table"] == "topic_sources"
+    assert ("topic_id", "t-1") in captured["eq"]
+    assert ("environment", "prod") in captured["eq"]
+    assert captured["order"] == ("created_at", True)
+    assert len(rows) == 2
+    assert rows[0]["message_id"] == 200
+
+
+def test_storage_get_topic_ground_truth_chains_sources_to_archive():
+    """get_topic_ground_truth resolves topic_sources → discord_messages and
+    returns the compact verbatim shape. The method under test is NOT mocked
+    away — the real query builders run against a routed fake client."""
+    captured = {}
+
+    class FakeQuery:
+        def select(self, cols, **_k):
+            captured["select"] = cols
+            return self
+
+        def eq(self, column, value):
+            captured.setdefault("eq", []).append((column, value))
+            return self
+
+        def order(self, column, **kwargs):
+            captured["order"] = (column, kwargs.get("desc"))
+            return self
+
+        def in_(self, column, values):
+            captured.setdefault("in", []).append((column, list(values)))
+            return self
+
+        def limit(self, n):
+            captured["limit"] = n
+            return self
+
+        def execute(self):
+            if captured.get("table") == "topic_sources":
+                return type("Result", (), {"data": [
+                    {"message_id": 100, "guild_id": 1},
+                    {"message_id": 200, "guild_id": 1},
+                ]})()
+            return type("Result", (), {"data": [
+                {
+                    "message_id": 100, "guild_id": 1, "channel_id": 5,
+                    "thread_id": None, "author_id": 42,
+                    "content": "Kijai endorses Claude Code for node dev",
+                    "attachments": [], "embeds": [], "created_at": "2026-08-18T00:00:00Z",
+                    "reference_id": None, "reaction_count": 7,
+                },
+                {
+                    "message_id": 200, "guild_id": 1, "channel_id": 5,
+                    "thread_id": None, "author_id": 43,
+                    "content": "second source message",
+                    "attachments": [], "embeds": [], "created_at": "2026-08-18T01:00:00Z",
+                    "reference_id": None, "reaction_count": 3,
+                },
+            ]})()
+
+    class FakeSupabase:
+        def table(self, table):
+            captured["table"] = table
+            return FakeQuery()
+
+    storage = StorageHandler.__new__(StorageHandler)
+    storage.supabase_client = FakeSupabase()
+
+    truth = asyncio.run(
+        storage.get_topic_ground_truth("t-1", guild_id=1, environment="prod", limit=30)
+    )
+
+    # First query was topic_sources (by topic_id), second was the archive.
+    assert captured["eq"][0] == ("topic_id", "t-1")
+    # The archive query carried the guild filter.
+    assert ("guild_id", 1) in captured["eq"]
+    # Only the compact ground-truth keys survive, in source order.
+    assert len(truth) == 2
+    assert truth[0]["message_id"] == "100"
+    assert truth[0]["content"].startswith("Kijai endorses")
+    assert truth[0]["reaction_count"] == 7
+    assert set(truth[0].keys()) == {
+        "message_id", "channel_id", "author_id", "content",
+        "created_at", "reference_id", "reaction_count",
+    }
+
+
+def test_storage_get_topic_ground_truth_empty_when_no_sources():
+    """A topic with no recorded sources yields [] (no archive query)."""
+    captured = []
+
+    class FakeQuery:
+        def select(self, *_a, **_k):
+            return self
+
+        def eq(self, column, value):
+            captured.append(("eq", column, value))
+            return self
+
+        def order(self, *_a, **_k):
+            return self
+
+        def limit(self, *_a, **_k):
+            return self
+
+        def execute(self):
+            return type("Result", (), {"data": []})()
+
+    class FakeSupabase:
+        def table(self, _table):
+            return FakeQuery()
+
+    storage = StorageHandler.__new__(StorageHandler)
+    storage.supabase_client = FakeSupabase()
+
+    truth = asyncio.run(
+        storage.get_topic_ground_truth("t-none", guild_id=1, environment="prod")
+    )
+    assert truth == []
+    # Only topic_sources was queried — no discord_messages call.
+    assert all(c[1] in ("topic_id", "environment") for c in captured)
+
+
+def test_storage_store_live_update_feedback_persists_verdict():
+    """The agent's sense-check verdict lands in the feedback row payload."""
+    calls = []
+    storage = make_storage(calls)
+
+    row = asyncio.run(
+        storage.store_live_update_feedback({
+            "topic_id": "t-1",
+            "guild_id": 1,
+            "admin_user_id": 999,
+            "feedback_text": "This says Wan 2.4 but the source says Wan 2.5",
+            "replied_to_message_id": 9001,
+            "disposition": "correction",
+            "verdict": "Feedback matches the source — fixed the version number.",
+        })
+    )
+
+    assert row["verdict"] == "Feedback matches the source — fixed the version number."
+    assert row["disposition"] == "correction"
+    assert calls[-1][0] == "insert"
+    assert calls[-1][1] == "live_update_feedback"
+
+
+def test_db_handler_ground_truth_wrappers_are_synchronous_readers():
+    """get_topic_sources / get_topic_ground_truth wrappers are sync, non-gated
+    readers (they work even when writes are disallowed)."""
+    calls = []
+
+    class FakeStorage:
+        async def get_topic_sources(self, topic_id, environment="prod", limit=50):
+            calls.append(("sources", topic_id, environment, limit))
+            return [{"message_id": 100}]
+
+        async def get_topic_ground_truth(self, topic_id, guild_id=None, environment="prod", limit=30):
+            calls.append(("truth", topic_id, guild_id, environment, limit))
+            return [{"message_id": "100", "content": "ground truth"}]
+
+    db = DatabaseHandler.__new__(DatabaseHandler)
+    db.storage_handler = FakeStorage()
+    db._live_write_allowed = lambda guild_id: False  # writes blocked
+
+    sources = db.get_topic_sources("t-1", environment="prod")
+    truth = db.get_topic_ground_truth("t-1", guild_id=1, environment="prod", limit=30)
+
+    assert sources == [{"message_id": 100}]
+    assert truth == [{"message_id": "100", "content": "ground truth"}]
+    assert [c[0] for c in calls] == ["sources", "truth"]

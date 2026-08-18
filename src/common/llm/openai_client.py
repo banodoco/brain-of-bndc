@@ -1,5 +1,10 @@
 """
 Handles interactions with the OpenAI API (v1.x.x).
+
+Subclasses DeepSeekClient to reuse its OpenAI-compatible message/tool
+converters (`_to_openai_messages`, `_to_openai_tools`,
+`_to_openai_tool_choice`, `_to_anthropic_like_response`) so the admin-agent
+tool loop can run against any OpenAI-hosted model (e.g. GPT Sol) unchanged.
 """
 import os
 import logging
@@ -8,12 +13,17 @@ from typing import List, Dict, Any, Union
 # Need AsyncOpenAI for async calls
 from openai import AsyncOpenAI
 
-from .base_client import BaseLLMClient
+from .deepseek_client import DeepSeekClient
 
 logger = logging.getLogger(__name__)
 
-class OpenAIClient(BaseLLMClient):
-    """Handles interactions with the OpenAI API (v1.x.x syntax)."""
+class OpenAIClient(DeepSeekClient):
+    """Handles interactions with the OpenAI API (v1.x.x syntax).
+
+    Text-only calls return the assistant text (BaseLLMClient compatibility);
+    tool calls return the Anthropic-like block shape the AdminChatAgent loop
+    expects, exactly like DeepSeekClient.
+    """
     def __init__(self):
         """Initializes the OpenAI client using v1.x.x syntax."""
         self.api_key = os.environ.get("OPENAI_API_KEY")
@@ -24,7 +34,12 @@ class OpenAIClient(BaseLLMClient):
         else:
             # Use the new client initialization
             try:
-                self.client = AsyncOpenAI(api_key=self.api_key)
+                base_url = os.environ.get("OPENAI_BASE_URL") or None
+                self.client = (
+                    AsyncOpenAI(api_key=self.api_key, base_url=base_url)
+                    if base_url
+                    else AsyncOpenAI(api_key=self.api_key)
+                )
                 logger.info("Initializing OpenAI Client (API Key presence: Found)")
             except Exception as e:
                  logger.error(f"Failed to initialize OpenAI client: {e}", exc_info=True)
@@ -33,8 +48,14 @@ class OpenAIClient(BaseLLMClient):
 
     async def generate_chat_completion(self, model: str, system_prompt: str, 
                                          messages: List[Dict[str, Union[str, List[Dict[str, Any]]]]],
-                                         **kwargs: Any) -> str:
-        """Generates a chat completion using the OpenAI API v1.x.x asynchronously."""
+                                         **kwargs: Any) -> Any:
+        """Generates a chat completion using the OpenAI API v1.x.x asynchronously.
+
+        When ``tools`` are supplied, converts to OpenAI tool format and returns
+        an Anthropic-like response (``content`` blocks) so the AdminChatAgent
+        tool loop works unchanged. Without tools, returns the assistant text
+        for BaseLLMClient compatibility.
+        """
         
         # Check if client initialized properly
         if self.client is None:
@@ -42,20 +63,11 @@ class OpenAIClient(BaseLLMClient):
             logger.error(error_msg)
             raise ValueError(error_msg)
 
-        # Basic validation
-        if not messages:
-            raise ValueError("Messages list cannot be empty.")
-        for msg in messages:
-            if not isinstance(msg, dict) or 'role' not in msg or 'content' not in msg:
-                raise ValueError("Invalid message structure in messages list.")
-
-        # Prepend system message if not already present
-        if not messages or messages[0].get("role") != "system":
-            # Ensure content for system message is just text
-            system_content = system_prompt if isinstance(system_prompt, str) else str(system_prompt)
-            formatted_messages = [{"role": "system", "content": system_content}] + messages
-        else:
-            formatted_messages = messages
+        tools = kwargs.get("tools")
+        # Reuse DeepSeekClient's OpenAI-compatible converter — it preserves the
+        # assistant tool_calls history and tool-result roles a multi-iteration
+        # tool loop depends on.
+        formatted_messages = self._to_openai_messages(system_prompt, messages)
 
         # Filter allowed additional parameters for the new API structure
         allowed_params = [
@@ -64,6 +76,11 @@ class OpenAIClient(BaseLLMClient):
             "reasoning_effort", "store" # Keep potentially non-standard ones for flexibility
             ]
         params = {"model": model, "messages": formatted_messages}
+        if tools:
+            params["tools"] = self._to_openai_tools(tools)
+            tool_choice = self._to_openai_tool_choice(kwargs.get("tool_choice"))
+            if tool_choice is not None:
+                params["tool_choice"] = tool_choice
         
         # Populate params, handling potential max_tokens variations later
         for key in allowed_params:
@@ -72,7 +89,9 @@ class OpenAIClient(BaseLLMClient):
                  params[key] = kwargs[key]
 
         # --- Model-Specific Parameter Adjustment --- 
-        is_o_model = model.startswith("o")
+        # o-series AND gpt-5-class models (e.g. a GPT Sol variant) require
+        # max_completion_tokens instead of max_tokens.
+        is_o_model = model.startswith("o") or "gpt-5" in model
         
         if is_o_model:
             # Expect max_completion_tokens for 'o' models
@@ -108,7 +127,12 @@ class OpenAIClient(BaseLLMClient):
         try:
             # Use the new API call structure
             response = await self.client.chat.completions.create(**params)
-            
+
+            if tools:
+                # Same Anthropic-like shape DeepSeekClient returns — the
+                # AdminChatAgent loop consumes this unchanged.
+                return self._to_anthropic_like_response(response)
+
             # Access response differently
             if response.choices and response.choices[0].message and response.choices[0].message.content:
                  generated_text = response.choices[0].message.content.strip()
