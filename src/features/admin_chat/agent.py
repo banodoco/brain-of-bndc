@@ -19,12 +19,14 @@ from .tools import TOOLS, execute_tool
 # When any of these are invoked during a turn, the chat-text reply is suppressed
 # so the admin doesn't see a duplicate "OK I'll do that" alongside the tool's
 # own channel post.
+# NOTE: share_to_social intentionally NOT included — it posts to X/YouTube,
+# not Discord, so the admin sees nothing unless the chat reply (which carries
+# the tweet URL) is delivered.
 _CHANNEL_POSTING_TOOLS = frozenset({
     "send_message",
     "upload_file",
     "initiate_payment",
     "initiate_batch_payment",
-    "share_to_social",
 })
 _ADMIN_IDENTITY_INJECTED_TOOLS = frozenset({
     "initiate_payment",
@@ -200,6 +202,7 @@ You have FFmpeg, ffprobe, and Python/Pillow for media processing. You can:
 - List working files (list_media_files)
 - Upload results to Discord (upload_file)
 - Share to social media with `share_to_social`, including scheduled posts/replies/retweets/quote tweets on X and post uploads to YouTube via Zapier. Supports direct posting without a Discord message: provide tweet_text and optionally media_urls (e.g. Supabase video links). For YouTube, use platform=youtube and a reachable video URL. For retweets, provide action=retweet and target_post. For quote tweets, provide action=quote and target_post. Use the returned `publication_id` for canonical tracking, and if `already_shared` is true, report the existing `provider_url`.
+- **Follow-ups belong in the same thread.** When the admin asks to follow up on, reply to, or attach a link to a tweet we already posted, use `reply_to_tweet` — pass the tweet URL, or omit `tweet` and it replies to the most recent X post. Do NOT post a follow-up as a new standalone tweet. If X rejects the reply (e.g. the target tweet was edited), report the error to the admin and ask whether to post standalone instead of silently doing so.
 - Manage channel-to-social routing with `list_social_routes`, `create_social_route`, `update_social_route`, and `delete_social_route` instead of editing `social_channel_routes` manually when possible.
 
 **You can ASSEMBLE videos from source clips.** When the admin points you at a set of clips (a thread, a channel, several messages) and wants a montage/compilation/reel — or when a social proposal's media strategy calls for one (e.g. "compile 60+ clips from this thread into one montage", "montage of 6+ example clips") — you can actually build it:

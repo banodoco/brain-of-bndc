@@ -226,8 +226,6 @@ MEDIA_CONTENT_TYPES: Tuple[str, ...] = (
 DISCORD_UPLOAD_LIMIT_BYTES = 25 * 1024 * 1024  # 25 MiB (standard bot limit)
 
 # Boosted server / higher-tier limit
-DISCORD_UPLOAD_LIMIT_BYTES_BOOSTED = 100 * 1024 * 1024  # 100 MiB
-
 
 def is_discord_compatible_content_type(content_type: Optional[str]) -> bool:
     """Check if a content type is compatible with Discord file upload."""
@@ -384,24 +382,3 @@ def extract_external_url_at_index(
     url = items[wanted].get("url")
     return url if isinstance(url, str) and url else None
 
-
-def extract_external_urls_compact(
-    message: Dict[str, Any],
-    *,
-    safelist: Optional[Tuple[str, ...]] = None,
-) -> List[Dict[str, Any]]:
-    """Same as extract_external_urls but without domain/policy metadata.
-
-    Returns compact entries safe for agent-facing payloads:
-        {kind: 'external', index: N, url_present: true, source: 'content'|'embed'}
-    """
-    full = extract_external_urls(message, safelist=safelist)
-    return [
-        {
-            "kind": item["kind"],
-            "index": item["index"],
-            "url_present": item["url_present"],
-            "source": item["source"],
-        }
-        for item in full
-    ]

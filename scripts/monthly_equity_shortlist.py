@@ -204,19 +204,6 @@ async def process_candidates_with_llm2(candidates: List[Dict]) -> Dict:
         logger.error(f"Error during LLM2 call with {LLM2_CLIENT} model {LLM2_MODEL}: {llm_error}", exc_info=True)
         return {"error": f"LLM2 API call failed: {str(llm_error)}"}
 
-
-def process_combined_results_with_llm_2(combined_results: List[Any]) -> Any:
-    """
-    Placeholder function to process the combined results from LLM 1 with a second LLM.
-    Replace this with your actual API call and result processing.
-    """
-    # THIS IS NOW A PLACEHOLDER - THE ACTUAL LOGIC IS IN process_candidates_with_llm2
-    logger.warning("process_combined_results_with_llm_2 is deprecated and should not be called.")
-    final_output = {
-        "overall_summary": f"Placeholder processing of {len(combined_results)} raw LLM1 results.",
-        "details": combined_results
-    }
-    return final_output
 # --- Helper Functions --- Added back
 def get_month_input(month_arg: str | None) -> str:
     """

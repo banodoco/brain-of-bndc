@@ -35,7 +35,8 @@ __all__ = [
 async def get_llm_response(client_name: str, model: str, system_prompt: str, 
                              # Use updated typing
                              messages: List[Dict[str, Union[str, List[Dict[str, Any]]]]], 
-                             **kwargs: Any) -> str:
+                             raw_response: bool = False,
+                             **kwargs: Any) -> Any:
     """
     Gets a response from the specified LLM provider and model asynchronously.
 
@@ -45,10 +46,18 @@ async def get_llm_response(client_name: str, model: str, system_prompt: str,
         system_prompt: The system prompt for the LLM.
         messages: A list of message dictionaries. Supports text-only (content: str) 
                   and multimodal (content: List[Dict]).
-        **kwargs: Additional provider-specific parameters (e.g., temperature, max_tokens).
+        raw_response: When True, return the provider response object unchanged
+            instead of coercing to a string. Structured tool-calling clients
+            (DeepSeek/OpenAI) return an Anthropic-like object whose ``content``
+            blocks include ``type="tool_use"`` entries with parsed JSON input —
+            coercing that to ``str`` destroys the tool call. Callers that set
+            this MUST handle non-string returns.
+        **kwargs: Additional provider-specific parameters (e.g., temperature,
+            max_tokens, tools, tool_choice).
 
     Returns:
-        The LLM's response content as a string.
+        The provider response object when ``raw_response=True``, else the
+        response content as a string.
 
     Raises:
         ValueError: If the client_name is not supported.
@@ -80,6 +89,9 @@ async def get_llm_response(client_name: str, model: str, system_prompt: str,
             **kwargs
         )
         logger.info(f"LLM call to {client_name} completed successfully")
+        # Structured tool-calling callers want the provider object untouched.
+        if raw_response:
+            return response
         # Ensure response is string
         if not isinstance(response, str):
              logger.warning(f"LLM client '{client_name}' returned a non-string response type: {type(response)}. Attempting conversion.")

@@ -1042,3 +1042,278 @@ async def test_dm_admin_with_draft_no_admin_user_id():
         if c.kwargs.get("review_message_id") is not None
     ]
     assert len(calls_with_review) == 0
+
+
+# ── T7: terminal DM tests (needs_review / failed) ───────────────────────
+
+def _make_terminal_run_row(**overrides):
+    """A run row shaped like the real table row the service re-fetches."""
+    row = {
+        "run_id": "run-1",
+        "topic_id": "topic-1",
+        "guild_id": 1,
+        "terminal_status": "needs_review",
+        "draft_text": None,
+        "trace_entries": [],
+        "source_metadata": {"cog": "topic_editor", "environment": "prod"},
+        "publish_units": {
+            "title": "Test Topic",
+            "channel_id": 10,
+            "message_id": 42,
+        },
+    }
+    row.update(overrides)
+    return row
+
+
+@pytest.mark.asyncio
+async def test_extract_terminal_reason_reads_reason_on_tool_event():
+    """A tool trace storing its message under ``reason`` is surfaced (bug fix)."""
+    svc = LiveUpdateSocialService(db_handler=MagicMock(), bot=None)
+    reason = svc._extract_terminal_reason(
+        "needs_review",
+        [
+            {"event": "llm_called", "ts": "t"},
+            {
+                "event": "tool",
+                "tool": "request_social_review",
+                "reason": "Could not parse a clean draft from the model response.",
+            },
+        ],
+        None,
+    )
+    assert reason == "Could not parse a clean draft from the model response."
+
+
+@pytest.mark.asyncio
+async def test_extract_terminal_reason_prefers_force_needs_review():
+    """force_needs_review carries the authoritative reason."""
+    svc = LiveUpdateSocialService(db_handler=MagicMock(), bot=None)
+    reason = svc._extract_terminal_reason(
+        "needs_review",
+        [
+            {"event": "no_tool_call_parsed", "raw_response": "I'll think about it."},
+            {"event": "force_needs_review",
+             "reason": "LLM did not produce a valid tool call."},
+        ],
+        None,
+    )
+    assert reason == "LLM did not produce a valid tool call."
+
+
+def test_extract_raw_response_returns_snippet():
+    """no_tool_call_parsed raw_response is surfaced, trimmed of whitespace."""
+    svc = LiveUpdateSocialService(db_handler=MagicMock(), bot=None)
+    raw = svc._extract_raw_response([
+        {"event": "no_tool_call_parsed",
+         "raw_response": "  <read_tools>…</read_tools>  "},
+    ])
+    assert raw == "<read_tools>…</read_tools>"
+    assert svc._extract_raw_response([]) == ""
+
+
+@pytest.mark.asyncio
+async def test_dm_admin_with_terminal_needs_review_enriched():
+    """needs_review DM carries reason + source link + model raw response."""
+    bot = _make_mock_bot()
+    db = _make_mock_db_handler()
+    svc = LiveUpdateSocialService(db_handler=db, bot=bot)
+    row = _make_terminal_run_row(trace_entries=[
+        {"event": "no_tool_call_parsed",
+         "raw_response": "I'll gather context about this topic before making a decision."},
+        {"event": "force_needs_review",
+         "reason": "LLM did not produce a valid tool call."},
+    ])
+
+    with patch.dict(_os.environ, {"ADMIN_USER_ID": "999"}):
+        await svc._dm_admin_with_terminal(
+            run_id="run-1",
+            terminal_status="needs_review",
+            reason="LLM did not produce a valid tool call.",
+            topic_title="Test Topic",
+            run_row=row,
+        )
+
+    mock_user = bot.fetch_user.return_value
+    mock_user.send.assert_awaited_once()
+    _args, kwargs = mock_user.send.call_args
+    embed = kwargs.get("embed")
+    assert embed.title == "Needs review — Test Topic"
+    assert "LLM did not produce a valid tool call." in embed.description
+    assert "https://discord.com/channels/1/10/42" in embed.description
+    assert "Model said:" in embed.description
+    assert "I'll gather context" in embed.description
+    assert embed.footer.text == "run run-1"
+    assert db.update_live_update_social_run.call_count == 1
+    db_kwargs = db.update_live_update_social_run.call_args.kwargs
+    assert db_kwargs["review_message_id"] == 12345
+    assert db_kwargs["expires_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_dm_admin_with_terminal_failed_includes_draft():
+    """failed DM shows the preserved draft and the publish error."""
+    bot = _make_mock_bot()
+    db = _make_mock_db_handler()
+    svc = LiveUpdateSocialService(db_handler=db, bot=bot)
+    row = _make_terminal_run_row(
+        terminal_status="failed",
+        draft_text="A draft that failed to publish.",
+    )
+
+    with patch.dict(_os.environ, {"ADMIN_USER_ID": "999"}):
+        await svc._dm_admin_with_terminal(
+            run_id="run-1",
+            terminal_status="failed",
+            reason="route missing",
+            topic_title="Test Topic",
+            run_row=row,
+        )
+
+    mock_user = bot.fetch_user.return_value
+    _args, kwargs = mock_user.send.call_args
+    embed = kwargs["embed"]
+    assert embed.title == "Publish failed — Test Topic"
+    assert "A draft that failed to publish." in embed.description
+    assert "The draft is preserved." in kwargs["content"]
+
+
+@pytest.mark.asyncio
+async def test_dm_admin_with_terminal_includes_topic_summary():
+    """Topic summary from the topics table is pulled into the DM."""
+    db = _make_mock_db_handler()
+    db.get_topic = MagicMock(return_value={
+        "topic_id": "topic-1",
+        "headline": "Test Topic",
+        "summary": {"body": "Elvaxorn ships a ComfyUI node for EverAnimate…"},
+    })
+    bot = _make_mock_bot()
+    svc = LiveUpdateSocialService(db_handler=db, bot=bot)
+
+    with patch.dict(_os.environ, {"ADMIN_USER_ID": "999"}):
+        await svc._dm_admin_with_terminal(
+            run_id="run-1",
+            terminal_status="needs_review",
+            reason="LLM did not produce a valid tool call.",
+            topic_title="Test Topic",
+            run_row=_make_terminal_run_row(),
+        )
+
+    db.get_topic.assert_called_once_with("topic-1", environment="prod")
+    embed = bot.fetch_user.return_value.send.call_args.kwargs["embed"]
+    assert "Topic:" in embed.description
+    assert "Elvaxorn ships a ComfyUI node" in embed.description
+
+
+@pytest.mark.asyncio
+async def test_dm_admin_with_terminal_survives_topic_fetch_failure():
+    """A failing topic fetch degrades the DM, never breaks it."""
+    db = _make_mock_db_handler()
+    db.get_topic = MagicMock(side_effect=Exception("boom"))
+    bot = _make_mock_bot()
+    svc = LiveUpdateSocialService(db_handler=db, bot=bot)
+
+    with patch.dict(_os.environ, {"ADMIN_USER_ID": "999"}):
+        await svc._dm_admin_with_terminal(
+            run_id="run-1",
+            terminal_status="needs_review",
+            reason="LLM did not produce a valid tool call.",
+            topic_title="Test Topic",
+            run_row=_make_terminal_run_row(),
+        )
+
+    assert bot.fetch_user.return_value.send.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_queue_terminal_dm_batches_needs_review_into_one_dm():
+    """Multiple needs_review runs in the window → ONE DM listing all runs."""
+    bot = _make_mock_bot()
+    db = _make_mock_db_handler()
+    svc = LiveUpdateSocialService(db_handler=db, bot=bot)
+    svc._terminal_batch_window = 0  # flush immediately after queueing
+
+    with patch.dict(_os.environ, {"ADMIN_USER_ID": "999"}):
+        await svc._queue_terminal_dm(
+            run_id="run-1", terminal_status="needs_review",
+            reason="LLM did not produce a valid tool call.",
+            topic_title="Topic One",
+            run_row=_make_terminal_run_row(run_id="run-1"),
+        )
+        await svc._queue_terminal_dm(
+            run_id="run-2", terminal_status="needs_review",
+            reason="LLM did not produce a valid tool call.",
+            topic_title="Topic Two",
+            run_row=_make_terminal_run_row(run_id="run-2"),
+        )
+        # Await the background flush task (window 0 → immediate)
+        await svc._terminal_flush_task
+
+    mock_user = bot.fetch_user.return_value
+    assert mock_user.send.await_count == 1
+    _args, kwargs = mock_user.send.call_args
+    embed = kwargs["embed"]
+    assert embed.title == "Needs review — 2 run(s)"
+    assert "Topic One" in embed.description
+    assert "Topic Two" in embed.description
+    assert "run-1" in kwargs["content"]
+    assert "run-2" in kwargs["content"]
+    # review_message_id is bound to the FIRST run only (single-row resolution)
+    assert db.update_live_update_social_run.call_count == 1
+    db_kwargs = db.update_live_update_social_run.call_args.kwargs
+    assert db_kwargs["run_id"] == "run-1"
+    assert db_kwargs["review_message_id"] == 12345
+
+
+@pytest.mark.asyncio
+async def test_queue_terminal_dm_failed_sends_immediately_not_batched():
+    """failed runs DM immediately — never queued behind the batch window."""
+    bot = _make_mock_bot()
+    db = _make_mock_db_handler()
+    svc = LiveUpdateSocialService(db_handler=db, bot=bot)
+    svc._terminal_batch_window = 0
+
+    with patch.dict(_os.environ, {"ADMIN_USER_ID": "999"}):
+        await svc._queue_terminal_dm(
+            run_id="run-1", terminal_status="failed",
+            reason="route missing", topic_title="Topic",
+            run_row=_make_terminal_run_row(terminal_status="failed"),
+        )
+        assert getattr(svc, "_terminal_flush_task", None) is None
+
+    mock_user = bot.fetch_user.return_value
+    assert mock_user.send.await_count == 1
+    embed = mock_user.send.call_args.kwargs["embed"]
+    assert embed.title == "Publish failed — Topic"
+
+
+@pytest.mark.asyncio
+async def test_dm_admin_with_terminal_summary_blocks_shape_and_cleanup():
+    """Blocks-shaped summaries (the real topics.summary shape) render cleanly."""
+    db = _make_mock_db_handler()
+    db.get_topic = MagicMock(return_value={
+        "topic_id": "topic-1",
+        "headline": "Test Topic",
+        "summary": {
+            "blocks": [
+                {"text": "**yi** shared [JoyAI-Echo](https://huggingface.co/x) (LTX) [1][2] — test."},
+                {"text": "**MarkDalias** found it consistent."},
+            ]
+        },
+    })
+    bot = _make_mock_bot()
+    svc = LiveUpdateSocialService(db_handler=db, bot=bot)
+
+    with patch.dict(_os.environ, {"ADMIN_USER_ID": "999"}):
+        await svc._dm_admin_with_terminal(
+            run_id="run-1",
+            terminal_status="needs_review",
+            reason="LLM did not produce a valid tool call.",
+            topic_title="Test Topic",
+            run_row=_make_terminal_run_row(),
+        )
+
+    embed = bot.fetch_user.return_value.send.call_args.kwargs["embed"]
+    assert "yi shared JoyAI-Echo (LTX) — test. MarkDalias found it consistent." in embed.description
+    assert "**yi**" not in embed.description
+    assert "[1][2]" not in embed.description

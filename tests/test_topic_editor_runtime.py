@@ -94,9 +94,6 @@ class FakeDB:
             "last_message_id": 99,
         }
 
-    def mirror_live_checkpoint_to_topic_editor(self, checkpoint_key, environment="prod"):
-        raise AssertionError("topic checkpoint exists; legacy mirror should not be called")
-
     def acquire_topic_editor_run(self, run, environment="prod"):
         self.acquired = (run, environment)
         return {"run_id": "run-1"}
@@ -943,9 +940,6 @@ def test_topic_editor_cold_start_seeds_interval_lookback_and_processes_window(mo
             self.before_calls = []
 
         def get_topic_editor_checkpoint(self, checkpoint_key, environment="prod"):
-            return None
-
-        def mirror_live_checkpoint_to_topic_editor(self, checkpoint_key, environment="prod"):
             return None
 
         def get_archived_message_id_before_timestamp(self, guild_id=None, before=None):

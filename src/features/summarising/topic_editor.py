@@ -26,7 +26,7 @@ from urllib.parse import unquote, urlparse
 import aiohttp
 import discord
 
-from src.features.summarising.live_update_prompts import DEFAULT_LIVE_UPDATE_MODEL
+from src.features.summarising.editor_models import DEFAULT_LIVE_UPDATE_MODEL
 from src.common.external_media import extract_external_urls  # T6: shared helper
 from src.common.urls import message_jump_url
 from src.features.sharing.live_update_social import LiveUpdateHandoffPayload
@@ -100,7 +100,11 @@ Use the workflow in order:
    get_author_profile, get_message_context, get_reply_chain, understand_image,
    and understand_video when you need more context.
 2. Decide: choose publish, watch, update sources, discard, or observation. If
-   there is no publishable public update, do not draft one.
+   there is no publishable public update, do not draft one. Individual-specific
+   troubleshooting and support stories — one member's hardware/software
+   problem, their own setup misbehaving, personal performance comparisons, or
+   help-me-fix-my-rig threads — are not feed material on their own: skip them
+   unless the thread surfaced a significant generalizable insight.
 3. Draft: call create_draft with a template, headline, dek, cards, and
    editor_note. Select source_message_ids and media_ids from the hydrated
    evidence shelf. Do not use raw CDN URLs.
@@ -130,6 +134,28 @@ Card style:
   evidence shelf, never raw CDN URLs.
 - Avoid digest prose, broad roundups, padded context, and weak "community
   reacted" points without concrete substance.
+- Individual-specific troubleshooting stories (one member's hardware or
+  software problem, their setup, personal performance comparisons) are SKIP
+  unless the thread surfaced a significant generalizable insight — a root
+  cause plus a fix or workaround that applies to a class of users or systems
+  (a documented bug, a driver/version issue, a tool gotcha). If a thread
+  might get there but hasn't yet, WATCH it instead of publishing. When you do
+  publish a resolved finding, center the cards on the insight — the bug, who
+  it affects, the fix — not on the member's personal saga or who is currently
+  testing what.
+- Honesty over invention about popularity and humor. Reactions prove people
+  liked something; they do not tell you why. Never invent a reason for
+  popularity, humor, or appeal that is not grounded in the source content,
+  the media itself, or what people actually said. If a post drew many
+  reactions but you cannot tell why from the evidence, say so plainly,
+  serotonic-style: a headline like "Lots of people like this for some
+  reason" and a body like "you guys seem to like this one — I don't really
+  know what's up, but it pulled 23 reactions [1]". Admitting you can't read
+  the room is honest; fabricating intent ("the deadpan caption plays the
+  reveal for laughs") is a hallucination. For showcase cards, "why it works"
+  must name a concrete observable property (subject, motion, lighting,
+  style, technique) — never a guess about the audience's psychology. If you
+  cannot name one, drop the claim and just admire the work.
 - Too many angles means split topics, watch the extras, or leave them out.
 
 Templates:
@@ -697,8 +723,6 @@ class TopicEditor:
         checkpoint_key = self._checkpoint_key(guild_id, live_channel_id)
         cold_start_seeded = False
         checkpoint = self.db.get_topic_editor_checkpoint(checkpoint_key, environment=self.environment)
-        if checkpoint is None:
-            checkpoint = self.db.mirror_live_checkpoint_to_topic_editor(checkpoint_key, environment=self.environment)
         if checkpoint is None:
             checkpoint = self._seed_cold_start_checkpoint(checkpoint_key, guild_id, live_channel_id)
             cold_start_seeded = True
@@ -4877,6 +4901,14 @@ class TopicEditor:
                 # sent_ids[0] is first Discord message sent, not necessarily the consumer's documented topic root
                 'subTopics': [],
             }
+            # Carry the topic's actual content so the social agent can draft
+            # without needing a read-tool round trip (it repeatedly asked for
+            # get_live_update_topic because the prompt had only the title).
+            raw_summary = topic.get('summary')
+            if isinstance(raw_summary, dict):
+                topic_summary_data['summary'] = raw_summary
+            elif isinstance(raw_summary, str) and raw_summary.strip():
+                topic_summary_data['summary'] = {'body': raw_summary.strip()}
             if sent_ids:
                 topic_summary_data['message_id'] = str(sent_ids[0])
             if channel_id_int:

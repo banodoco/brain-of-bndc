@@ -274,6 +274,39 @@ TOOLS = [
         }
     },
     {
+        "name": "reply_to_tweet",
+        "description": "Reply to an existing X/Twitter post — the intuitive way to post a follow-up in the SAME thread. Pass the target tweet as a URL or numeric ID in `tweet`, or OMIT `tweet` to reply to the most recent X post this guild published. Use this whenever the admin asks to 'follow up', 'reply to the tweet', 'post the link under it', 'continue the thread', or attach something to a post we already made. A follow-up should almost never be a new standalone tweet — prefer this over share_to_social with action=post. Note: X refuses replies to tweets that have been edited; the tool will surface that error so you can tell the admin instead of silently posting standalone.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "Reply text (max 280 chars)."
+                },
+                "tweet": {
+                    "type": "string",
+                    "description": "Optional target tweet: a full URL (e.g. https://x.com/banodoco/status/123456) or a numeric Tweet ID. Omit to reply to the most recent X post this guild published."
+                },
+                "media_urls": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "description": "Optional media URLs to attach to the reply (e.g. Discord CDN or Supabase video links)."
+                },
+                "schedule_for": {
+                    "type": "string",
+                    "description": "Optional ISO-8601 timestamp (UTC, with Z or offset) for queued publishing. Example: 2026-04-09T18:30:00Z"
+                },
+                "route_key": {
+                    "type": "string",
+                    "description": "Optional explicit social route override (social_channel_routes.id)."
+                }
+            },
+            "required": ["text"]
+        }
+    },
+    {
         "name": "list_social_routes",
         "description": "List configured outbound social routes for the current guild. Use this before creating or overriding routes. Omit channel_id to include guild-default and channel-specific rows.",
         "input_schema": {
@@ -2902,6 +2935,174 @@ async def execute_get_member_info(db_handler, params: Dict[str, Any]) -> Dict[st
     except Exception as e:
         logger.error(f"[AdminChat] Error in get_member_info: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
+
+
+async def execute_reply_to_tweet(
+    bot: discord.Client,
+    sharer,
+    params: Dict[str, Any],
+    guild_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Execute the reply_to_tweet tool: post a follow-up reply in the SAME thread.
+
+    The target tweet can be given explicitly (URL or numeric ID) or omitted to
+    reply to the most recent succeeded X post published by the guild. This is
+    the intuitive path for admin-chat follow-ups — no need to dig up a Tweet ID.
+    """
+    text = str(params.get('text') or '').strip()
+    if not text:
+        return {"success": False, "error": "text is required for reply_to_tweet"}
+
+    raw_tweet = params.get('tweet')
+    raw_route_override = params.get('route_key')
+    if raw_route_override in (None, ''):
+        raw_route_override = params.get('route_override')
+
+    media_urls = params.get('media_urls') or []
+    if not isinstance(media_urls, list):
+        return {"success": False, "error": "media_urls must be an array of URL strings"}
+    direct_media_urls = [str(url).strip() for url in media_urls if str(url).strip()]
+
+    # ── resolve the target tweet id ────────────────────────────────
+    target_post_id = None
+    if raw_tweet not in (None, ''):
+        tweet_value = str(raw_tweet).strip()
+        status_match = re.search(r'status/(\d+)', tweet_value)
+        if status_match:
+            target_post_id = status_match.group(1)
+        elif tweet_value.isdigit():
+            target_post_id = tweet_value
+        else:
+            return {
+                "success": False,
+                "error": "tweet must be a Tweet ID or a tweet URL containing status/<digits>",
+            }
+    else:
+        # Default-to-last: reply to the most recent succeeded X post for the guild.
+        effective_guild_id = guild_id or _resolve_guild_id(params)
+        if effective_guild_id is None:
+            return {"success": False, "error": "guild_id is required to resolve the most recent tweet"}
+        try:
+            pubs = sharer.db_handler.list_social_publications(
+                guild_id=effective_guild_id,
+                status='succeeded',
+                platform='twitter',
+                limit=1,
+            )
+        except Exception as e:
+            logger.error("[AdminChat] reply_to_tweet: list_social_publications failed: %s", e, exc_info=True)
+            return {"success": False, "error": f"Failed to look up the most recent tweet: {e}"}
+        if not pubs or not pubs[0].get('provider_ref'):
+            return {
+                "success": False,
+                "error": (
+                    "No recent X post found for this guild — pass `tweet` with a "
+                    "tweet URL or ID to reply to a specific post."
+                ),
+            }
+        target_post_id = str(pubs[0]['provider_ref'])
+
+    if guild_id is None:
+        guild_id = int(os.getenv('GUILD_ID', 0)) or None
+    if guild_id is None:
+        return {"success": False, "error": "guild_id is required for direct social replies"}
+
+    social_publish_service = getattr(sharer, 'social_publish_service', None)
+    if social_publish_service is None:
+        return {"success": False, "error": "Social publish service is not available"}
+
+    # ── download media (same direct path as share_to_social) ────────
+    downloaded_attachments = []
+    preserve_downloads = False
+    try:
+        for index, url in enumerate(direct_media_urls):
+            downloaded_item = await sharer._download_media_from_url(url, 'direct', index)
+            if not downloaded_item or not downloaded_item.get('local_path'):
+                return {"success": False, "error": f"Failed to download media from URL: {url}"}
+            downloaded_attachments.append(downloaded_item)
+
+        route_override = None
+        if raw_route_override not in (None, ''):
+            route_override = {'route_key': str(raw_route_override).strip()}
+        else:
+            route_override = {'route_key': 'direct'}
+
+        scheduled_at = None
+        raw_schedule_for = params.get('schedule_for')
+        if raw_schedule_for not in (None, ''):
+            schedule_value = str(raw_schedule_for).strip().replace('Z', '+00:00')
+            try:
+                scheduled_at = datetime.fromisoformat(schedule_value)
+            except ValueError:
+                return {"success": False, "error": "schedule_for must be a valid ISO-8601 timestamp"}
+            if scheduled_at.tzinfo is None:
+                return {"success": False, "error": "schedule_for must include a timezone offset or Z suffix"}
+            scheduled_at = scheduled_at.astimezone(timezone.utc)
+
+        request = SocialPublishRequest(
+            message_id=0,
+            channel_id=0,
+            guild_id=guild_id,
+            user_id=0,
+            platform='twitter',
+            action='reply',
+            scheduled_at=scheduled_at,
+            target_post_ref=target_post_id,
+            route_override=route_override,
+            text=text,
+            media_hints=downloaded_attachments,
+            source_kind='admin_chat',
+            duplicate_policy={'check_existing': False},
+            text_only=not downloaded_attachments,
+            announce_policy={'enabled': False},
+            first_share_notification_policy={'enabled': False},
+            legacy_shared_post_policy={'enabled': False},
+            source_context=PublicationSourceContext(
+                source_kind='admin_chat',
+                metadata={
+                    'user_details': {'direct_post': True, 'reply_to_tweet': target_post_id},
+                    'guild_id': guild_id,
+                },
+            ),
+        )
+
+        if scheduled_at is not None:
+            result = await social_publish_service.enqueue(request)
+            if not result.success:
+                return {"success": False, "error": result.error or "Scheduling failed"}
+            preserve_downloads = True
+            return {
+                "success": True,
+                "message": f"Scheduled reply to tweet {target_post_id} for {scheduled_at.isoformat()}",
+                "tweet_url": None,
+                "tweet_id": None,
+                "publication_id": result.publication_id,
+                "status": "queued",
+                "already_shared": False,
+            }
+
+        result = await social_publish_service.publish_now(request)
+        if not result.success:
+            return {"success": False, "error": result.error or "Reply failed"}
+
+        reply_url = getattr(result, "provider_url", None) or getattr(result, "tweet_url", None)
+        return {
+            "success": True,
+            "message": f"Replied to tweet {target_post_id}: {reply_url}",
+            "tweet_url": getattr(result, "tweet_url", None),
+            "tweet_id": getattr(result, "tweet_id", None),
+            "provider_url": getattr(result, "provider_url", None),
+            "provider_ref": getattr(result, "provider_ref", None),
+            "publication_id": getattr(result, "publication_id", None),
+            "already_shared": False,
+        }
+    finally:
+        if not preserve_downloads:
+            sharer._cleanup_files([
+                att['local_path']
+                for att in downloaded_attachments
+                if att.get('local_path')
+            ])
 
 
 async def execute_list_social_routes(params: Dict[str, Any]) -> Dict[str, Any]:
@@ -5686,6 +5887,13 @@ async def execute_tool(
         )
     elif tool_name == "share_to_social":
         return await execute_share_to_social(
+            bot,
+            sharer,
+            trusted_tool_input,
+            guild_id=trusted_guild_id,
+        )
+    elif tool_name == "reply_to_tweet":
+        return await execute_reply_to_tweet(
             bot,
             sharer,
             trusted_tool_input,

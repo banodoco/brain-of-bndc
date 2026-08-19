@@ -756,36 +756,3 @@ class ExternalMediaResolver:
 # ---------------------------------------------------------------------------
 # Convenience factory
 # ---------------------------------------------------------------------------
-
-def create_resolver(
-    *,
-    cache_dir: Optional[str] = None,
-    max_bytes: Optional[int] = None,
-    get_cache: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None,
-    upsert_cache: Optional[Callable[[Dict[str, Any]], Optional[Dict[str, Any]]]] = None,
-    run_yt_dlp: Optional[Callable[..., Tuple[bool, Any]]] = None,
-    download: Optional[Callable[..., Tuple[bool, Optional[str], int, Optional[str]]]] = None,
-    ensure_cache: Optional[Callable[..., str]] = None,
-) -> ExternalMediaResolver:
-    """Create an ExternalMediaResolver with optional overrides.
-
-    All parameters are optional; sensible defaults are used for any not provided.
-    """
-    kwargs: Dict[str, Any] = {}
-
-    if cache_dir is not None:
-        kwargs["cache_dir"] = cache_dir
-    if max_bytes is not None:
-        kwargs["max_bytes"] = max_bytes
-    if get_cache is not None:
-        kwargs["_get_cache"] = get_cache
-    if upsert_cache is not None:
-        kwargs["_upsert_cache"] = upsert_cache
-    if run_yt_dlp is not None:
-        kwargs["_run_yt_dlp"] = run_yt_dlp
-    if download is not None:
-        kwargs["_download"] = download
-    if ensure_cache is not None:
-        kwargs["_ensure_cache"] = ensure_cache
-
-    return ExternalMediaResolver(**kwargs)

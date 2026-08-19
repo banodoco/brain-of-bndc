@@ -75,10 +75,10 @@ Touches `summarising`, `sharing/live_update_social`, `admin_chat`, plus one DB
 migration. Revised effort: **~3–4 days** (see §7).
 
 ### Step 1 — Wire the handoff into the ACTIVE publish path  (`summarising/topic_editor.py`)
-> ⚠️ **Corrected after sense-check.** `live_update_editor.py` is imported as
-> `LegacyLiveUpdateEditor` (`summariser_cog.py:8`); the **active** publisher is
-> `TopicEditor` (`summariser_cog.py:140`, `topic_editor.py`), which writes the
-> `topics` rows that the admin reply reverse-lookup already keys on
+> ⚠️ **Corrected after sense-check.** The legacy `live_update_editor.py`
+> (imported as `LegacyLiveUpdateEditor`) has since been removed; the **active**
+> publisher is `TopicEditor` (`topic_editor.py`), which writes the `topics`
+> rows that the admin reply reverse-lookup already keys on
 > (`get_topic_by_discord_message_id`). Hooking the legacy editor would never fire.
 
 When `TopicEditor` finishes publishing a topic to Discord, build a

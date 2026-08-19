@@ -39,6 +39,52 @@ logger = logging.getLogger("DiscordBot")
 # Mode-dependent forbidden actions are now instance-level (set in __init__).
 # See LiveUpdateSocialAgent.__init__ for the per-mode configuration.
 
+# Tools whose handlers SET a terminal status. The model sometimes emits tool
+# calls in an XML envelope; a read-tool call in this single-turn agent can
+# never complete (its handler does not set a terminal), so the parser must
+# treat read-tool requests as "needs human review" instead of silently
+# leaving the run open.
+TERMINAL_TOOL_NAMES: frozenset = frozenset({
+    "draft_social_post",
+    "propose_social_ideas",
+    "skip_social_post",
+    "request_social_review",
+    "enqueue_social_post",
+    "publish_social_post",
+})
+
+# Every name in the tool registry — used to distinguish "known tool, wrong
+# mode" (refuse like the JSON path) from "unknown name" (fall through).
+ALL_TOOL_NAMES: frozenset = frozenset(ts.name for ts in ALL_TOOL_SPECS)
+
+# Read-only tools whose handlers gather context but set NO terminal status.
+# This agent is single-turn, so they can never complete: they are not
+# advertised to the LLM (specs filter them out) and any request for one is
+# routed to human review by the dispatch gate.
+READ_TOOL_NAMES: frozenset = frozenset({
+    "get_live_update_topic",
+    "get_source_messages",
+    "get_published_update_context",
+    "inspect_message_media",
+    "list_social_routes",
+    "find_existing_social_posts",
+    "get_social_run_status",
+})
+
+
+def _clean_summary_text(text: str) -> str:
+    """Strip markdown + citation markers from topic summary text.
+
+    Keeps the prompt free of ``[1][2]`` citation noise (which the model
+    otherwise echoes into drafts) and ``**`` emphasis markers.
+    """
+    import re as _re
+
+    cleaned = _re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)   # [label](url) → label
+    cleaned = _re.sub(r"\[\d+(?:[-,]\d+)*\]", "", cleaned)       # [1][2] markers
+    cleaned = cleaned.replace("**", "").replace("__", "").replace("`", "")
+    return _re.sub(r"\s+", " ", cleaned).strip()
+
 
 class LiveUpdateSocialAgent:
     """Social review agent supporting draft, queue, and publish modes (Sprint 3).
@@ -192,10 +238,22 @@ class LiveUpdateSocialAgent:
             run_state.add_trace("llm_called")
 
             # ── dispatch tool call ────────────────────────────────────
-            tool_name, tool_params = self._parse_tool_call(llm_response)
+            # Prefer the API's structured tool_use block (deepseek/openai);
+            # fall back to the text parser for providers that return strings
+            # (claude/gemini) or when the model still produced no tool call.
+            tool_name, tool_params, response_text = self._extract_native_tool_call(
+                llm_response
+            )
+            trace_response = response_text
+            if tool_name is None:
+                text = response_text or (
+                    llm_response if isinstance(llm_response, str) else ""
+                )
+                tool_name, tool_params = self._parse_tool_call(text)
+                trace_response = text
             if not tool_name:
                 run_state.add_trace("no_tool_call_parsed",
-                                    raw_response=llm_response[:500])
+                                    raw_response=trace_response[:500])
                 return await self._force_needs_review(
                     run_state,
                     reason="LLM did not produce a valid tool call.",
@@ -535,11 +593,9 @@ class LiveUpdateSocialAgent:
                 "- If the content should not be posted (not newsworthy, "
                 "duplicate), return 'skip_social_post' as the tool name "
                 "with a reason.\n"
-                "- Use read tools (find_existing_social_posts, "
-                "get_social_run_status, get_live_update_topic, "
-                "get_source_messages, get_published_update_context, "
-                "inspect_message_media, list_social_routes) to gather "
-                "context BEFORE making your terminal decision.\n"
+                "- All context you need (topic summary, source messages, "
+                "media) is already in the user message — do NOT request "
+                "additional tools; call exactly ONE terminal tool.\n"
             )
         elif propose_mode:
             tools_text = (
@@ -596,8 +652,8 @@ class LiveUpdateSocialAgent:
             rules_text = (
                 "## Rules\n"
                 "- Call exactly ONE terminal tool.\n"
-                "- You may use read tools to gather context BEFORE making "
-                "your terminal decision.\n"
+                "- All context you need is already in the user message — do "
+                "NOT request additional tools.\n"
                 "- Do NOT provide text outside the tool call.\n"
                 "- If media is expected but unresolved, return "
                 "'request_social_review' with a reason.\n"
@@ -633,11 +689,9 @@ class LiveUpdateSocialAgent:
             rules_text = (
                 "## Rules\n"
                 "- Call exactly ONE terminal tool.\n"
-                "- You may use read tools (get_live_update_topic, "
-                "get_source_messages, get_published_update_context, "
-                "inspect_message_media, list_social_routes) to gather context "
-                "BEFORE making your terminal decision, but ONLY the final "
-                "terminal tool call will be executed.\n"
+                "- All context you need (topic summary, source messages, "
+                "media) is already in the user message — do NOT request "
+                "additional tools; call exactly ONE terminal tool.\n"
                 "- Do NOT provide text outside the tool call.\n"
                 "- If media is expected but unresolved, use "
                 "request_social_review.\n"
@@ -729,6 +783,20 @@ class LiveUpdateSocialAgent:
         parts.append(f"Title: {topic.get('title', 'Untitled')}")
         parts.append(f"Topic ID: {payload.topic_id}")
         parts.append(f"Platform: {payload.platform}")
+        summary = topic.get("summary")
+        if isinstance(summary, dict):
+            body = summary.get("dek") or summary.get("body")
+            blocks = summary.get("blocks")
+            if not body and isinstance(blocks, list):
+                body = " ".join(
+                    str(block.get("text")).strip()
+                    for block in blocks
+                    if isinstance(block, dict) and block.get("text")
+                )
+            if body:
+                parts.append(f"Summary: {_clean_summary_text(str(body))[:2000]}")
+        elif isinstance(summary, str) and summary.strip():
+            parts.append(f"Summary: {summary.strip()[:2000]}")
 
         # ── publish-mode: present units as thread items ────────────────
         units = run_state.publish_units or {}
@@ -763,6 +831,56 @@ class LiveUpdateSocialAgent:
         if src:
             parts.append("\n## Source Context")
             parts.append(json.dumps(src, default=str, indent=2))
+
+        # Source messages — the actual community material the topic was built
+        # from. The single-turn agent cannot chain a get_source_messages call
+        # (the model asks for it every time), so pre-fetch the content into
+        # the prompt instead of letting it stall on a read-tool request.
+        source_ids = src.get("source_message_ids") or []
+        if source_ids:
+            sources: List[Dict[str, Any]] = []
+            try:
+                fetched = self.db_handler.get_topic_editor_source_messages(
+                    message_ids=[str(sid) for sid in source_ids],
+                    guild_id=payload.guild_id,
+                    environment=src.get("environment") or "prod",
+                    limit=20,
+                )
+                if isinstance(fetched, list):
+                    sources = fetched
+            except Exception:
+                logger.warning(
+                    "LiveUpdateSocialAgent: source-message pre-fetch failed "
+                    "for topic %s",
+                    payload.topic_id,
+                    exc_info=True,
+                )
+            if sources:
+                parts.append(f"\n## Source Messages ({len(sources)})")
+                parts.append(
+                    "Raw community messages this topic was built from — use "
+                    "their content to judge newsworthiness and draft "
+                    "accurately. Do not invent details beyond these and the "
+                    "topic summary."
+                )
+                for i, sm in enumerate(sources[:10], start=1):
+                    content = str(sm.get("content") or "").strip()
+                    if len(content) > 600:
+                        content = content[:600].rstrip() + "…"
+                    line = f"  {i}. (author {sm.get('author_id') or '?'}) {content}"
+                    attachments = sm.get("attachments") or []
+                    if isinstance(attachments, list) and attachments:
+                        names = [
+                            str(a.get("filename") or a.get("url") or "attachment")
+                            for a in attachments[:3]
+                            if isinstance(a, dict)
+                        ]
+                        if names:
+                            line += f" | media: {', '.join(names)}"
+                    embeds = sm.get("embeds") or []
+                    if isinstance(embeds, list) and embeds:
+                        line += f" | embeds: {len(embeds)}"
+                    parts.append(line)
 
         # Media info
         decisions = run_state.media_decisions or {}
@@ -866,15 +984,18 @@ class LiveUpdateSocialAgent:
         """Return tool definitions for the LLM.
 
         Publish mode: includes publish_social_post, excludes enqueue_social_post
-        and draft/queue terminal tools. Always includes read tools.
+        and draft/queue terminal tools.
         Queue mode: includes enqueue_social_post, excludes publish_social_post.
-        Draft mode (default): only Sprint-1 terminal tools + read tools.
+        Draft mode (default): only Sprint-1 terminal tools.
 
-        Always includes read tools (get_live_update_topic, get_source_messages,
-        get_published_update_context, inspect_message_media, list_social_routes,
-        find_existing_social_posts, get_social_run_status).
+        Read tools are ALWAYS excluded: this is a single-turn agent, their
+        handlers set no terminal status, and a request for one can never
+        complete. Advertising them invites exactly the stall this agent keeps
+        hitting. All context they would return (topic summary, source
+        messages, media refs) is pre-fetched into the user message instead.
         """
         specs: List[Any] = list(ALL_TOOL_SPECS)
+        specs = [ts for ts in specs if ts.name not in READ_TOOL_NAMES]
 
         publish_mode = self._is_publish_mode()
         queue_mode = self._is_queue_mode()
@@ -925,8 +1046,14 @@ class LiveUpdateSocialAgent:
         system_prompt: str,
         user_message: str,
         tools: List[Dict[str, Any]],
-    ) -> str:
-        """Call the LLM with chain settings and return the raw response text."""
+    ) -> Any:
+        """Call the LLM and return the response.
+
+        DeepSeek/OpenAI return an Anthropic-like structured object (with a
+        ``tool_use`` content block) when native tool calling is active;
+        Claude/Gemini return plain text. Callers route through
+        ``_extract_native_tool_call`` first and fall back to the text parser.
+        """
         import os
 
         from src.common.llm import get_llm_response
@@ -951,14 +1078,32 @@ class LiveUpdateSocialAgent:
             client_name, model, depth,
         )
 
-        try:
-            response = await get_llm_response(
-                client_name=client_name,
-                model=model,
-                system_prompt=system_prompt,
-                messages=messages,
-                max_tokens=4096,
+        # DeepSeek/OpenAI support NATIVE function calling through the shared
+        # LLM layer: pass the tool specs to the API (not just the prompt text).
+        # The client returns an Anthropic-like object with a structured
+        # ``tool_use`` block, so the run no longer depends on the model
+        # hand-formatting a tool call in text (the source of every "LLM did
+        # not produce a valid tool call").
+        # tool_choice stays "auto": "required" is rejected by DeepSeek's
+        # thinking mode ("Thinking mode does not support this tool_choice").
+        # Claude/Gemini ignore tools and stay on the text-parser fallback.
+        native_tool_calling = client_name in ("deepseek", "openai")
+        call_kwargs: Dict[str, Any] = {
+            "client_name": client_name,
+            "model": model,
+            "system_prompt": system_prompt,
+            "messages": messages,
+            "max_tokens": 4096,
+        }
+        if native_tool_calling:
+            call_kwargs.update(
+                tools=tools,
+                tool_choice="auto",
+                raw_response=True,
             )
+
+        try:
+            response = await get_llm_response(**call_kwargs)
             return response or ""
         except Exception as e:
             logger.error(
@@ -985,6 +1130,40 @@ class LiveUpdateSocialAgent:
 
     # ── tool call parsing ────────────────────────────────────────────
 
+    @staticmethod
+    def _extract_native_tool_call(
+        response: Any,
+    ) -> tuple[Optional[str], Optional[Dict[str, Any]], str]:
+        """Pull the first tool_use block from a structured LLM response.
+
+        Native tool-calling providers (deepseek/openai via the LLM layer)
+        return an Anthropic-like object whose ``content`` blocks include
+        ``type="tool_use"`` with a parsed ``input`` dict. Returns
+        ``(tool_name, params, text)``; ``tool_name`` is None when the model
+        produced no tool_use block, and ``text`` is the assistant's plain-text
+        content (for the fallback parser and tracing).
+        """
+        if isinstance(response, str):
+            return None, None, response
+        content = getattr(response, "content", None)
+        if not isinstance(content, list):
+            return None, None, ""
+        text_parts: List[str] = []
+        for block in content:
+            block_type = getattr(block, "type", None)
+            if block_type == "tool_use":
+                name = getattr(block, "name", None)
+                if name:
+                    params = getattr(block, "input", None)
+                    return (
+                        str(name),
+                        params if isinstance(params, dict) else {},
+                        "".join(text_parts),
+                    )
+            if block_type == "text":
+                text_parts.append(str(getattr(block, "text", "") or ""))
+        return None, None, "".join(text_parts)
+
     def _parse_tool_call(self, llm_response: str) -> tuple[Optional[str], Dict[str, Any]]:
         """Parse the LLM response to extract tool name and parameters.
 
@@ -1000,6 +1179,11 @@ class LiveUpdateSocialAgent:
         # but e.g. propose mode must never accept a draft_social_post call.
         valid_names = self._allowed_tool_names()
 
+        # Read tools are never advertised, but a request for one must still
+        # surface its NAME so the dispatch gate can route it to a named review
+        # instead of a generic parse failure.
+        parseable_names = set(valid_names) | set(READ_TOOL_NAMES)
+
         # Try to parse as JSON tool-call wrapper
         try:
             data = json.loads(llm_response)
@@ -1008,7 +1192,7 @@ class LiveUpdateSocialAgent:
                 params = data.get("params") or data.get("parameters") or data.get("input") or {}
                 if tool_name:
                     # Validate tool name
-                    if tool_name in valid_names:
+                    if tool_name in parseable_names:
                         return tool_name, params
                     logger.warning(
                         "LiveUpdateSocialAgent: tool %r not allowed in current mode",
@@ -1026,10 +1210,75 @@ class LiveUpdateSocialAgent:
             cleaned = re.sub(r"^```[a-zA-Z0-9]*\n?", "", cleaned)
             cleaned = re.sub(r"\n?```\s*$", "", cleaned).strip()
 
+        # XML-style envelope the model emits instead of JSON (observed on
+        # deepseek-v4-pro). Both common variants are handled:
+        #   <tool_call><tool_name>X</tool_name><arguments>{...}</arguments></tool_call>
+        #   <tool_calls><invoke name="X"><parameter name="k">v</parameter></invoke></tool_calls>
+        xml_name_match = re.search(
+            r"(?:<tool_name>\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*</tool_name>"
+            r"|<invoke\s+name=\"([a-zA-Z_][a-zA-Z0-9_]*)\")",
+            cleaned,
+        )
+        if xml_name_match:
+            xml_name = xml_name_match.group(1) or xml_name_match.group(2)
+            if xml_name in TERMINAL_TOOL_NAMES and xml_name in valid_names:
+                params: Dict[str, Any] = {}
+                args_match = re.search(
+                    r"<arguments>\s*(\{.*\})\s*</arguments>",
+                    cleaned,
+                    re.DOTALL,
+                )
+                if args_match:
+                    try:
+                        parsed = json.loads(args_match.group(1))
+                        if isinstance(parsed, dict):
+                            params = parsed
+                    except json.JSONDecodeError:
+                        logger.warning(
+                            "LiveUpdateSocialAgent: XML tool call for %r had "
+                            "unparseable <arguments>; proceeding with {}",
+                            xml_name,
+                        )
+                else:
+                    # <invoke name="X"><parameter name="k">v</parameter>…</invoke>
+                    param_matches = re.findall(
+                        r'<parameter\s+name="([^"]+)">(.*?)</parameter>',
+                        cleaned,
+                        re.DOTALL,
+                    )
+                    if param_matches:
+                        params = {
+                            name.strip(): value.strip()
+                            for name, value in param_matches
+                        }
+                return xml_name, params
+            if xml_name in READ_TOOL_NAMES and "request_social_review" in valid_names:
+                # A READ tool (e.g. get_live_update_topic) in this single-turn
+                # agent cannot complete — its handler sets no terminal status
+                # and the run would stall open. Route to human review, naming
+                # the tool the model wanted.
+                return "request_social_review", {
+                    "reason": (
+                        f"Model requested read tool {xml_name!r} before deciding "
+                        "— single-turn agent cannot chain tools; human review "
+                        "required."
+                    ),
+                }
+            if xml_name in ALL_TOOL_NAMES:
+                # Known tool, not advertised in this mode — refuse exactly like
+                # the JSON path (warn + None). Never honor a mode violation
+                # through the XML door.
+                logger.warning(
+                    "LiveUpdateSocialAgent: tool %r not allowed in current mode",
+                    xml_name,
+                )
+                return None, {}
+            # Unknown name — fall through to the other heuristics.
+
         # Function-call form, e.g. DeepSeek: `draft_social_post({"draft_text": "..."})`.
         # Extract the JSON argument object and use ITS fields — never the raw wrapper.
         m = re.search(
-            r"(" + "|".join(re.escape(n) for n in valid_names) + r")\s*\(\s*(\{.*\})\s*\)",
+            r"(" + "|".join(re.escape(n) for n in parseable_names) + r")\s*\(\s*(\{.*\})\s*\)",
             cleaned,
             re.DOTALL,
         )
@@ -1049,7 +1298,7 @@ class LiveUpdateSocialAgent:
                 if isinstance(obj, dict):
                     name = obj.get("tool") or obj.get("name") or obj.get("tool_name")
                     inner = obj.get("params") or obj.get("parameters") or obj.get("input")
-                    if name in valid_names:
+                    if name in parseable_names:
                         return name, inner if isinstance(inner, dict) else {
                             k: v for k, v in obj.items()
                             if k not in ("tool", "name", "tool_name")
@@ -1088,6 +1337,28 @@ class LiveUpdateSocialAgent:
         tool_params: Dict[str, Any],
     ) -> Optional[str]:
         """Dispatch the tool call through its ToolBinding handler."""
+        # A READ tool (get_live_update_topic, inspect_message_media, …) can
+        # never complete in this single-turn agent: its handler sets no
+        # terminal status and the run would stall open with no admin DM. This
+        # gate covers EVERY parse path (JSON, function-call, brace, XML) — the
+        # parser routes read-tool requests here so they end in a NAMED review
+        # instead of a silent no-op. Checked BEFORE the allowlist so the
+        # reason stays specific (read tools are no longer advertised).
+        if tool_name not in TERMINAL_TOOL_NAMES:
+            logger.warning(
+                "LiveUpdateSocialAgent: read tool %r requested — single-turn "
+                "agent cannot chain tools; routing to human review",
+                tool_name,
+            )
+            return await self._force_needs_review(
+                run_state,
+                reason=(
+                    f"Model requested read tool {tool_name!r} before deciding "
+                    "— single-turn agent cannot chain tools; human review "
+                    "required."
+                ),
+            )
+
         if tool_name not in self._allowed_tool_names():
             logger.error(
                 "LiveUpdateSocialAgent: tool %r not allowed in current mode "

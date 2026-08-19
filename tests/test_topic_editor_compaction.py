@@ -131,9 +131,6 @@ class FakeDB:
             "last_message_id": 99,
         }
 
-    def mirror_live_checkpoint_to_topic_editor(self, checkpoint_key, environment="prod"):
-        raise AssertionError("topic checkpoint exists; legacy mirror should not be called")
-
     def acquire_topic_editor_run(self, run, environment="prod"):
         return {"run_id": "run-1"}
 
@@ -767,6 +764,61 @@ def test_compaction_recap_includes_active_topics_rejections_and_created_sources(
     assert "--- Topics created this run ---" in recap
     assert "canonical_key=alpha topic_id=topic-9" in recap
     assert "sources=100,101" in recap
+
+
+def test_compaction_recap_preserves_open_draft_card_bodies():
+    """Regression: post-compaction the model loses the create/edit tool results;
+    the recap must reproduce nonterminal drafts' card bodies verbatim so the
+    agent can keep editing instead of abandoning drafts it can no longer see."""
+    db = FakeDB()
+    db.source_message_rows = [_source_message(100)]
+    editor = _make_editor(db, [])
+    dispatcher_context = {
+        "run_id": "run-1",
+        "guild_id": 1,
+        "messages": db.source_message_rows,
+        "seen_tool_call_ids": set(),
+        "drafts": {
+            "draft-abc": {
+                "draft_id": "draft-abc",
+                "status": "drafting",
+                "draft_json": {
+                    "headline": "Sigma shift fixes turbo audio",
+                    "topic_key": "sigma-shift-audio-fix",
+                    "cards": [
+                        {
+                            "angle": "What changed",
+                            "body": "MrWeaz pinned the fix to shift_video 12 / shift_audio 3 on the 600-EMA build [1][2].",
+                            "media_ids": [],
+                        }
+                    ],
+                },
+            },
+            "draft-done": {
+                "draft_id": "draft-done",
+                "status": "submitted",
+                "draft_json": {
+                    "headline": "Already submitted",
+                    "cards": [{"angle": "x", "body": "should NOT appear in recap"}],
+                },
+            },
+        },
+    }
+
+    recap = editor._compaction_recap_text(
+        dispatcher_context=dispatcher_context,
+        outcomes=[],
+        messages=db.source_message_rows,
+    )
+
+    assert "--- Drafts in progress (content preserved verbatim below) ---" in recap
+    assert "draft `draft-abc` status=drafting headline='Sigma shift fixes turbo audio'" in recap
+    assert "shift_video 12 / shift_audio 3 on the 600-EMA build [1][2]" in recap
+    # terminal drafts are excluded — never re-exposed as editable
+    assert "draft-done" not in recap
+    assert "Already submitted" not in recap
+
+
 def test_invoke_anthropic_times_out_on_hanging_provider(monkeypatch):
     """A hung provider call must raise TimeoutError so run_once can fail the run."""
     import asyncio as _asyncio

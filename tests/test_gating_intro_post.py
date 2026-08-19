@@ -1101,6 +1101,31 @@ def test_review_no_reply_posts_nothing_and_keeps_message(fresh_event_loop, monke
     cog.db.expire_pending_intro.assert_not_called()
 
 
+@pytest.mark.parametrize("action", ["KEEP", "FEEDBACK"])
+def test_intro_review_prompt_mentions_human_review(action):
+    from src.features.gating.gating_cog import _INTRO_REVIEW_PROMPT
+
+    # The agent (not the harness) writes the reply; it must be told to mention
+    # that a human will review the member's intro.
+    assert "human will review their intro" in _INTRO_REVIEW_PROMPT
+
+
+def test_intro_review_prompt_forbids_claiming_speaker_role():
+    from src.features.gating.gating_cog import _INTRO_REVIEW_PROMPT
+
+    # The reviewer reply must not tell a member they are already a Speaker —
+    # only a human approver grants the role. This is the regression behind the
+    # pinned #support thread ("now you're a Speaker" replies without a role).
+    assert "NEVER tell them they are already a Speaker" in _INTRO_REVIEW_PROMPT
+    assert "cannot grant roles" in _INTRO_REVIEW_PROMPT
+
+    # The prohibition must be global (any action, any reply), not just the
+    # KEEP branch — the "now you're a Speaker" phrasing happened in a KEEP
+    # welcome, but feedback replies must not claim the role either.
+    assert "NEVER tell a member they are already a Speaker" in _INTRO_REVIEW_PROMPT
+    assert "now you're a Speaker" in _INTRO_REVIEW_PROMPT
+
+
 def test_remove_member_messages_clears_review_context():
     cog, _channel = _make_cog_for_recovery()
     cog._pending_messages[100] = _MEMBER_ID

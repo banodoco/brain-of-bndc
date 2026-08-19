@@ -96,6 +96,22 @@ def test_system_prompt_includes_generation_showcase_guidance():
     assert "generation_showcase" in TOPIC_EDITOR_DRAFT_TEMPLATES
 
 
+def test_system_prompt_skips_individual_troubleshooting_without_generalizable_insight():
+    prompt = " ".join(TOPIC_EDITOR_SYSTEM_PROMPT.split())
+    assert "Individual-specific troubleshooting" in prompt
+    assert "generalizable insight" in prompt
+    assert "not on the member's personal saga" in prompt
+    assert "help-me-fix-my-rig" in prompt
+
+
+def test_system_prompt_forbids_inventing_popularity_reasons():
+    prompt = " ".join(TOPIC_EDITOR_SYSTEM_PROMPT.split())
+    assert "Honesty over invention about popularity and humor" in prompt
+    assert "Lots of people like this for some reason" in prompt
+    assert "fabricating intent" in prompt
+    assert "never a guess about the audience's psychology" in prompt
+
+
 def test_system_prompt_excludes_closed_source_news():
     prompt = " ".join(TOPIC_EDITOR_SYSTEM_PROMPT.split())
     assert "do not cover closed-source news" in prompt

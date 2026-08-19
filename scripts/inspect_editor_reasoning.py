@@ -4,11 +4,13 @@ What actually stores the LLM output:
   - `live_update_editor_runs.metadata.editor_reasoning` (top-level) holds the
     parsed reasoning string the editor extracted post-parse.
   - `live_update_editor_runs.metadata.agent_trace` is persisted as an empty
-    object today (see live_update_editor.py:_dev_payload), so the raw text is
-    NOT recoverable from there.
+    object today, so the raw text is NOT recoverable from there.
   - `live_update_candidates.raw_agent_output.raw_text` is where the actual
     LLM output gets persisted (only when an LLM candidate was produced; the
     heuristic fallback writes no raw_text).
+
+The legacy editor that wrote these rows was removed; this script reads the
+historical rows only.
 
 This script joins the two: it walks the most recent editor_runs, then pulls
 the matching candidate rows' raw_agent_output.raw_text and categorises that
@@ -67,7 +69,7 @@ def _get_supabase_client():
     return create_client(url, key)
 
 
-# ---- mirror parser logic from live_update_prompts.py ----
+# ---- mirror parser logic from the removed live_update_prompts.py ----
 
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
 

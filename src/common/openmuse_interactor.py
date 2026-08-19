@@ -57,8 +57,6 @@ MEMBERS_TABLE = "members"
 MEDIA_TABLE = "media"
 VIDEO_BUCKET_NAME = "videos"
 THUMBNAIL_BUCKET_NAME = "thumbnails"
-WORKFLOWS_BUCKET_NAME = "workflows"
-
 # --- Added constants for upload logic ---
 MAX_UPLOAD_ATTEMPTS = 3
 BASE_RETRY_DELAY_SECONDS = 2

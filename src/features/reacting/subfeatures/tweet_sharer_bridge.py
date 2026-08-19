@@ -496,7 +496,6 @@ class ConsentView(View):
                     # Ephemeral followup, less critical for safe_send_message but can be for consistency
                     await interaction.followup.send("An error occurred while processing your consent after the final review. Please try again.", ephemeral=True)
                 else: 
-                    # OLD: await self.original_poster.send(...)
                     await discord_utils.safe_send_message(
                         self.bot, self.original_poster, self.bot.rate_limiter, self.logger,
                         content="An error occurred while processing your consent after the final review. Please try again."

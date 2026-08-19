@@ -135,16 +135,17 @@ def test_default_runtime_backend_constructs_topic_editor(monkeypatch):
     }
 
 
-def test_legacy_backend_selector_constructs_legacy_live_update_editor(monkeypatch):
+def test_legacy_backend_selector_warns_and_uses_topic_editor(monkeypatch, caplog):
+    # The legacy editor was removed; a stale LIVE_UPDATE_EDITOR_BACKEND=legacy
+    # must log a warning and still construct the topic editor.
     monkeypatch.setenv("LIVE_UPDATE_EDITOR_BACKEND", "legacy")
+    monkeypatch.setenv("TOPIC_EDITOR_LLM_CLIENT", "")
     constructed = {}
 
-    class FakeLegacyEditor:
-        def __init__(self, db_handler, *, bot, logger_instance, dry_run_lookback_hours, environment):
-            constructed["db_handler"] = db_handler
+    class FakeTopicEditor:
+        def __init__(self, *, bot, db_handler, environment, llm_client=None):
             constructed["bot"] = bot
-            constructed["logger_instance"] = logger_instance
-            constructed["dry_run_lookback_hours"] = dry_run_lookback_hours
+            constructed["db_handler"] = db_handler
             constructed["environment"] = environment
 
         async def run_once(self, trigger):
@@ -152,21 +153,27 @@ def test_legacy_backend_selector_constructs_legacy_live_update_editor(monkeypatc
 
     import src.features.summarising.summariser_cog as summariser_cog_module
 
-    monkeypatch.setattr(summariser_cog_module, "LegacyLiveUpdateEditor", FakeLegacyEditor)
+    monkeypatch.setattr(summariser_cog_module, "TopicEditor", FakeTopicEditor)
     bot = FakeBot(summary_now=False, dev_mode=True)
 
-    cog = SummarizerCog(
-        bot,
-        live_top_creations=FakeTopCreations(),
-        start_loops=False,
-    )
+    with caplog.at_level("WARNING", logger="DiscordBot"):
+        cog = SummarizerCog(
+            bot,
+            live_top_creations=FakeTopCreations(),
+            start_loops=False,
+        )
 
-    assert isinstance(cog.live_update_editor, FakeLegacyEditor)
-    assert constructed["db_handler"] is bot.db_handler
-    assert constructed["bot"] is bot
-    assert constructed["logger_instance"] is bot.logger
-    assert constructed["dry_run_lookback_hours"] == 6
-    assert constructed["environment"] == "dev"
+    assert isinstance(cog.live_update_editor, FakeTopicEditor)
+    assert constructed == {
+        "bot": bot,
+        "db_handler": bot.db_handler,
+        "environment": "dev",
+    }
+    assert any(
+        "no longer supported" in record.message
+        for record in caplog.records
+        if record.name == "DiscordBot"
+    )
 
 
 def test_constructor_injected_editor_overrides_backend_selector(monkeypatch):

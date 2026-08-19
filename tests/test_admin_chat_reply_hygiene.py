@@ -228,6 +228,61 @@ class TestAdminChatResultContract:
         assert len(result.actions) >= 1
         assert any(a["tool"] == "send_message" for a in result.actions)
 
+    @pytest.mark.asyncio
+    async def test_chat_share_to_social_keeps_reply_with_tweet_url(self, monkeypatch):
+        """share_to_social posts off-Discord (X), so its chat-text reply must be
+        delivered — the admin gets the tweet URL. Regression for the silent
+        follow-up where the reply (with the link) was suppressed."""
+        monkeypatch.setattr(
+            "src.features.admin_chat.tools.TOOLS",
+            [
+                {"name": "share_to_social", "description": "Share to X", "parameters": {}},
+                {"name": "reply", "description": "Reply to the user", "parameters": {}},
+            ],
+        )
+
+        bot = SimpleNamespace(user=SimpleNamespace(id=999))
+        db = MagicMock()
+        sharer = MagicMock()
+        agent = AdminChatAgent(bot, db, sharer)
+
+        fake_client = MagicMock()
+        fake_client.generate_chat_completion = AsyncMock(
+            side_effect=[
+                _make_response(
+                    _make_tool_use_block("share_to_social", {"tweet_text": "hello world"}, "tu_1"),
+                ),
+                _make_response(
+                    _make_tool_use_block(
+                        "reply",
+                        {"message": "Posted: https://x.com/banodoco/status/2089694293707338156"},
+                        "tu_2",
+                    ),
+                ),
+            ]
+        )
+        agent.client = fake_client
+
+        def _fake_execute_tool(tool_name, **kwargs):
+            if tool_name == "share_to_social":
+                return {"success": True, "tweet_url": "https://x.com/banodoco/status/2089694293707338156"}
+            if tool_name == "reply":
+                return {"success": True, "messages": ["Posted: https://x.com/banodoco/status/2089694293707338156"]}
+            return {"success": True}
+
+        monkeypatch.setattr(
+            "src.features.admin_chat.agent.execute_tool",
+            AsyncMock(side_effect=_fake_execute_tool),
+        )
+
+        _conversations.clear()
+
+        result = await agent.chat(user_id=1, user_message="post the tweet")
+        assert isinstance(result, AdminChatResult)
+        # share_to_social must NOT suppress the chat reply (it posts to X, not Discord)
+        assert result.replies == ["Posted: https://x.com/banodoco/status/2089694293707338156"]
+        assert any(a["tool"] == "share_to_social" for a in result.actions)
+
 
 # ── T12: Cog-level live-update feedback routing/ack/fallback/audit tests ─────
 

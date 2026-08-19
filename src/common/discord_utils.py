@@ -190,65 +190,6 @@ async def refresh_media_url(
         return None
 
 
-async def refresh_and_update_message_urls(
-    bot: Union[discord.Client, commands.Bot],
-    db_handler: 'DatabaseHandler',
-    channel_id: int,
-    message_id: int,
-    logger: Optional[logging.Logger] = None
-) -> bool:
-    """
-    Refresh expired Discord media URLs and update them in the database.
-    
-    This fetches the message from Discord API to get fresh attachment URLs,
-    then updates the stored attachments in the database.
-    
-    Args:
-        bot: The Discord bot client
-        db_handler: Database handler instance
-        channel_id: The channel ID where the message is located
-        message_id: The message ID to refresh
-        logger: Optional logger instance
-        
-    Returns:
-        True if URLs were successfully refreshed and updated in DB
-    """
-    log = logger or logging.getLogger('DiscordBot')
-    
-    # Fetch fresh URLs from Discord
-    result = await refresh_media_url(bot, channel_id, message_id, logger)
-    
-    if not result or not result.get('success'):
-        return False
-    
-    fresh_attachments = result['attachments']
-    
-    if not fresh_attachments:
-        log.info(f"Message {message_id} has no attachments to refresh")
-        return True
-    
-    # Update in database
-    try:
-        message_data = {
-            'message_id': message_id,
-            'channel_id': channel_id,
-            'attachments': fresh_attachments
-        }
-        
-        success = db_handler.update_message(message_data)
-        
-        if success:
-            log.info(f"Updated {len(fresh_attachments)} attachment URL(s) in database for message {message_id}")
-        else:
-            log.error(f"Failed to update attachments in database for message {message_id}")
-        
-        return success
-        
-    except Exception as e:
-        log.error(f"Error updating message {message_id} in database: {e}", exc_info=True)
-        return False
-
-
 async def update_no_sharing_role(
     bot: Union[discord.Client, commands.Bot],
     member_id: int,

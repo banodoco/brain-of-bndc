@@ -8,7 +8,6 @@ from src.common.soul import BOT_VOICE
 
 # --- Constants for Dispute Resolution Feature ---
 DISPUTE_RESOLUTION_INITIATOR_ID = 301463647895683072
-DISPUTE_RESOLUTION_PHRASE_PATTERN = r"(?i)dispute resolution"  # Case-insensitive regex
 DISPUTE_RESOLUTION_LLM_SYSTEM_PROMPT = """Please analyze the provided messages to understand the interactions between the members. If there appears to be a disagreement, comment on how the people were relating such that it came to this point - who seemed to be instigating it, who was responding, and who could have diffused it? More importantly, suggest specific, actionable steps all involved parties could have taken, or could still take, to reach an amicable resolution. Frame your suggestions in a constructive and neutral tone. Explain it but don't be too verbose. Remind them that the community is centered around a shared passion for AI and its creative potential, and encourage them to find common ground and move forward positively.
 
 {bot_voice}"""

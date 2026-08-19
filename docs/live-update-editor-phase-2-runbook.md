@@ -18,7 +18,7 @@ enabled in production:
 |---|---:|---|
 | Publishing toggle | `TOPIC_EDITOR_PUBLISHING_ENABLED=false` | Set to `true` only for the final production publishing flip. |
 | Trace channel | `LIVE_UPDATE_TRACE_CHANNEL_ID=1316024582041243668` | Replace the dev placeholder with the production `#daily-updates` / operator trace target before the flip. |
-| Rollback selector | `LIVE_UPDATE_EDITOR_BACKEND=legacy` in local env files | Use `topic` or unset for the new editor; set `legacy` to roll back runtime selection. |
+| Rollback selector | `LIVE_UPDATE_EDITOR_BACKEND=legacy` in local env files | Deprecated — the legacy editor was removed; any value other than `topic` logs a warning and uses the topic editor. Rollback is a code rollback (see §Rollback). |
 | Bot identity | BNDC bot id `1316765722738688030` | Confirm the deployed bot identity posts both traces and live messages. |
 | Supabase project | Banodoco `ujlwuvkrxlvoswwkerdf` | Apply the staged migrations to the target environment before backfill/replay. |
 
@@ -167,53 +167,26 @@ zero-cost until a rollback is requested.
 
 ## Rollback
 
-Rollback is runtime selection plus checkpoint mirroring. Old `live_update_*`
-tables remain in place.
+The legacy editor (`live_update_editor.py` / `live_update_prompts.py`) was
+removed in the post-flip cutover; `LIVE_UPDATE_EDITOR_BACKEND=legacy` no longer
+selects anything (it logs a warning and uses the topic editor). Rollback of the
+live-update editor is now a code rollback:
 
-1. Disable new publishing:
+1. Revert the cutover commit that deleted `live_update_editor.py` /
+   `live_update_prompts.py` (and their storage wrappers), or restore from git
+   history.
+2. Restore the pre-cutover `live_update_editor_runs` /
+   `live_update_checkpoints` write path by re-running the staged legacy
+   migrations if the environment was cleaned.
+3. Disable topic-editor publishing while rolling back:
 
    ```bash
    TOPIC_EDITOR_PUBLISHING_ENABLED=false
    ```
 
-2. Mirror the topic checkpoint back to the legacy checkpoint so the legacy
-   editor does not reprocess the flip window. Prefer the application wrapper
-   `DatabaseHandler.mirror_topic_editor_checkpoint_to_live(checkpoint_key,
-   environment='prod')` when operating from code. The equivalent SQL shape is:
-
-   ```sql
-   insert into live_update_checkpoints (
-     checkpoint_key, environment, guild_id, channel_id,
-     last_message_id, last_message_created_at, last_run_id, state
-   )
-   select checkpoint_key, environment, guild_id, channel_id,
-          last_message_id, last_message_created_at, last_run_id, state
-   from topic_editor_checkpoints
-   where environment = 'prod'
-     and checkpoint_key = '<target checkpoint key>'
-   on conflict (environment, checkpoint_key) do update set
-     guild_id = excluded.guild_id,
-     channel_id = excluded.channel_id,
-     last_message_id = excluded.last_message_id,
-     last_message_created_at = excluded.last_message_created_at,
-     last_run_id = excluded.last_run_id,
-     state = excluded.state,
-     updated_at = now();
-   ```
-
-3. Select the legacy backend:
-
-   ```bash
-   LIVE_UPDATE_EDITOR_BACKEND=legacy
-   ```
-
-4. Redeploy or restart with the legacy selector.
-5. Verify the next live-update pass writes a completed row to
-   `live_update_editor_runs` and advances `live_update_checkpoints` from the
-   mirrored message id.
-6. Leave topic-editor data in place for diagnosis. Do not delete
-   `topics`, `topic_transitions`, `topic_editor_runs`, or
-   `topic_editor_checkpoints` during rollback.
+4. Redeploy. Historical `live_update_*` rows (feed items, candidates,
+   decisions, watchlist, editorial memory) remain readable for forensics and
+   are untouched by the cutover.
 
 ## Post-Flip Watch
 

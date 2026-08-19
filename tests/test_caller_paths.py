@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.features.admin_chat.tools import execute_share_to_social
+from src.features.admin_chat.tools import execute_share_to_social, execute_reply_to_tweet
 from src.features.sharing.models import PublicationSourceContext, SocialPublishRequest
 from src.features.sharing.providers.x_provider import XProvider
 from src.features.sharing.sharer import Sharer
@@ -53,6 +53,10 @@ class FakeDB:
     def get_social_publications_for_message(self, **_kwargs):
         return []
 
+    def list_social_publications(self, **kwargs):
+        self._last_list_kwargs = kwargs
+        return list(getattr(self, "_publications", []))
+
     def create_or_update_member(self, **kwargs):
         self.member_updates.append(kwargs)
         return True
@@ -70,6 +74,9 @@ class FakeSharer:
 
     async def _download_attachment(self, attachment):
         return {"local_path": "/tmp/{0}".format(attachment.id), "media_type": "image"}
+
+    async def _download_media_from_url(self, url, kind, index):
+        return {"local_path": f"/tmp/{kind}_{index}.mp4", "url": url, "filename": f"{kind}_{index}.mp4"}
 
     def _cleanup_files(self, files):
         self.cleaned.extend(files)
@@ -399,3 +406,105 @@ async def test_x_provider_passes_quote_tweet_id_to_post_tweet(monkeypatch):
     assert result["tweet_id"] == "99"
     assert captured_kwargs["quote_tweet_id"] == "2041974635487494386"
     assert captured_kwargs["in_reply_to_tweet_id"] is None
+
+
+# ── reply_to_tweet: intuitive same-thread follow-ups ──────────────────
+
+
+async def test_reply_to_tweet_explicit_url_reaches_publish_service_as_reply():
+    sharer = FakeSharer()
+
+    result = await execute_reply_to_tweet(
+        bot=None,
+        sharer=sharer,
+        params={
+            "text": "Join the community: https://discord.gg/example",
+            "tweet": "https://x.com/banodoco/status/2089691650935140492",
+        },
+        guild_id=456,
+    )
+
+    assert result["success"] is True
+    assert sharer.social_publish_service.mode == "publish_now"
+    req = sharer.social_publish_service.requests[0]
+    assert req.action == "reply"
+    assert req.target_post_ref == "2089691650935140492"
+    assert req.text == "Join the community: https://discord.gg/example"
+    # replies default to text-only so the follow-up doesn't reattach parent media
+    assert req.text_only is True
+    assert "Replied to tweet 2089691650935140492" in result["message"]
+
+
+async def test_reply_to_tweet_omitted_target_resolves_most_recent_publication():
+    sharer = FakeSharer()
+    sharer.db_handler._publications = [
+        {"provider_ref": "2089691650935140492", "status": "succeeded", "platform": "twitter"},
+    ]
+
+    result = await execute_reply_to_tweet(
+        bot=None,
+        sharer=sharer,
+        params={"text": "Workflow: https://discord.com/channels/1/2/3"},
+        guild_id=456,
+    )
+
+    assert result["success"] is True
+    req = sharer.social_publish_service.requests[0]
+    assert req.action == "reply"
+    assert req.target_post_ref == "2089691650935140492"
+    assert sharer.db_handler._last_list_kwargs["platform"] == "twitter"
+    assert sharer.db_handler._last_list_kwargs["status"] == "succeeded"
+    assert sharer.db_handler._last_list_kwargs["guild_id"] == 456
+
+
+async def test_reply_to_tweet_no_recent_publication_errors_with_guidance():
+    sharer = FakeSharer()
+    sharer.db_handler._publications = []
+
+    result = await execute_reply_to_tweet(
+        bot=None,
+        sharer=sharer,
+        params={"text": "hello"},
+        guild_id=456,
+    )
+
+    assert result["success"] is False
+    assert "No recent X post found" in result["error"]
+
+
+async def test_reply_to_tweet_invalid_target_errors():
+    sharer = FakeSharer()
+
+    result = await execute_reply_to_tweet(
+        bot=None,
+        sharer=sharer,
+        params={"text": "hello", "tweet": "not-a-tweet"},
+        guild_id=456,
+    )
+
+    assert result["success"] is False
+    assert "Tweet ID or a tweet URL" in result["error"]
+
+
+async def test_reply_to_tweet_with_media_downloads_and_posts_not_text_only():
+    sharer = FakeSharer()
+
+    result = await execute_reply_to_tweet(
+        bot=None,
+        sharer=sharer,
+        params={
+            "text": "see the montage",
+            "tweet": "123456",
+            "media_urls": ["https://cdn.discordapp.com/attachments/1/2/montage.mp4"],
+        },
+        guild_id=456,
+    )
+
+    assert result["success"] is True
+    req = sharer.social_publish_service.requests[0]
+    assert req.action == "reply"
+    assert req.target_post_ref == "123456"
+    assert req.text_only is False
+    assert len(req.media_hints) == 1
+    # downloaded temp files are cleaned up after publishing
+    assert sharer.cleaned == [req.media_hints[0]["local_path"]]

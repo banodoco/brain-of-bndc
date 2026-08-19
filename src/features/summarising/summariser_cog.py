@@ -9,19 +9,9 @@ from discord.ext import tasks
 
 from .daily_digest import daily_digest_run
 from .workflow_source_scan import run_workflow_source_scan
-from .live_update_editor import LiveUpdateEditor as LegacyLiveUpdateEditor
 from .topic_editor import TopicEditor
 from .live_top_creations import LiveTopCreations
-
-MAX_RETRIES = 3
-READY_TIMEOUT = 30
-INITIAL_RETRY_DELAY = 5
-MAX_RETRY_WAIT = 300  # 5 minutes
-
 logger = logging.getLogger('DiscordBot')
-
-LIVE_UPDATE_EDITOR_BACKEND_TOPIC = "topic"
-LIVE_UPDATE_EDITOR_BACKEND_LEGACY = "legacy"
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -85,10 +75,8 @@ class SummarizerCog(commands.Cog):
         # WORKFLOW_SOURCE_SCAN_ENABLED=false.
         self.workflow_source_scan_enabled = _env_flag("WORKFLOW_SOURCE_SCAN_ENABLED", True)
         self.live_pass_interval_minutes = _env_int("LIVE_PASS_INTERVAL_MINUTES", 60)
-        dry_run_lookback_hours = _env_int("LIVE_UPDATE_DEV_LOOKBACK_HOURS", 6)
         self.live_update_editor = live_update_editor or self._build_live_update_editor(
             db_handler,
-            dry_run_lookback_hours=dry_run_lookback_hours,
         )
         self.live_top_creations = live_top_creations or self._build_live_top_creations(db_handler)
         if start_loops:
@@ -154,23 +142,14 @@ class SummarizerCog(commands.Cog):
         except Exception as e:
             logger.warning("flush_pending_reasoning failed: %s", e, exc_info=True)
 
-    def _build_live_update_editor(self, db_handler, *, dry_run_lookback_hours: int):
-        backend = os.getenv("LIVE_UPDATE_EDITOR_BACKEND", LIVE_UPDATE_EDITOR_BACKEND_TOPIC).strip().lower()
-        environment = "dev" if self.dev_mode else "prod"
-        if backend == LIVE_UPDATE_EDITOR_BACKEND_LEGACY:
-            logger.warning("Using legacy live-update editor backend via LIVE_UPDATE_EDITOR_BACKEND=legacy")
-            return LegacyLiveUpdateEditor(
-                db_handler,
-                bot=self.bot,
-                logger_instance=getattr(self.bot, "logger", logger),
-                dry_run_lookback_hours=dry_run_lookback_hours,
-                environment=environment,
-            )
-        if backend not in {"", LIVE_UPDATE_EDITOR_BACKEND_TOPIC, "topic_editor"}:
+    def _build_live_update_editor(self, db_handler):
+        backend = os.getenv("LIVE_UPDATE_EDITOR_BACKEND", "").strip().lower()
+        if backend and backend not in {"topic", "topic_editor"}:
             logger.warning(
-                "Unknown LIVE_UPDATE_EDITOR_BACKEND=%r; defaulting to topic editor",
+                "LIVE_UPDATE_EDITOR_BACKEND=%r is no longer supported; using the topic editor",
                 backend,
             )
+        environment = "dev" if self.dev_mode else "prod"
         topic_kwargs = {
             "bot": self.bot,
             "db_handler": db_handler,

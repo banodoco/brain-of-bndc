@@ -10,8 +10,6 @@ from typing import List, Dict, Optional, Tuple # Added Tuple
 import mimetypes # For inferring content type from URL
 
 from src.common.db_handler import DatabaseHandler
-# Remove old client import
-# from src.common.claude_client import ClaudeClient 
 # Import the dispatcher
 from src.common.llm import get_llm_response
 from .subfeatures.notify_user import send_post_share_notification

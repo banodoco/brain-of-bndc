@@ -673,7 +673,12 @@ class TestToolHandlers:
         assert "draft_social_post" not in names
         assert "enqueue_social_post" not in names
         assert "publish_social_post" not in names
-        assert "get_live_update_topic" in names  # read tools retained
+        # Read tools are NOT advertised: this is a single-turn agent and their
+        # handlers cannot complete — advertising them invites the exact stall
+        # the agent kept hitting.
+        assert "get_live_update_topic" not in names
+        assert "inspect_message_media" not in names
+        assert "get_source_messages" not in names
 
     @pytest.mark.asyncio
     async def test_propose_mode_dispatch_rejects_draft_tool(self):
@@ -716,6 +721,378 @@ class TestToolHandlers:
             )
 
         assert tool_name is None
+
+    @pytest.mark.asyncio
+    async def test_parse_xml_envelope_terminal_tool_with_arguments(self):
+        """The model's XML tool envelope is parsed for terminal tools."""
+        agent = LiveUpdateSocialAgent(db_handler=MagicMock(), bot=MagicMock())
+        tool_name, params = agent._parse_tool_call(
+            "<tool_call>\n"
+            "<tool_name>draft_social_post</tool_name>\n"
+            '<arguments>{"draft_text": "Elvaxorn ships EverAnimate!"}</arguments>\n'
+            "</tool_call>"
+        )
+        assert tool_name == "draft_social_post"
+        assert params == {"draft_text": "Elvaxorn ships EverAnimate!"}
+
+    @pytest.mark.asyncio
+    async def test_parse_xml_envelope_terminal_tool_without_arguments(self):
+        """A terminal tool in an XML envelope with no <arguments> parses to {}."""
+        agent = LiveUpdateSocialAgent(db_handler=MagicMock(), bot=MagicMock())
+        tool_name, params = agent._parse_tool_call(
+            "<tool_call>\n<tool_name>request_social_review</tool_name>\n</tool_call>"
+        )
+        assert tool_name == "request_social_review"
+        assert params == {}
+
+    @pytest.mark.asyncio
+    async def test_parse_xml_envelope_read_tool_routes_to_review(self):
+        """A read-tool XML call (single-turn agent) degrades to a NAMED review,
+        never to a silently-open run."""
+        agent = LiveUpdateSocialAgent(db_handler=MagicMock(), bot=MagicMock())
+        tool_name, params = agent._parse_tool_call(
+            "<tool_call>\n"
+            "<tool_name>get_live_update_topic</tool_name>\n"
+            "</tool_call>"
+        )
+        assert tool_name == "request_social_review"
+        assert "get_live_update_topic" in params["reason"]
+
+    @pytest.mark.asyncio
+    async def test_parse_xml_envelope_read_tool_with_arguments(self):
+        """inspect_message_media with JSON arguments also degrades to review."""
+        agent = LiveUpdateSocialAgent(db_handler=MagicMock(), bot=MagicMock())
+        tool_name, params = agent._parse_tool_call(
+            "<tool_call>\n"
+            "<tool_name>inspect_message_media</tool_name>\n"
+            '<arguments>{"message_id": "1539", "channel_id": "1138"}</arguments>\n'
+            "</tool_call>"
+        )
+        assert tool_name == "request_social_review"
+        assert "inspect_message_media" in params["reason"]
+
+    @pytest.mark.asyncio
+    async def test_parse_xml_envelope_unadvertised_tool_falls_through(self):
+        """A tool name outside the mode's advertised set is not honored."""
+        from unittest.mock import patch as _patch
+        with _patch.dict(
+            "os.environ",
+            {"LIVE_UPDATE_SOCIAL_MODE": "propose"},
+            clear=False,
+        ):
+            agent = LiveUpdateSocialAgent(db_handler=MagicMock(), bot=MagicMock())
+            tool_name, _params = agent._parse_tool_call(
+                "<tool_call>\n"
+                "<tool_name>draft_social_post</tool_name>\n"
+                '<arguments>{"draft_text": "sneaky"}</arguments>\n'
+                "</tool_call>"
+            )
+        assert tool_name is None
+
+    @pytest.mark.asyncio
+    async def test_dispatch_read_tool_routes_to_named_review_json_path(self):
+        """A read tool arriving via the JSON parse path cannot stall the run:
+        dispatch degrades it to needs_review with the tool named."""
+        fake = FakeSupabase({"live_update_social_runs": []})
+        db = build_db_handler(fake)
+        run = db.upsert_live_update_social_run(
+            topic_id="t-read", platform="twitter", action="post"
+        )
+        run_state = RunState.from_row(run)
+        agent = LiveUpdateSocialAgent(db_handler=db, bot=MagicMock())
+
+        # Strict-JSON path accepts any advertised name — the dispatch gate
+        # must still refuse read tools.
+        tool_name, params = agent._parse_tool_call(
+            '{"tool": "inspect_message_media", "message_id": "1", "channel_id": "2"}'
+        )
+        assert tool_name == "inspect_message_media"
+
+        terminal = await agent._dispatch_tool(run_state, tool_name, params)
+
+        assert terminal == "needs_review"
+        fetched = db.get_live_update_social_run(run["run_id"])
+        assert fetched["terminal_status"] == "needs_review"
+        assert any(
+            "inspect_message_media" in str(entry.get("reason", ""))
+            for entry in fetched["trace_entries"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_dispatch_read_tool_routes_to_named_review_function_call_path(self):
+        """The function-call parse path (`name({...})`) is also gated."""
+        fake = FakeSupabase({"live_update_social_runs": []})
+        db = build_db_handler(fake)
+        run = db.upsert_live_update_social_run(
+            topic_id="t-read2", platform="twitter", action="post"
+        )
+        run_state = RunState.from_row(run)
+        agent = LiveUpdateSocialAgent(db_handler=db, bot=MagicMock())
+
+        tool_name, params = agent._parse_tool_call(
+            'get_live_update_topic({"topic_id": "t-read2"})'
+        )
+        assert tool_name == "get_live_update_topic"
+
+        terminal = await agent._dispatch_tool(run_state, tool_name, params)
+
+        assert terminal == "needs_review"
+        fetched = db.get_live_update_social_run(run["run_id"])
+        assert fetched["terminal_status"] == "needs_review"
+        assert any(
+            "get_live_update_topic" in str(entry.get("reason", ""))
+            for entry in fetched["trace_entries"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_parse_xml_invoke_envelope_terminal_tool_with_parameters(self):
+        """Claude-style <invoke name=…><parameter name=…> envelopes parse too."""
+        agent = LiveUpdateSocialAgent(db_handler=MagicMock(), bot=MagicMock())
+        tool_name, params = agent._parse_tool_call(
+            "<tool_calls>\n"
+            '<invoke name="skip_social_post">\n'
+            '<parameter name="reason">Not newsworthy</parameter>\n'
+            "</invoke>\n"
+            "</tool_calls>"
+        )
+        assert tool_name == "skip_social_post"
+        assert params == {"reason": "Not newsworthy"}
+
+    @pytest.mark.asyncio
+    async def test_parse_xml_invoke_envelope_read_tool_routes_to_review(self):
+        """A read tool in the <invoke> envelope degrades to a NAMED review."""
+        agent = LiveUpdateSocialAgent(db_handler=MagicMock(), bot=MagicMock())
+        tool_name, params = agent._parse_tool_call(
+            "<tool_calls>\n"
+            '<invoke name="inspect_message_media">\n'
+            '<parameter name="message_id">1539</parameter>\n'
+            "</invoke>\n"
+            "</tool_calls>"
+        )
+        assert tool_name == "request_social_review"
+        assert "inspect_message_media" in params["reason"]
+
+    @pytest.mark.asyncio
+    async def test_user_message_renders_topic_summary_blocks(self):
+        """The user message includes the topic summary content when present."""
+        from src.features.sharing.live_update_social.agent import LiveUpdateSocialAgent as _Agent
+        agent = _Agent(db_handler=MagicMock(), bot=MagicMock())
+        payload = _make_payload(
+            topic_summary_data={
+                "title": "Test Topic",
+                "summary": {
+                    "blocks": [
+                        {"text": "**yi** shared JoyAI-Echo."},
+                        {"text": "MarkDalias found it consistent."},
+                    ]
+                },
+            },
+        )
+        run_state = _make_run_state()
+        run_state.publish_units = {}
+        run_state.media_decisions = {}
+        message = agent._build_user_message(payload, run_state)
+        assert "## Topic Summary" in message
+        assert "Title: Test Topic" in message
+        assert "yi shared JoyAI-Echo. MarkDalias found it consistent." in message
+
+    @pytest.mark.asyncio
+    async def test_user_message_omits_summary_when_absent(self):
+        """No summary in the payload → no Summary line (backward compatible)."""
+        from src.features.sharing.live_update_social.agent import LiveUpdateSocialAgent as _Agent
+        agent = _Agent(db_handler=MagicMock(), bot=MagicMock())
+        payload = _make_payload(topic_summary_data={"title": "Test Topic"})
+        run_state = _make_run_state()
+        run_state.publish_units = {}
+        run_state.media_decisions = {}
+        message = agent._build_user_message(payload, run_state)
+        assert "Summary:" not in message
+
+    @pytest.mark.asyncio
+    async def test_user_message_prefetches_source_message_content(self):
+        """Source message content is pre-fetched into the prompt so the model
+        does not need a read-tool round trip."""
+        from src.features.sharing.live_update_social.agent import LiveUpdateSocialAgent as _Agent
+        db = MagicMock()
+        db.get_topic_editor_source_messages = MagicMock(return_value=[
+            {
+                "message_id": "111",
+                "author_id": 777,
+                "content": "Elvaxorn ran first tests on EverAnimate.",
+                "attachments": [{"filename": "graph.png"}],
+                "embeds": [],
+            },
+        ])
+        agent = _Agent(db_handler=db, bot=MagicMock())
+        payload = _make_payload(
+            topic_id="t-src",
+            source_metadata={
+                "cog": "test",
+                "environment": "prod",
+                "source_message_ids": ["111"],
+            },
+        )
+        run_state = _make_run_state()
+        run_state.publish_units = {}
+        run_state.media_decisions = {}
+        message = agent._build_user_message(payload, run_state)
+
+        db.get_topic_editor_source_messages.assert_called_once_with(
+            message_ids=["111"],
+            guild_id=1,
+            environment="prod",
+            limit=20,
+        )
+        assert "## Source Messages (1)" in message
+        assert "Elvaxorn ran first tests on EverAnimate." in message
+        assert "media: graph.png" in message
+
+    @pytest.mark.asyncio
+    async def test_user_message_skips_source_section_without_ids(self):
+        """No source_message_ids → no pre-fetch, no section."""
+        from src.features.sharing.live_update_social.agent import LiveUpdateSocialAgent as _Agent
+        db = MagicMock()
+        agent = _Agent(db_handler=db, bot=MagicMock())
+        payload = _make_payload(source_metadata={"cog": "test"})
+        run_state = _make_run_state()
+        run_state.publish_units = {}
+        run_state.media_decisions = {}
+        message = agent._build_user_message(payload, run_state)
+        assert "## Source Messages" not in message
+        db.get_topic_editor_source_messages.assert_not_called()
+
+
+# ── native tool calling (the real fix) ─────────────────────────────────
+
+from types import SimpleNamespace as _SN
+
+
+def _structured_response(*, tool_name=None, tool_input=None, text=""):
+    """Build an Anthropic-like response object like DeepSeekClient returns."""
+    content = []
+    if text:
+        content.append(_SN(type="text", text=text))
+    if tool_name:
+        content.append(_SN(type="tool_use", id="call_1", name=tool_name, input=tool_input or {}))
+    return _SN(content=content)
+
+
+@pytest.mark.asyncio
+async def test_extract_native_tool_call_structured():
+    """A tool_use block yields (name, parsed input, text)."""
+    from src.features.sharing.live_update_social.agent import LiveUpdateSocialAgent as _Agent
+    agent = _Agent(db_handler=MagicMock(), bot=MagicMock())
+    response = _structured_response(
+        tool_name="draft_social_post",
+        tool_input={"draft_text": "hi"},
+        text="thinking…",
+    )
+    name, params, text = agent._extract_native_tool_call(response)
+    assert name == "draft_social_post"
+    assert params == {"draft_text": "hi"}
+    assert text == "thinking…"
+
+
+@pytest.mark.asyncio
+async def test_extract_native_tool_call_text_only():
+    """No tool_use block → (None, None, text) so the fallback parser runs."""
+    from src.features.sharing.live_update_social.agent import LiveUpdateSocialAgent as _Agent
+    agent = _Agent(db_handler=MagicMock(), bot=MagicMock())
+    name, params, text = agent._extract_native_tool_call("plain string")
+    assert name is None
+    assert params is None
+    assert text == "plain string"
+    name, params, text = agent._extract_native_tool_call(_structured_response(text="prose only"))
+    assert name is None
+    assert text == "prose only"
+
+
+@pytest.mark.asyncio
+async def test_call_llm_passes_native_tools_for_deepseek():
+    """deepseek gets tools + tool_choice=required + raw_response=True."""
+    from src.common import llm as _llm_module
+    captured = {}
+    async def _fake_get_llm_response(**kwargs):
+        captured.update(kwargs)
+        return "ok"
+    from src.features.sharing.live_update_social.agent import LiveUpdateSocialAgent as _Agent
+    agent = _Agent(db_handler=MagicMock(), bot=MagicMock())
+    payload = _make_payload()
+    with patch.object(_llm_module, "get_llm_response", new=_fake_get_llm_response):
+        result = await agent._call_llm(
+            payload=payload,
+            system_prompt="s",
+            user_message="u",
+            tools=[{"name": "draft_social_post"}],
+        )
+    assert result == "ok"
+    assert captured["tools"] == [{"name": "draft_social_post"}]
+    assert captured["tool_choice"] == "auto"
+    assert captured["raw_response"] is True
+
+
+@pytest.mark.asyncio
+async def test_call_llm_skips_native_tools_for_claude():
+    """claude stays on the text path — no tools/tool_choice/raw_response."""
+    from src.common import llm as _llm_module
+    captured = {}
+    async def _fake_get_llm_response(**kwargs):
+        captured.update(kwargs)
+        return "plain"
+    from src.features.sharing.live_update_social.agent import LiveUpdateSocialAgent as _Agent
+    agent = _Agent(db_handler=MagicMock(), bot=MagicMock())
+    payload = _make_payload()
+    with (
+        patch.object(_llm_module, "get_llm_response", new=_fake_get_llm_response),
+        patch.dict(
+            "os.environ",
+            {"LIVE_UPDATE_SOCIAL_LLM_CLIENT": "claude"},
+            clear=False,
+        ),
+    ):
+        result = await agent._call_llm(
+            payload=payload,
+            system_prompt="s",
+            user_message="u",
+            tools=[{"name": "draft_social_post"}],
+        )
+    assert result == "plain"
+    assert "tools" not in captured
+    assert "tool_choice" not in captured
+    assert "raw_response" not in captured
+
+
+@pytest.mark.asyncio
+async def test_run_dispatches_structured_draft_call():
+    """A structured tool_use block flows straight into dispatch → draft."""
+    fake = FakeSupabase({"live_update_social_runs": []})
+    db = build_db_handler(fake)
+    agent = LiveUpdateSocialAgent(db_handler=db, bot=MagicMock())
+    agent._call_llm = AsyncMock(return_value=_structured_response(
+        tool_name="draft_social_post",
+        tool_input={"draft_text": "Structured draft wins."},
+    ))
+    payload = _make_payload(topic_summary_data={"title": "Test Topic"})
+
+    terminal = await agent.run(payload)
+
+    assert terminal == "draft"
+    rows = fake.tables["live_update_social_runs"]
+    assert len(rows) == 1
+    assert rows[0]["terminal_status"] == "draft"
+    assert rows[0]["draft_text"] == "Structured draft wins."
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_no_longer_invites_read_tools():
+    """The prompt must not tell the model to call read tools it can't use."""
+    from src.features.sharing.live_update_social.agent import LiveUpdateSocialAgent as _Agent
+    agent = _Agent(db_handler=MagicMock(), bot=MagicMock())
+    run_state = _make_run_state()
+    run_state.media_decisions = {}
+    prompt = agent._build_system_prompt(_make_payload(), run_state)
+    assert "read tools" not in prompt.lower()
+    assert "request additional tools" in prompt
 
     @pytest.mark.asyncio
     async def test_propose_mode_all_missed_media_forces_review(self):

@@ -7,10 +7,12 @@ handoff.  It is instantiated by SharingCog and exposed on
 
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import mimetypes
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
@@ -31,6 +33,9 @@ DM_MEDIA_FILE_LIMIT = 3
 DM_MEDIA_FILE_MAX_BYTES = 8 * 1024 * 1024
 DM_MEDIA_TOTAL_FILE_MAX_BYTES = 20 * 1024 * 1024
 DM_MEDIA_HTTP_TIMEOUT_SECONDS = 10
+# Needs-review DMs from one editorial burst are collapsed into a single
+# admin DM after this window instead of spraying N near-identical messages.
+TERMINAL_DM_BATCH_WINDOW_SECONDS = 60
 DM_REVIEW_HOW_TO = (
     'Reply to this message to edit · say **"post it"** to publish · '
     '**"skip"** to discard · **"list drafts"** to see all pending.'
@@ -55,6 +60,12 @@ class LiveUpdateSocialService:
         self._bot = bot
         self._log = logger_instance or logger
         self.social_publish_service = social_publish_service
+        # Terminal (needs_review) DM batching state — see _queue_terminal_dm.
+        # Accessors use getattr so tests constructing via object.__new__ and
+        # replaying old paths never trip on missing attributes.
+        self._terminal_batch_items: list = []
+        self._terminal_flush_task: Optional["asyncio.Task[None]"] = None
+        self._terminal_batch_window: float = TERMINAL_DM_BATCH_WINDOW_SECONDS
 
     async def handle_live_update_publish_results(
         self,
@@ -226,11 +237,12 @@ class LiveUpdateSocialService:
                             or {}
                         )
                         topic_title = self._resolve_topic_title(topic_summary_data)
-                        await self._dm_admin_with_terminal(
+                        await self._queue_terminal_dm(
                             run_id=run_id,
                             terminal_status=terminal,
                             reason=reason,
                             topic_title=topic_title,
+                            run_row=row,
                         )
                     else:
                         self._log.warning(
@@ -336,10 +348,165 @@ class LiveUpdateSocialService:
                 reason = entry.get("reason") or entry.get("error")
                 if reason:
                     return str(reason)
-            if entry.get("event") == "tool" and entry.get("error"):
-                return str(entry["error"])
+            # Tool events may carry the message under either key — the agent
+            # logs request_social_review with ``reason`` (agent.py), the
+            # discard path with ``discard_reason``, publish failures with
+            # ``error``. Read all three or the reason is silently lost.
+            if entry.get("event") == "tool":
+                tool_reason = (
+                    entry.get("reason")
+                    or entry.get("error")
+                    or entry.get("discard_reason")
+                )
+                if tool_reason:
+                    return str(tool_reason)
 
         return "No reason recorded — see run logs for details."
+
+    @staticmethod
+    def _extract_raw_response(trace_entries: list, limit: int = 400) -> str:
+        """Return the model's raw response when it failed to emit a tool call.
+
+        Surfaces *why* the agent stalled (prose, pseudo-XML, …) so the admin
+        DM is not just a generic "LLM did not produce a valid tool call."
+        """
+        if not isinstance(trace_entries, list):
+            return ""
+        for entry in trace_entries:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("event") != "no_tool_call_parsed":
+                continue
+            raw = entry.get("raw_response")
+            if not raw:
+                continue
+            text = str(raw).strip()
+            if not text:
+                continue
+            if len(text) > limit:
+                text = text[:limit].rstrip() + "…"
+            return text
+        return ""
+
+    @staticmethod
+    def _media_diagnostics_summary(source_metadata: Any) -> str:
+        """Summarize media-resolution failures from the topic publish
+        diagnostics, so a needs_review run explains *why* media was missing."""
+        if not isinstance(source_metadata, dict):
+            return ""
+        diagnostics = source_metadata.get("publish_diagnostics")
+        if not isinstance(diagnostics, dict):
+            return ""
+        parts: list[str] = []
+        for code in diagnostics.get("reason_codes") or []:
+            if code:
+                parts.append(str(code).replace("_", " "))
+        for failure in diagnostics.get("media_failures") or []:
+            if isinstance(failure, dict) and failure.get("error"):
+                parts.append(str(failure["error"]))
+        seen: list[str] = []
+        for part in parts:
+            if part and part not in seen:
+                seen.append(part)
+        if not seen:
+            return ""
+        return "; ".join(seen[:4])
+
+    @staticmethod
+    def _topic_post_link(run_row: dict) -> str:
+        """Discord link to the topic post that triggered the run, if known."""
+        source_metadata = run_row.get("source_metadata") or {}
+        link = (
+            source_metadata.get("source_link")
+            or source_metadata.get("message_link")
+        )
+        if link:
+            return str(link)
+        publish_units = run_row.get("publish_units") or {}
+        guild_id = run_row.get("guild_id")
+        channel_id = publish_units.get("channel_id")
+        message_id = publish_units.get("message_id")
+        if guild_id and channel_id and message_id:
+            return (
+                f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
+            )
+        return ""
+
+    def _topic_summary_snippet(self, run_row: dict, limit: int = 300) -> str:
+        """Best-effort short summary of the topic this run refers to."""
+        topic_id = run_row.get("topic_id")
+        if not topic_id:
+            return ""
+        try:
+            environment = (
+                (run_row.get("source_metadata") or {}).get("environment")
+                or os.getenv("ENVIRONMENT", "prod")
+            )
+            topic = self.db_handler.get_topic(topic_id, environment=environment)
+        except Exception:
+            self._log.exception(
+                "LiveUpdateSocialService: topic fetch failed for %s", topic_id
+            )
+            return ""
+        if not isinstance(topic, dict):
+            return ""
+        summary = topic.get("summary")
+        if isinstance(summary, dict):
+            snippet = (
+                summary.get("dek")
+                or summary.get("body")
+                or summary.get("headline")
+                or ""
+            )
+            if not snippet:
+                blocks = summary.get("blocks")
+                if isinstance(blocks, list):
+                    texts = []
+                    for block in blocks:
+                        if isinstance(block, dict) and block.get("text"):
+                            texts.append(str(block["text"]).strip())
+                        if len(texts) >= 2:
+                            break
+                    snippet = " ".join(texts)
+        else:
+            snippet = topic.get("headline") or ""
+        snippet = self._clean_summary_snippet(str(snippet))
+        if not snippet:
+            return ""
+        if len(snippet) > limit:
+            snippet = snippet[:limit].rstrip() + "…"
+        return snippet
+
+    @staticmethod
+    def _clean_summary_snippet(text: str) -> str:
+        """Strip the worst markdown noise from topic summary text."""
+        text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)  # [label](url) → label
+        text = re.sub(r"\[\d+(?:[-,]\d+)*\]", "", text)       # citation markers [1][2]
+        text = text.replace("**", "").replace("__", "").replace("`", "")
+        return re.sub(r"\s+", " ", text).strip()
+
+    def _terminal_context(
+        self,
+        run_row: dict,
+        *,
+        snippet_limit: int = 300,
+    ) -> list[str]:
+        """Extra context lines for a terminal DM: what the model said, media
+        diagnostics, and the topic summary — the pieces that make a bare
+        ``needs_review`` reason actually readable."""
+        lines: list[str] = []
+        raw = self._extract_raw_response(run_row.get("trace_entries") or [])
+        if raw:
+            if len(raw) > snippet_limit:
+                raw = raw[:snippet_limit].rstrip() + "…"
+            lines.append(f'Model said: "{raw}"')
+        media = self._media_diagnostics_summary(run_row.get("source_metadata"))
+        if media:
+            lines.append(f"Media: {media}")
+        summary = self._topic_summary_snippet(run_row)
+        if summary:
+            lines.append(f"Topic: {summary}")
+        return lines
 
     @staticmethod
     def _is_image_media(url: Optional[str], content_type: Optional[str] = None) -> bool:
@@ -880,18 +1047,171 @@ class LiveUpdateSocialService:
                 run_id,
             )
 
+    async def _queue_terminal_dm(
+        self,
+        run_id: str,
+        terminal_status: str,
+        reason: str,
+        topic_title: str,
+        run_row: dict,
+    ) -> None:
+        """Route a terminal run to the admin DM.
+
+        ``failed`` runs DM immediately — they are rare and each needs its
+        own reply binding for the retry path. ``needs_review`` runs are
+        batched in a short window so one editorial burst collapses into a
+        single DM with a run list instead of spraying N near-identical
+        messages.
+        """
+        if terminal_status != "needs_review":
+            await self._dm_admin_with_terminal(
+                run_id=run_id,
+                terminal_status=terminal_status,
+                reason=reason,
+                topic_title=topic_title,
+                run_row=run_row,
+            )
+            return
+
+        batch = getattr(self, "_terminal_batch_items", None)
+        if batch is None:
+            batch = []
+            self._terminal_batch_items = batch
+        batch.append({
+            "run_id": run_id,
+            "terminal_status": terminal_status,
+            "reason": reason,
+            "topic_title": topic_title,
+            "run_row": run_row,
+        })
+        task = getattr(self, "_terminal_flush_task", None)
+        if task is None or task.done():
+            self._terminal_flush_task = asyncio.create_task(
+                self._flush_terminal_batch()
+            )
+
+    async def _flush_terminal_batch(self) -> None:
+        """Wait out the batch window, then send one DM for all pending runs."""
+        try:
+            window = getattr(self, "_terminal_batch_window", 0) or 0
+            await asyncio.sleep(window)
+        finally:
+            self._terminal_flush_task = None
+        items = getattr(self, "_terminal_batch_items", None)
+        if not items:
+            return
+        self._terminal_batch_items = []
+        await self._dm_admin_with_terminal_batch(items)
+
+    async def _dm_admin_with_terminal_batch(self, items: list) -> None:
+        """Send ONE DM covering a batch of needs_review runs.
+
+        The batch message is bound (``review_message_id``) to the FIRST run
+        so an admin reply resolves to a concrete run — the reply resolution
+        is single-row.
+        """
+        if not items:
+            return
+        admin_id = os.getenv("ADMIN_USER_ID")
+        if not admin_id:
+            self._log.warning(
+                "LiveUpdateSocialService: ADMIN_USER_ID not set — "
+                "cannot DM admin for %d terminal run(s)",
+                len(items),
+            )
+            return
+
+        try:
+            user = await self._bot.fetch_user(int(admin_id))
+        except Exception:
+            self._log.exception(
+                "LiveUpdateSocialService: batch terminal DM failed — "
+                "cannot fetch admin user for %d run(s)",
+                len(items),
+            )
+            return
+
+        lines = []
+        for idx, item in enumerate(items, start=1):
+            title = item.get("topic_title") or "(untitled)"
+            reason = str(item.get("reason") or "").strip()
+            if len(reason) > 600:
+                reason = reason[:600].rstrip() + "…"
+            run_row = item.get("run_row") or {}
+            lines.append(f"**{idx}. {title}**")
+            if reason:
+                lines.append(reason)
+            link = self._topic_post_link(run_row)
+            if link:
+                lines.append(f"Source: {link}")
+            raw = self._extract_raw_response(run_row.get("trace_entries") or [])
+            if raw:
+                if len(raw) > 180:
+                    raw = raw[:180].rstrip() + "…"
+                lines.append(f'Model said: "{raw}"')
+            lines.append(f"`run_id: {item.get('run_id')}`")
+            lines.append("")
+
+        embed = discord.Embed(
+            title=f"Needs review — {len(items)} run(s)",
+            description="\n".join(lines).strip(),
+            color=0xF1C40F,
+        )
+        if len(embed.description or "") > 4000:
+            embed.description = embed.description[:4000].rstrip() + "\n…(truncated)"
+
+        run_ids = ", ".join(f"`{item.get('run_id')}`" for item in items)
+        content = (
+            f"{len(items)} runs need review — the social draft agent could not "
+            "produce a safe draft for each. Reply here to investigate or "
+            f"discard.\nrun_ids: {run_ids}"
+        )
+
+        try:
+            msg = await user.send(content=content, embed=embed)
+        except Exception:
+            self._log.exception(
+                "LiveUpdateSocialService: batch terminal DM send failed for "
+                "%d run(s)",
+                len(items),
+            )
+            return
+
+        env = os.getenv("ENVIRONMENT", "prod")
+        expires_at = (
+            datetime.now(timezone.utc) + timedelta(hours=72)
+        ).isoformat()
+        first = items[0]
+        ok = self.db_handler.update_live_update_social_run(
+            run_id=first.get("run_id"),
+            review_message_id=msg.id,
+            expires_at=expires_at,
+            environment=env,
+        )
+        if not ok:
+            self._log.error(
+                "LiveUpdateSocialService: batch terminal DM sent (msg.id=%s) "
+                "but DB write of review_message_id FAILED for run %s",
+                msg.id,
+                first.get("run_id"),
+            )
+
     async def _dm_admin_with_terminal(
         self,
         run_id: str,
         terminal_status: str,
         reason: str,
         topic_title: str,
+        run_row: Optional[dict] = None,
     ) -> None:
         """DM the admin when a run needs review or failed.
 
         Persists ``review_message_id`` so the admin-chat loop can resolve
         the run and repair it (retry publish on ``failed``, investigate on
-        ``needs_review``).
+        ``needs_review``). The embed carries the reason plus every piece of
+        context that makes it actionable: the source topic link, the model's
+        raw response (when it failed to call a tool), media diagnostics, the
+        topic summary, and the preserved draft on publish failures.
         """
         try:
             admin_id = os.getenv("ADMIN_USER_ID")
@@ -907,9 +1227,26 @@ class LiveUpdateSocialService:
 
             title = "Publish failed" if terminal_status == "failed" else "Needs review"
             color = 0xE74C3C if terminal_status == "failed" else 0xF1C40F
+
+            run_row = run_row or {}
+            parts = [str(reason or "").strip()[:3000]]
+            if terminal_status == "failed":
+                draft_text = str(run_row.get("draft_text") or "").strip()
+                if draft_text:
+                    if len(draft_text) > 1200:
+                        draft_text = draft_text[:1200].rstrip() + "…"
+                    parts.append(f"Draft:\n{draft_text}")
+            link = self._topic_post_link(run_row)
+            if link:
+                parts.append(f"Source: {link}")
+            parts.extend(self._terminal_context(run_row))
+            description = "\n".join(p for p in parts if p)
+            if len(description) > 4000:
+                description = description[:4000].rstrip() + "\n…(truncated)"
+
             embed = discord.Embed(
                 title=f"{title} — {topic_title or '(untitled)'}",
-                description=reason[:3500],
+                description=description,
                 color=color,
             )
             embed.set_footer(text=f"run {run_id}")

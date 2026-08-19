@@ -343,9 +343,6 @@ class EnrichmentFakeDB(MediaUnderstandingFakeDB):
             "last_message_id": 99,
         }
 
-    def mirror_live_checkpoint_to_topic_editor(self, checkpoint_key, environment="prod"):
-        return None
-
     def acquire_topic_editor_run(self, run, environment="prod"):
         return {"run_id": "run-1"}
 

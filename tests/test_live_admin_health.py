@@ -367,7 +367,41 @@ def test_health_check_alerts_for_draft_validation_before_publication_problems():
 
     alerts = cog._check_live_update_editor()
 
-    assert alerts == ["Topic-editor draft validation failed: draft-1"]
+    assert alerts == ["Topic-editor draft validation failed: draft-1 — card too long"]
+
+
+def test_health_check_draft_validation_detail_dedupes_and_caps():
+    cog = make_health_cog(FakeSupabase({
+        "topic_editor_runs": [
+            {
+                "run_id": "run-1",
+                "status": "completed",
+                "started_at": "2999-01-01T00:00:00+00:00",
+                "source_message_count": 2,
+                "failed_publish_count": 0,
+            }
+        ],
+        "topic_editor_drafts": [
+            {
+                "draft_id": "draft-dup",
+                "status": "needs_revision",
+                "validation_result": {
+                    "errors": [
+                        {"path": "cards[0].body", "message": "marker [5] unmapped"},
+                        {"path": "cards[1].body", "message": "marker [5] unmapped"},
+                        {"path": "cards[2].body", "message": "marker [6] unmapped"},
+                    ]
+                },
+                "updated_at": "2999-01-01T00:00:01+00:00",
+            }
+        ],
+    }))
+
+    alerts = cog._check_live_update_editor()
+
+    assert alerts == [
+        "Topic-editor draft validation failed: draft-dup — marker [5] unmapped; marker [6] unmapped"
+    ]
 
 
 def test_health_check_alerts_for_legacy_and_media_diagnostics_from_transitions():

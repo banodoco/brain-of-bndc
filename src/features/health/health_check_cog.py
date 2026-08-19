@@ -225,7 +225,43 @@ class HealthCheckCog(commands.Cog):
         return codes
 
     @staticmethod
-    def _topic_editor_alert_for_codes(codes: set[str], label: str) -> str | None:
+    def _topic_editor_validation_detail(validation_result) -> str:
+        """Short human summary of the first validation errors, if any.
+
+        The health alert otherwise says only "draft validation failed:
+        <draft_id>" with no hint of *what* failed — the errors live in
+        ``validation_result.errors`` and are surfaced here.
+        """
+        if not isinstance(validation_result, dict):
+            return ""
+        errors = validation_result.get('errors') or []
+        if not isinstance(errors, list):
+            return ""
+        messages: list[str] = []
+        seen: set[str] = set()
+        for err in errors:
+            if not isinstance(err, dict):
+                continue
+            message = err.get('message')
+            if not message:
+                continue
+            text = str(message).strip()
+            if text and text not in seen:
+                seen.add(text)
+                messages.append(text)
+            if len(messages) >= 2:
+                break
+        detail = '; '.join(messages)
+        if len(detail) > 300:
+            detail = detail[:300].rstrip() + '…'
+        return detail
+
+    @staticmethod
+    def _topic_editor_alert_for_codes(
+        codes: set[str],
+        label: str,
+        detail: str = "",
+    ) -> str | None:
         if not codes:
             return None
         priority = [
@@ -242,7 +278,10 @@ class HealthCheckCog(commands.Cog):
         ]
         for code, message in priority:
             if code in codes:
-                return f"Topic-editor {message}: {label}"
+                alert = f"Topic-editor {message}: {label}"
+                if code == 'draft_validation_failed' and detail:
+                    alert = f"{alert} — {detail}"
+                return alert
         return f"Topic-editor diagnostics present: {label} ({', '.join(sorted(codes))})"
 
     def _check_topic_editor_drafts(self, sb, cutoff: str) -> str | None:
@@ -267,6 +306,9 @@ class HealthCheckCog(commands.Cog):
             alert = self._topic_editor_alert_for_codes(
                 codes,
                 str(draft.get('draft_id') or draft.get('run_id') or 'draft'),
+                detail=self._topic_editor_validation_detail(
+                    draft.get('validation_result')
+                ),
             )
             if alert:
                 return alert
@@ -297,11 +339,16 @@ class HealthCheckCog(commands.Cog):
             if 'legacy_direct_post_used' in text:
                 codes.add('legacy_direct_post_used')
             extra = transition.get('extra') or transition.get('metadata') or {}
+            detail = ""
             if isinstance(extra, dict):
                 codes.update(self._topic_editor_diagnostic_codes(extra))
+                detail = self._topic_editor_validation_detail(
+                    extra.get('validation_result')
+                )
             alert = self._topic_editor_alert_for_codes(
                 codes,
                 str(transition.get('transition_id') or transition.get('run_id') or 'transition'),
+                detail=detail,
             )
             if alert:
                 return alert

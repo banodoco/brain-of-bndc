@@ -197,9 +197,6 @@ class TopicEditorReplayDB:
             "last_message_created_at": self.scenario.start,
         }
 
-    def mirror_live_checkpoint_to_topic_editor(self, checkpoint_key: str, environment: str = "prod") -> None:
-        raise RuntimeError("replay must not mirror live checkpoints")
-
     def acquire_topic_editor_run(self, run: Dict[str, Any], environment: str = "prod") -> Dict[str, Any]:
         run_id = f"agentic-{uuid.uuid4().hex[:12]}"
         self._record_write("db", "acquire_topic_editor_run", {"run_id": run_id, **run})

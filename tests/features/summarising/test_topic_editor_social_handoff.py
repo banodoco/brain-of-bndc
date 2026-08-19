@@ -136,6 +136,9 @@ async def test_legacy_publish_sent_fires_handoff_once():
     assert 'mainMediaMessageId' not in payload.topic_summary_data
     assert 'channel_id' in payload.topic_summary_data
     assert payload.topic_summary_data['channel_id'] == '100'
+    # The topic's actual content rides along so the social agent can draft
+    # without a read-tool round trip.
+    assert payload.topic_summary_data['summary'] == {'body': 'Legacy summary body text.'}
 
 
 @pytest.mark.asyncio
@@ -200,6 +203,8 @@ async def test_structured_publish_sent_fires_handoff_once():
     assert payload.topic_summary_data['message_id'] == '7001'
     assert payload.topic_summary_data['subTopics'] == []
     assert 'mainMediaMessageId' not in payload.topic_summary_data
+    # Blocks-shaped summaries ride along verbatim.
+    assert payload.topic_summary_data['summary'] == STRUCTURED_TOPIC['summary']
 
     # Verify source_metadata carries environment and publish_diagnostics
     assert payload.source_metadata['cog'] == 'topic_editor'
