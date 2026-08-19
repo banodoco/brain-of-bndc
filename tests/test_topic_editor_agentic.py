@@ -96,6 +96,16 @@ def test_system_prompt_includes_generation_showcase_guidance():
     assert "generation_showcase" in TOPIC_EDITOR_DRAFT_TEMPLATES
 
 
+def test_system_prompt_excludes_closed_source_news():
+    prompt = " ".join(TOPIC_EDITOR_SYSTEM_PROMPT.split())
+    assert "do not cover closed-source news" in prompt
+    assert "proprietary models, products, or services" in prompt
+    # Community artifacts wrapping a closed product stay in scope when the
+    # story is the community work itself.
+    assert "Community artifacts that build on or wrap a closed product" in prompt
+    assert "never on the closed product's own news" in prompt
+
+
 def test_replay_writes_pack_and_assessment_passes(tmp_path):
     out = tmp_path / "pack"
     summary = asyncio.run(replay_topic_editor_scenario(SCENARIO, out, mock_actor=True))

@@ -1,7 +1,7 @@
 import asyncio
 import os
 import tempfile
-from datetime import date
+from datetime import date, datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -2121,6 +2121,85 @@ class TestDraftTerminality:
         assert not TopicEditor._draft_is_terminal("needs_revision")
         assert not TopicEditor._draft_is_terminal("valid")
         assert not TopicEditor._draft_is_terminal("blocked_for_submit")
+
+
+class TestRecoverStaleDraftAgeGuard:
+    """TOPIC_EDITOR_RECOVERY_MAX_AGE_HOURS guard: stale drafts go to the
+    human-review backlog, never re-exposed as fresh news."""
+
+    def _make_editor(self, rows):
+        calls = {"update": [], "claim": [], "transitions": []}
+
+        class FakeDB:
+            def get_recent_topic_editor_drafts(self, **kwargs):
+                return rows
+
+            def update_topic_editor_draft(self, draft_id, updates, guild_id=None, environment="prod"):
+                calls["update"].append((draft_id, updates))
+
+            def claim_topic_editor_draft(self, draft_id, run_id, statuses, guild_id=None, environment="prod"):
+                calls["claim"].append(draft_id)
+                return dict(rows[0]) if rows else None
+
+        editor = TopicEditor.__new__(TopicEditor)
+        editor.environment = "prod"
+        editor.model = "test-model"
+        editor.topic_editor_drafts = {}
+        editor.db = FakeDB()
+
+        def record_transition(transition):
+            calls["transitions"].append(transition)
+            return transition
+
+        editor._store_transition = record_transition
+        return editor, calls
+
+    def test_stale_draft_routed_to_review_not_claimed(self):
+        editor, calls = self._make_editor([
+            {
+                "draft_id": "d-old",
+                "status": "valid",
+                "created_at": "2026-06-19T17:23:15.169217+00:00",
+                "recovery_count": 0,
+            }
+        ])
+        result = editor._recover_stale_drafts(run_id="r1", guild_id=1)
+        assert result == []
+        assert calls["claim"] == []
+        assert calls["update"] == [
+            ("d-old", {"status": "needs_review", "needs_review_reason": "stale_content_exceeds_max_age"})
+        ]
+        assert calls["transitions"][0]["action"] == "draft_needs_review"
+        assert calls["transitions"][0]["reason"] == "stale_content_exceeds_max_age"
+
+    def test_fresh_draft_still_claimed(self):
+        editor, calls = self._make_editor([
+            {
+                "draft_id": "d-new",
+                "status": "valid",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "recovery_count": 0,
+            }
+        ])
+        result = editor._recover_stale_drafts(run_id="r1", guild_id=1)
+        assert calls["claim"] == ["d-new"]
+        assert calls["update"] == []
+        assert len(result) == 1
+        assert result[0]["draft_id"] == "d-new"
+
+    def test_unparseable_created_at_does_not_block_recovery(self):
+        editor, calls = self._make_editor([
+            {
+                "draft_id": "d-weird",
+                "status": "valid",
+                "created_at": "not-a-timestamp",
+                "recovery_count": 0,
+            }
+        ])
+        result = editor._recover_stale_drafts(run_id="r1", guild_id=1)
+        assert calls["claim"] == ["d-weird"]
+        assert calls["update"] == []
+        assert len(result) == 1
 
 
 class TestNonterminalDraftSummary:

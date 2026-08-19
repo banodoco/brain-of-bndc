@@ -84,6 +84,15 @@ Your job is not to summarize the whole window. Curate a small public update:
 short, source-backed, visual when possible, and split into a few focused cards.
 Leave material out when it is weaker than the best two or three angles.
 
+Scope rule: do not cover closed-source news — announcements, releases,
+roadmaps, benchmarks, pricing, or company drama about proprietary models,
+products, or services (model drops from closed labs, cloud-provider product
+news, closed SaaS releases, and the like). The update covers open-source
+tools, models, workflows, and community-built work. Community artifacts that
+build on or wrap a closed product stay in scope only when the story is the
+community work itself: center the card on what the community made or learned,
+never on the closed product's own news.
+
 Use the workflow in order:
 
 1. Research: inspect the supplied source messages, `evidence_shelf`, active
@@ -2096,6 +2105,56 @@ class TopicEditor:
                 continue
             prior_status = str(row.get("status") or "drafting")
             recovery_count = int(row.get("recovery_count") or 0)
+
+            # Staleness guard: never auto-publish content older than the max age.
+            # A draft stranded by a long editor outage would otherwise be re-exposed
+            # and published as if it were fresh news (the June-2026 backlog drained
+            # into #live_updates this way when recovery first shipped). Route stale
+            # drafts to the durable human-review backlog instead.
+            max_age_hours = self._env_int("TOPIC_EDITOR_RECOVERY_MAX_AGE_HOURS", 48)
+            if max_age_hours > 0:
+                created_ts = None
+                raw_created = row.get("created_at")
+                if isinstance(raw_created, datetime):
+                    created_ts = raw_created
+                elif isinstance(raw_created, str):
+                    try:
+                        created_ts = datetime.fromisoformat(raw_created)
+                        if created_ts.tzinfo is None:
+                            created_ts = created_ts.replace(tzinfo=timezone.utc)
+                    except ValueError:
+                        created_ts = None
+                if created_ts is not None and created_ts < datetime.now(timezone.utc) - timedelta(hours=max_age_hours):
+                    try:
+                        self.db.update_topic_editor_draft(
+                            draft_id,
+                            {"status": "needs_review", "needs_review_reason": "stale_content_exceeds_max_age"},
+                            guild_id=guild_id,
+                            environment=self.environment,
+                        )
+                    except Exception as exc:
+                        logger.error("TopicEditor stale-draft persist failed: draft_id=%s error=%s", draft_id, exc)
+                    try:
+                        self._store_transition({
+                            "run_id": run_id,
+                            "guild_id": guild_id,
+                            "action": "draft_needs_review",
+                            "reason": "stale_content_exceeds_max_age",
+                            "payload": shape_transition_payload(
+                                outcome="rejected",
+                                tool_name="recover_draft",
+                                extra={"draft_id": draft_id, "prior_status": prior_status, "recovery_count": recovery_count},
+                            ),
+                            "model": self.model,
+                        })
+                    except Exception as exc:
+                        logger.error("TopicEditor stale-draft transition failed: %s", exc)
+                    logger.info(
+                        "TopicEditor routed stale draft to review: run_id=%s draft_id=%s created_at=%s max_age_hours=%s",
+                        run_id, draft_id, row.get("created_at"), max_age_hours,
+                    )
+                    continue
+
             if recovery_count >= max_claims:
                 # Deterministic escape for genuinely-unpublishable drafts: move to a
                 # durable human-review backlog instead of surfacing forever.
