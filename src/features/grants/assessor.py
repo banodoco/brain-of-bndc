@@ -2,10 +2,12 @@
 
 import json
 import logging
+import os
 from typing import Optional
 
 from src.features.grants.pricing import GPU_RATES, MAX_GRANT_USD, calculate_grant_cost
 from src.common.soul import BOT_VOICE
+from src.common.llm import get_llm_response
 
 logger = logging.getLogger('DiscordBot')
 
@@ -34,6 +36,28 @@ def _fill_prompt_template(prompt: str, gpu_info: str) -> str:
         .replace('{{', '{')
         .replace('}}', '}')
     )
+
+
+def _grants_llm_config() -> tuple[str, str]:
+    """Resolve the LLM provider used for grant reviews.
+
+    GRANTS_LLM_CLIENT: one of claude | deepseek | openai | gemini (default claude).
+    GRANTS_LLM_MODEL: model name; defaults per client when unset.
+
+    Routing through the central dispatcher (src.common.llm.get_llm_response)
+    means grants keep working if a provider's key lapses — flip the env vars
+    instead of editing code.
+    """
+    client = os.getenv('GRANTS_LLM_CLIENT', 'claude').strip().lower()
+    model = os.getenv('GRANTS_LLM_MODEL', '').strip()
+    if not model:
+        model = {
+            'claude': 'claude-sonnet-4-5-20250929',
+            'deepseek': 'deepseek-v4-flash',
+            'openai': 'gpt-4o-mini',
+            'gemini': 'gemini-2.0-flash',
+        }.get(client, 'claude-sonnet-4-5-20250929')
+    return client, model
 
 SYSTEM_PROMPT = """You are a grant reviewer for compute micro-grants (10-50 GPU hours) for open-source AI projects.
 
@@ -161,7 +185,7 @@ def _build_admin_review_prompt(server_config=None, guild_id: Optional[int] = Non
     return _fill_prompt_template(prompt, gpu_info)
 
 
-async def interpret_admin_decision(claude_client, thread_content: str, admin_message: str,
+async def interpret_admin_decision(thread_content: str, admin_message: str,
                                    llm_recommendation: dict | None = None,
                                    guild_id: Optional[int] = None,
                                    server_config=None) -> dict:
@@ -174,6 +198,7 @@ async def interpret_admin_decision(claude_client, thread_content: str, admin_mes
         RuntimeError if all attempts fail
     """
     system_prompt = _build_admin_review_prompt(server_config=server_config, guild_id=guild_id)
+    client_name, model = _grants_llm_config()
 
     user_content = f"## Original Application\n\n{thread_content}"
 
@@ -194,12 +219,19 @@ async def interpret_admin_decision(claude_client, thread_content: str, admin_mes
     last_error = None
 
     for attempt in range(max_attempts):
-        response_text = await claude_client.generate_chat_completion(
-            model='claude-sonnet-4-20250514',
+        call_kwargs = {'max_tokens': 1024, 'temperature': 0.2}
+        if client_name == 'deepseek':
+            # Structured output: DeepSeek reasoning can burn the whole token
+            # budget and return no final text. Disable it and request JSON mode
+            # so the response is deterministic.
+            call_kwargs['thinking_enabled'] = False
+            call_kwargs['response_format'] = {'type': 'json_object'}
+        response_text = await get_llm_response(
+            client_name,
+            model,
             system_prompt=system_prompt,
             messages=messages,
-            max_tokens=1024,
-            temperature=0.2,
+            **call_kwargs,
         )
 
         try:
@@ -226,11 +258,11 @@ async def interpret_admin_decision(claude_client, thread_content: str, admin_mes
     raise RuntimeError(f"Admin review interpretation failed after {max_attempts} attempts. Last error: {last_error}")
 
 
-async def assess_application(claude_client, thread_content: str, grant_history: list | None = None,
+async def assess_application(thread_content: str, grant_history: list | None = None,
                              engagement: dict | None = None,
                              guild_id: Optional[int] = None,
                              server_config=None) -> dict:
-    """Assess a grant application using Claude with structured output and retry.
+    """Assess a grant application using the configured LLM with structured output and retry.
 
     Returns:
         dict with keys: reasoning, decision, response, gpu_type, recommended_hours
@@ -239,6 +271,7 @@ async def assess_application(claude_client, thread_content: str, grant_history: 
         RuntimeError if all attempts fail
     """
     system_prompt = _build_system_prompt(server_config=server_config, guild_id=guild_id)
+    client_name, model = _grants_llm_config()
 
     user_content = f'Please review this grant application:\n\n{thread_content}'
 
@@ -275,12 +308,19 @@ async def assess_application(claude_client, thread_content: str, grant_history: 
     last_error = None
 
     for attempt in range(max_attempts):
-        response_text = await claude_client.generate_chat_completion(
-            model='claude-sonnet-4-20250514',
+        call_kwargs = {'max_tokens': 1024, 'temperature': 0.3}
+        if client_name == 'deepseek':
+            # Structured output: DeepSeek reasoning can burn the whole token
+            # budget and return no final text. Disable it and request JSON mode
+            # so the response is deterministic.
+            call_kwargs['thinking_enabled'] = False
+            call_kwargs['response_format'] = {'type': 'json_object'}
+        response_text = await get_llm_response(
+            client_name,
+            model,
             system_prompt=system_prompt,
             messages=messages,
-            max_tokens=1024,
-            temperature=0.3,
+            **call_kwargs,
         )
 
         # Try to parse

@@ -51,6 +51,11 @@ class DeepSeekClient(BaseLLMClient):
         if tool_choice is not None:
             params["tool_choice"] = tool_choice
 
+        response_format = kwargs.get("response_format")
+        if response_format is not None and not tools:
+            # JSON mode for structured outputs; not combined with tool calls.
+            params["response_format"] = response_format
+
         max_tokens = kwargs.get("max_tokens") or kwargs.get("max_completion_tokens")
         if max_tokens is not None:
             params["max_tokens"] = max_tokens

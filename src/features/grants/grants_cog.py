@@ -157,7 +157,7 @@ class GrantsCog(commands.Cog):
                 pass
 
         assessment = await interpret_admin_decision(
-            self.claude_client, thread_content, admin_message,
+            thread_content, admin_message,
             llm_recommendation=llm_recommendation,
             guild_id=getattr(thread.guild, 'id', None),
             server_config=getattr(self.db, 'server_config', None),
@@ -331,7 +331,7 @@ class GrantsCog(commands.Cog):
         # Assess with LLM
         try:
             assessment = await assess_application(
-                self.claude_client, thread_content,
+                thread_content,
                 grant_history=grant_history or None,
                 engagement=engagement,
                 guild_id=getattr(thread.guild, 'id', None),
@@ -340,6 +340,9 @@ class GrantsCog(commands.Cog):
         except RuntimeError as e:
             logger.error(f"GrantsCog: assessment failed for thread {thread_id}: {e}")
             await thread.send(f"Unable to process this application right now. {self._admin_mention} will review it manually.")
+            # Don't strand the thread in 'reviewing': flag it needs_review so an
+            # admin reply can drive the decision once the LLM path recovers.
+            self.db.update_grant_status(thread_id, guild_id=thread.guild.id, status='needs_review')
             return
 
         await self._handle_assessment(thread, assessment)
@@ -369,7 +372,7 @@ class GrantsCog(commands.Cog):
 
         try:
             assessment = await assess_application(
-                self.claude_client, thread_content,
+                thread_content,
                 grant_history=grant_history or None,
                 engagement=engagement,
                 guild_id=getattr(thread.guild, 'id', None),
