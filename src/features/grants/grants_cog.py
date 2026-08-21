@@ -7,11 +7,11 @@ import os
 from typing import Any, Dict, Optional
 
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 from src.common.db_handler import WalletUpdateBlockedError
 from src.features.grants.assessor import assess_application, interpret_admin_decision
-from src.features.grants.pricing import GPU_RATES, calculate_grant_cost
+from src.features.grants.pricing import GPU_RATES, calculate_grant_cost, refresh_grant_prices
 from src.features.grants.solana_client import is_valid_solana_address
 from src.features.payments.payment_service import PaymentActor, PaymentActorKind
 
@@ -53,15 +53,38 @@ class GrantsCog(commands.Cog):
         # In-memory guard against concurrent processing of the same thread
         self._processing_threads: set[int] = set()
 
+        # Price refresh agent: keeps GPU market rates (and the SOL price cache)
+        # current so grants are priced at today's market, not static defaults.
+        # First run fires immediately at startup; interval from env (hours).
+        try:
+            refresh_hours = max(float(os.getenv('GRANTS_PRICE_REFRESH_HOURS', '24')), 1.0)
+        except ValueError:
+            refresh_hours = 24.0
+        self._price_refresh_loop.change_interval(hours=refresh_hours)
+        self._price_refresh_hours = refresh_hours
+
     @property
     def _admin_mention(self) -> str:
         return f"<@{self.admin_id}>" if self.admin_id else "@admin"
 
     # ========== Startup Scan ==========
 
+    @tasks.loop(hours=24)
+    async def _price_refresh_loop(self):
+        """Periodically refresh GPU market rates + SOL price for grants."""
+        await refresh_grant_prices()
+
+    @_price_refresh_loop.before_loop
+    async def _before_price_refresh(self):
+        await self.bot.wait_until_ready()
+
+    @_price_refresh_loop.error
+    async def _price_refresh_error(self, exc):
+        logger.error(f"GrantsCog: price refresh loop error: {exc}", exc_info=True)
+
     @commands.Cog.listener()
     async def on_ready(self):
-        """Load forum tags and scan for unprocessed threads."""
+        """Load forum tags, scan for unprocessed threads, start price refresh."""
         if not self.configured:
             return
         try:
@@ -69,6 +92,12 @@ class GrantsCog(commands.Cog):
             await self._scan_missed_threads()
         except Exception as e:
             logger.error(f"GrantsCog: startup failed: {e}", exc_info=True)
+        finally:
+            if not self._price_refresh_loop.is_running():
+                self._price_refresh_loop.start()
+                logger.info(
+                    f"GrantsCog: price refresh loop started (every {self._price_refresh_hours}h)"
+                )
 
     async def _load_forum_tags(self):
         """Cache forum tags by name for applying to threads."""

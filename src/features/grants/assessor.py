@@ -5,7 +5,7 @@ import logging
 import os
 from typing import Optional
 
-from src.features.grants.pricing import GPU_RATES, MAX_GRANT_USD, calculate_grant_cost
+from src.features.grants.pricing import GPU_RATES, calculate_grant_cost, max_grant_usd
 from src.common.soul import BOT_VOICE
 from src.common.llm import get_llm_response
 
@@ -32,7 +32,7 @@ def _fill_prompt_template(prompt: str, gpu_info: str) -> str:
         prompt
         .replace('{bot_voice}', BOT_VOICE)
         .replace('{gpu_info}', gpu_info)
-        .replace('{max_grant_usd:.0f}', f'{MAX_GRANT_USD:.0f}')
+        .replace('{max_grant_usd:.0f}', f'{max_grant_usd():.0f}')
         .replace('{{', '{')
         .replace('}}', '}')
     )
@@ -143,8 +143,9 @@ def _validate(result: dict) -> str | None:
         if not hours or not isinstance(hours, (int, float)) or not (10 <= hours <= 50):
             return f"Invalid recommended_hours: {hours}. Must be a number between 10 and 50"
         cost = calculate_grant_cost(result['gpu_type'], hours)
-        if cost > MAX_GRANT_USD:
-            return f"Grant cost ${cost:.2f} exceeds max ${MAX_GRANT_USD:.2f}. Reduce hours or pick a cheaper GPU"
+        cap = max_grant_usd()
+        if cost > cap:
+            return f"Grant cost ${cost:.2f} exceeds max ${cap:.2f}. Reduce hours or pick a cheaper GPU"
 
     return None
 
