@@ -10,7 +10,11 @@ import discord
 from discord.ext import commands, tasks
 
 from src.common.db_handler import WalletUpdateBlockedError
-from src.features.grants.assessor import assess_application, interpret_admin_decision
+from src.features.grants.assessor import (
+    assess_application,
+    interpret_admin_decision,
+    is_application_content_sufficient,
+)
 from src.features.grants.pricing import GPU_RATES, calculate_grant_cost, refresh_grant_prices
 from src.features.grants.solana_client import is_valid_solana_address
 from src.features.payments.payment_service import PaymentActor, PaymentActorKind
@@ -342,6 +346,28 @@ class GrantsCog(commands.Cog):
                     raise
         thread_content = f"**{thread.name}**\n\n{starter_message.content}"
 
+        # Transcribe image attachments so the reviewer reads the actual
+        # application (e.g. writeups pasted as screenshots), not just the title.
+        transcriptions = await self._transcribe_attachments(starter_message.attachments)
+        for item in transcriptions:
+            thread_content += f"\n\n## Attachment transcription ({item['filename']})\n{item['text']}"
+
+        # Gate: never ask the reviewer to adjudicate a title-only / empty
+        # application — it fabricates content when it does. needs_info is the
+        # agent-free process answer; the reviewer only sees real applications.
+        sufficient, reason = is_application_content_sufficient(thread.name, starter_message.content)
+        if not sufficient:
+            self.db.create_grant_application(
+                thread_id, applicant_id, thread_content,
+                attachment_urls=[], guild_id=thread.guild.id,
+            )
+            self.db.update_grant_status(thread_id, guild_id=thread.guild.id, status='needs_info')
+            await thread.send(
+                f"<@{applicant_id}> **More information needed**\n\n{reason}\n\n"
+                f"Please reply here with your writeup as text and I'll review it."
+            )
+            return
+
         # Upload attachments to Supabase storage
         attachment_urls = await self._upload_attachments(thread_id, starter_message)
 
@@ -437,6 +463,46 @@ class GrantsCog(commands.Cog):
                         logger.info(f"GrantsCog: backfilled {len(urls)} attachment(s) for thread {thread.id}")
         except Exception as e:
             logger.warning(f"GrantsCog: backfill failed for thread {thread.id}: {e}")
+
+    async def _transcribe_attachments(self, attachments) -> list:
+        """OCR image attachments into text for the reviewer (Gemini vision).
+
+        Grant writeups are often pasted as screenshots; the reviewer must read
+        the actual application, not infer it from the thread title. Returns a
+        list of {'filename', 'text'} for readable images; failures are skipped
+        (the content gate catches applications with no readable text at all).
+        """
+        if not attachments:
+            return []
+        try:
+            from src.features.sharing.live_update_social.media_understanding import understand_image
+        except Exception as e:
+            logger.warning(f"GrantsCog: media understanding unavailable, skipping attachment transcription: {e}")
+            return []
+
+        transcribed = []
+        for att in attachments:
+            if not (att.content_type or '').startswith('image/'):
+                continue
+            try:
+                result = await understand_image(
+                    att.url,
+                    prompt=(
+                        "This image is part of a community micro-grant application. "
+                        "Transcribe ALL text in it verbatim. Then summarize key "
+                        "details about the project, compute needs, links, or prior "
+                        "work. If there is no text, say 'No text in image'."
+                    ),
+                )
+            except Exception as e:
+                logger.warning(f"GrantsCog: transcription failed for {att.filename}: {e}")
+                continue
+            if result.ok and result.data and result.data.get('description'):
+                transcribed.append({'filename': att.filename, 'text': result.data['description']})
+                logger.info(f"GrantsCog: transcribed attachment {att.filename} for thread review")
+            else:
+                logger.warning(f"GrantsCog: transcription empty for {att.filename}: {getattr(result, 'error', 'unknown')}")
+        return transcribed
 
     async def _upload_attachments(self, thread_id: int, message: discord.Message) -> list:
         """Download message attachments and upload to Supabase storage.

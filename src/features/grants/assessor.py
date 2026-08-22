@@ -59,21 +59,64 @@ def _grants_llm_config() -> tuple[str, str]:
         }.get(client, 'claude-sonnet-4-5-20250929')
     return client, model
 
+
+def first_timer_max_hours() -> int:
+    """Hour cap for first-time applicants ('start small' rule). Env-tunable."""
+    try:
+        return max(int(os.getenv('GRANTS_FIRST_TIMER_MAX_HOURS', '10')), 1)
+    except ValueError:
+        return 10
+
+
+def min_application_chars() -> int:
+    """Minimum readable body length before an application can be reviewed."""
+    try:
+        return max(int(os.getenv('GRANTS_MIN_APPLICATION_CHARS', '120')), 20)
+    except ValueError:
+        return 120
+
+
+def is_application_content_sufficient(thread_name: str, body: str) -> tuple[bool, str]:
+    """Gate: is there enough real application text to adjudicate?
+
+    A title alone (or an empty/near-empty body — e.g. a writeup pasted as a
+    screenshot) is not an application. The reviewer LLM must never be asked to
+    infer a project from the thread title; it fabricates when it does.
+
+    Returns (ok, reason). When not ok, the caller should send ``needs_info``
+    WITHOUT calling the LLM.
+    """
+    body_text = (body or '').strip()
+    minimum = min_application_chars()
+    if len(body_text) < minimum:
+        return False, (
+            f"Your application body is missing or too short to review "
+            f"({len(body_text)}/{minimum} characters). Please paste your full "
+            "writeup as plain text in this thread — screenshots alone can't be "
+            "reviewed. Include: what the project does, what the GPU hours are "
+            "for, and links to prior work (repos, demos, papers)."
+        )
+    return True, ''
+
 SYSTEM_PROMPT = """You are a grant reviewer for compute micro-grants (10-50 GPU hours) for open-source AI projects.
 
 You review applications and decide whether to approve, reject, or request more information.
 
 {bot_voice}
 
-## Required Application Info
+## Required Application Info — these are HARD requirements
 - Project description: what the project does
 - Compute purpose: what the GPU hours will be used for (training, fine-tuning, inference, etc.)
-- Links to prior work: GitHub repos, papers, demos, or other evidence of capability
+- Links to prior work: GitHub repos, papers, demos, or other evidence of capability. A GitHub *profile page* is not a prior-work link — a specific repo, paper, gist, or demo URL is.
+
+An application missing any of these MUST get "needs_info" asking for the missing pieces — never "approved". A title alone is not an application: never infer project content from the thread title, and never write the application the applicant failed to write. If the body text is empty or near-empty, return "needs_info".
 
 ## Approval Criteria
+- Evidence over assertion: benchmark numbers, "it works", speedups, or trained models are CLAIMS, not evidence, unless a linked artifact (repo, gist, benchmark log, demo, paper) supports them. Ignore unverifiable claims — do not treat them as demonstrated. Self-reported results without a linked artifact cannot support an approval.
 - Project must be open-source (or commit to open-sourcing results)
 - Reasonable scope: 10-50 GPU hours should meaningfully advance the project
-- Merit and reputation: evaluate their public contributions, previous work in the space, and ability to clearly articulate training goals. If they're new, they should start small.
+- First-time applicants (no paid grant in their history) START SMALL: recommended_hours is capped at 10. Default to 10, not a middle value. If a first-timer's request genuinely needs more than the cap, return "needs_review" (with your recommendation) instead of approving above it — a human admin decides.
+- Merit and reputation: evaluate their public contributions, previous work in the space, and ability to clearly articulate training goals. A new or anonymous account with no verifiable prior work and no linked evidence is a "needs_info" or "needs_review" case, never an auto-approval.
 - Community benefit: project serves the broader AI/ML community
 
 ## Available GPU Types and Rates
@@ -88,10 +131,12 @@ If they don't specify, choose based on project needs.
 If the applicant has received grants before, this will be noted below the application.
 Be VERY hesitant to approve someone who already has an open/active grant (status: reviewing, awaiting_wallet, payment_requested).
 For applicants with past paid grants, apply higher scrutiny — they should demonstrate clear results from previous grants before receiving more.
-First-time applicants with no history should be evaluated normally.
 
 ## Discord Engagement
-The applicant's Discord activity will be provided below the application. This shows their total message count in our server and their most recent substantive messages. Use this to gauge whether they are an active community member or a drive-by applicant. Low engagement doesn't automatically disqualify, but it should raise scrutiny.
+The applicant's Discord activity will be provided below the application. This shows their total message count in our server and their most recent substantive messages. Low engagement does not automatically disqualify, but it RAISES scrutiny and must not be offset by missing evidence. Message count is not demonstrated community standing or merit — especially when the messages are inside the applicant's own application thread.
+
+## Manual Review Triggers (needs_review)
+Use "needs_review" to flag a human admin when: the applicant is new/unknown and requesting more than the first-timer cap, claims are consequential but unverifiable, the request is unusual, or you would hesitate to auto-approve with real money. A "needs_review" verdict with a recommendation is a safe default; auto-approval is not.
 
 ## Response Format
 Return ONLY valid JSON (no markdown, no code fences) with these exact fields:
@@ -126,8 +171,14 @@ def _parse_json(text: str) -> dict:
     return json.loads(cleaned)
 
 
-def _validate(result: dict) -> str | None:
-    """Validate assessment structure. Returns error string or None if valid."""
+def _validate(result: dict, first_grant: bool = False) -> str | None:
+    """Validate assessment structure. Returns error string or None if valid.
+
+    ``first_grant`` (no paid grants in the applicant's history) enforces the
+    'start small' rule mechanically: approved hours are capped at
+    first_timer_max_hours(). The LLM loop feeds the error back so the agent
+    adjusts — the agent still makes the decision, within the bound.
+    """
     required = ['reasoning', 'decision', 'response']
     for field in required:
         if field not in result or not isinstance(result[field], str) or not result[field].strip():
@@ -142,6 +193,13 @@ def _validate(result: dict) -> str | None:
         hours = result.get('recommended_hours')
         if not hours or not isinstance(hours, (int, float)) or not (10 <= hours <= 50):
             return f"Invalid recommended_hours: {hours}. Must be a number between 10 and 50"
+        if first_grant and hours > first_timer_max_hours():
+            return (
+                f"First-time applicants (no paid grant history) are capped at "
+                f"{first_timer_max_hours()} hours (start small). Reduce recommended_hours "
+                f"to at most {first_timer_max_hours()}, or return decision 'needs_review' "
+                f"with your recommendation if the project genuinely needs more."
+            )
         cost = calculate_grant_cost(result['gpu_type'], hours)
         cap = max_grant_usd()
         if cost > cap:
@@ -169,7 +227,7 @@ Maximum grant: ${max_grant_usd:.0f} USD.
 - If the admin approves (e.g. "looks good", "approve", "yes", "give them $50"), return decision "approved" with appropriate gpu_type and recommended_hours.
 - If the admin specifies a dollar amount (e.g. "$50", "give them 50 bucks"), pick the cheapest GPU and calculate the hours that fit within that budget (including the 10% fee). Round hours to nearest whole number.
 - If the admin specifies GPU and/or hours, use those.
-- If the admin approves without specifics, use the original LLM recommendation if one was provided.
+- If the admin approves without specifics, use the original LLM recommendation if one was provided. For first-time applicants that recommendation is capped at 10 hours — honour it unless the admin explicitly approves more.
 - If the admin rejects (e.g. "no", "reject", "not enough detail"), return decision "rejected".
 - If the admin asks a question or their intent is unclear, return decision "needs_review" — this keeps the thread open for further discussion.
 - The "response" field is the message shown to the applicant. For approvals, be congratulatory. For rejections, be constructive. For needs_review, explain that the review is still in progress.
@@ -307,6 +365,7 @@ async def assess_application(thread_content: str, grant_history: list | None = N
 
     max_attempts = 3
     last_error = None
+    first_grant = not any(g.get('status') == 'paid' for g in (grant_history or []))
 
     for attempt in range(max_attempts):
         call_kwargs = {'max_tokens': 1024, 'temperature': 0.3}
@@ -336,7 +395,7 @@ async def assess_application(thread_content: str, grant_history: list | None = N
             continue
 
         # Validate structure
-        validation_error = _validate(result)
+        validation_error = _validate(result, first_grant=first_grant)
         if validation_error:
             last_error = validation_error
             logger.warning(f"Grant assessor attempt {attempt + 1}: {last_error}")
