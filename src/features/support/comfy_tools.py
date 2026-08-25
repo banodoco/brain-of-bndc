@@ -319,6 +319,12 @@ async def execute_comfy_workflow(tool_input: Dict[str, Any], bot: Optional[Any] 
             f"{len(applied)} edit(s) applied: " + '; '.join(applied)
             + '. ' + '\n'.join(_validation_lines(report))
         )
+        nudge = (
+            "REMINDER for your reply: the fixed workflow is attached above as "
+            "edited_workflow_<timestamp>.json — tell the member to download it and "
+            "open it in ComfyUI (or drag it onto the canvas). If they want more "
+            "changes, they can attach the .json again in their next message."
+        )
 
         # Primary delivery: ALWAYS attach the edited .json to the thread so
         # the member gets a downloadable file, regardless of size.
@@ -328,7 +334,7 @@ async def execute_comfy_workflow(tool_input: Dict[str, Any], bot: Optional[Any] 
                 return {
                     "success": True,
                     "posted_as_file": True,
-                    "summary": summary,
+                    "summary": summary + ' ' + nudge,
                     "preview": workflow_json[:PREVIEW_CHARS],
                 }
 
