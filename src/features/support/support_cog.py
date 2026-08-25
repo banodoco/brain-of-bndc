@@ -17,11 +17,32 @@ from typing import Any, Dict, List, Optional
 import discord
 from discord.ext import commands
 
+from src.common.llm.deepseek_client import DeepSeekClient
 from src.features.admin_chat.agent import AdminChatAgent
 
 logger = logging.getLogger('DiscordBot')
 
 SUPPORT_CHANNEL_ID_DEFAULT = "1163250319107555388"
+
+# Support turns run on Ox Alpha via OpenRouter (OpenAI-compatible endpoint).
+# Override the slug with SUPPORT_AGENT_MODEL if OpenRouter renames it.
+SUPPORT_AGENT_MODEL_DEFAULT = "stealth/ox-alpha"
+
+
+class OpenRouterClient(DeepSeekClient):
+    """DeepSeek wire-format client pointed at OpenRouter.
+
+    Inherits generate_chat_completion unchanged — OpenRouter speaks the
+    same OpenAI-compatible protocol; only key and base URL differ.
+    """
+
+    def __init__(self) -> None:
+        api_key = os.getenv("OPENROUTER_API_KEY")
+        if not api_key:
+            raise ValueError("OPENROUTER_API_KEY not found in environment")
+        from openai import AsyncOpenAI
+        base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
 
 # Threads younger than this may still be picked up by the on_ready catch-up.
 CATCHUP_MAX_AGE_SECONDS = 48 * 3600
@@ -102,14 +123,37 @@ class SupportCog(commands.Cog):
         admin_id = os.getenv('ADMIN_USER_ID')
         return f"<@{admin_id}>" if admin_id else "@admin"
 
+    def _build_llm(self):
+        """Return (client, model) for support turns: Ox Alpha via OpenRouter.
+
+        Falls back to the AdminChatAgent defaults (DeepSeek) when
+        OPENROUTER_API_KEY is unset, so the cog never hard-fails on a
+        missing key.
+        """
+        if not os.getenv("OPENROUTER_API_KEY"):
+            logger.warning(
+                "[Support] OPENROUTER_API_KEY not set — falling back to "
+                "the default admin-chat model for support turns"
+            )
+            return None, None
+        try:
+            client = OpenRouterClient()
+        except Exception:
+            logger.exception("[Support] Failed to build OpenRouter client")
+            return None, None
+        return client, os.getenv("SUPPORT_AGENT_MODEL", SUPPORT_AGENT_MODEL_DEFAULT)
+
     def _ensure_agent(self) -> Optional[AdminChatAgent]:
         """Lazily initialize the agent (avoids issues during bot startup)."""
         if self.agent is None:
             try:
+                client, model = self._build_llm()
                 self.agent = AdminChatAgent(
                     bot=self.bot,
                     db_handler=self.db_handler,
                     sharer=getattr(self.bot, 'sharer', None),
+                    client=client,
+                    model=model,
                 )
             except Exception:
                 logger.exception("[Support] Failed to initialize agent")

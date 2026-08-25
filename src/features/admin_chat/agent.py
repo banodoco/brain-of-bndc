@@ -264,14 +264,16 @@ class AdminChatResult:
 class AdminChatAgent:
     """Handles DeepSeek conversations with tool use for admin chat."""
 
-    def __init__(self, bot, db_handler, sharer):
+    def __init__(self, bot, db_handler, sharer, client=None, model=None):
         self.bot = bot
         self.db_handler = db_handler
         self.sharer = sharer
         self._abort_requested: dict[int, bool] = {}
 
-        self.client = DeepSeekClient()
-        self.model = os.getenv("ADMIN_CHAT_MODEL", "deepseek-v4-pro")
+        # Optional injection (e.g. the support cog's OpenRouter client);
+        # defaults preserve the admin-chat DeepSeek behavior exactly.
+        self.client = client if client is not None else DeepSeekClient()
+        self.model = model or os.getenv("ADMIN_CHAT_MODEL", "deepseek-v4-pro")
         # Cached non-default LLM client for live-update feedback turns
         # (e.g. GPT Sol via LIVE_UPDATE_FEEDBACK_CLIENT=openai).
         self._feedback_client = None

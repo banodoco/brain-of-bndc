@@ -442,3 +442,47 @@ class TestDispatcherRegistration:
         for name in ("search_hivemind", "comfy_workflow"):
             result = await self._execute(name, {}, allowed_tools={"something_else"})
             assert result == {"success": False, "error": "Permission denied"}
+
+
+class TestOpenRouterWiring:
+    """Support turns run on Ox Alpha via OpenRouter when the key is present."""
+
+    def _fresh_cog(self, monkeypatch, support_channel="123"):
+        monkeypatch.setenv("SUPPORT_CHANNEL_ID", support_channel)
+        monkeypatch.delenv("ADMIN_USER_ID", raising=False)
+        bot = SimpleNamespace(
+            db_handler=MagicMock(),
+            dev_mode=False,
+            user=SimpleNamespace(id=999),
+            get_cog=lambda name: None,
+        )
+        cog = SupportCog(bot)
+        cog.configured = True
+        return cog
+
+    def test_openrouter_key_wires_ox_alpha(self, monkeypatch):
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+        monkeypatch.delenv("SUPPORT_AGENT_MODEL", raising=False)
+        cog = self._fresh_cog(monkeypatch)
+        agent = cog._ensure_agent()
+        assert isinstance(agent, AdminChatAgent)
+        assert isinstance(agent.client, support_cog_module.OpenRouterClient)
+        assert agent.client.client.base_url.host == "openrouter.ai"
+        assert agent.model == support_cog_module.SUPPORT_AGENT_MODEL_DEFAULT
+
+    def test_support_agent_model_env_overrides_slug(self, monkeypatch):
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+        monkeypatch.setenv("SUPPORT_AGENT_MODEL", "stealth/ox-alpha-snapshot")
+        cog = self._fresh_cog(monkeypatch)
+        agent = cog._ensure_agent()
+        assert agent.model == "stealth/ox-alpha-snapshot"
+
+    def test_missing_key_falls_back_to_defaults(self, monkeypatch):
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        cog = self._fresh_cog(monkeypatch)
+        client, model = cog._build_llm()
+        assert client is None and model is None
+        agent = cog._ensure_agent()
+        # Falls back to DeepSeekClient default inside AdminChatAgent.
+        from src.common.llm.deepseek_client import DeepSeekClient
+        assert isinstance(agent.client, DeepSeekClient)
