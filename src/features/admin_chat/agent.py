@@ -599,6 +599,26 @@ class AdminChatAgent:
                 t for t in TOOLS
                 if t.get("name") in feedback_allowed
             ]
+        # ── support-forum allowlist ───────────────────────────────────
+        # Any member posting in the support forum runs this turn, so the
+        # surface is executor-scoped: read/research + hivemind/workflow
+        # tools only. Payment/moderation/message-mutation/social tools are
+        # hidden so a support reply can never escalate into admin powers.
+        if channel_context and channel_context.get('support_turn'):
+            support_allowed = {
+                "reply", "end_turn",
+                # read/research
+                "find_messages", "inspect_message", "get_active_channels",
+                "query_table", "search_logs", "resolve_user",
+                # support-specific
+                "search_hivemind", "comfy_workflow",
+            }
+            from src.features.support.tools_support import TOOLS as TOOLS_SUPPORT
+            from src.features.support.comfy_tools import TOOLS as COMFY_TOOLS
+            available_tools = [
+                t for t in TOOLS
+                if t.get("name") in support_allowed
+            ] + list(TOOLS_SUPPORT) + list(COMFY_TOOLS)
         allowed_tool_names = {tool["name"] for tool in available_tools}
         
         max_iterations = 100
@@ -780,6 +800,17 @@ class AdminChatAgent:
                             if _topic_id:
                                 tool_input['topic_id'] = _topic_id
 
+                    # Inject non-LLM context for comfy_workflow — the current
+                    # support thread is where oversized edited JSON is posted
+                    # as a file attachment; the LLM never picks the destination.
+                    if tool_name == "comfy_workflow":
+                        if channel_context and channel_context.get('channel_id') and 'thread_id' not in tool_input:
+                            if tool_input is tool_use.input:
+                                tool_input = dict(tool_input)
+                            try:
+                                tool_input['thread_id'] = int(channel_context['channel_id'])
+                            except (TypeError, ValueError):
+                                pass
                     # Execute the tool
                     dm_channel_id = None
                     if channel_context and channel_context.get('source') == 'dm' and channel_context.get('channel_id'):

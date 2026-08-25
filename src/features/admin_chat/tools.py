@@ -6009,5 +6009,12 @@ async def execute_tool(
         return await execute_list_pending_social_drafts(bot, db_handler, trusted_tool_input)
     elif tool_name == "discard_social_draft":
         return await execute_discard_social_draft(bot, db_handler, trusted_tool_input)
+    elif tool_name == "search_hivemind":
+        # Lazy imports keep admin_chat decoupled from the support feature.
+        from src.features.support.tools_support import execute_search_hivemind
+        return await execute_search_hivemind(trusted_tool_input)
+    elif tool_name == "comfy_workflow":
+        from src.features.support.comfy_tools import execute_comfy_workflow
+        return await execute_comfy_workflow(trusted_tool_input, bot=bot)
     else:
         return {"success": False, "error": f"Unknown tool: {tool_name}"}

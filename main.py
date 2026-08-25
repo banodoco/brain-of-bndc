@@ -295,6 +295,12 @@ async def main_async(args):
         except Exception as e:
             logger.warning(f"Failed to load GrantsCog (skipping): {e}")
         try:
+            from src.features.support.support_cog import SupportCog
+            await bot.add_cog(SupportCog(bot))
+            logger.info("SupportCog loaded.")
+        except Exception as e:
+            logger.warning(f"Failed to load SupportCog (skipping): {e}")
+        try:
             from src.features.competition.competition_cog import CompetitionCog
             await bot.add_cog(CompetitionCog(bot))
             logger.info("CompetitionCog loaded.")

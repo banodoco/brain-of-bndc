@@ -79,6 +79,7 @@
 | **Reacting** | `src/features/reacting/` | Reaction-triggered workflows (tweets, uploads, disputes, etc.) |
 | **Relaying** | `src/features/relaying/` | Webhook relay to external services |
 | **Sharing** | `src/features/sharing/` | Social media cross-posting (Twitter, etc.) |
+| **Support** | `src/features/support/` | Auto-agent turns on #support forum posts: hivemind-cited answers, ComfyUI workflow edit/validate via VibeComfy; follow-ups continue the thread session |
 | **Summarising** | `src/features/summarising/` | Live-update editor, independent top-creations loop, and legacy summary backfill helpers |
 
 ---
@@ -155,6 +156,10 @@
         │       ├── content_analyzer.py      # Extract hashtags, metadata
         │       ├── notify_user.py           # DM users about shares
         │       └── social_poster.py         # Platform-specific posting
+        ├── support/
+        │   ├── support_cog.py            # #support forum triggers, thread-keyed sessions, catch-up
+        │   ├── tools_support.py          # search_hivemind tool (PostgREST corpus search)
+        │   └── comfy_tools.py            # comfy_workflow tool (VibeComfy describe/validate/edit)
         └── summarising/
             ├── summariser.py
             ├── summariser_cog.py

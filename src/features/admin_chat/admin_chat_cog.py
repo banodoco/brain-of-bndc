@@ -2192,6 +2192,23 @@ class AdminChatCog(commands.Cog):
         if message.author.bot:
             return
 
+        # Support-forum threads belong to SupportCog's public-surface agent —
+        # never route them through admin chat, even for admins (no admin-power
+        # tools are allowed on the public support surface).
+        if isinstance(message.channel, discord.Thread):
+            _raw_support_channel = os.getenv("SUPPORT_CHANNEL_ID")
+            if _raw_support_channel:
+                try:
+                    _support_parent = int(_raw_support_channel)
+                except ValueError:
+                    _support_parent = None
+                if (
+                    _support_parent is not None
+                    and message.channel.parent_id == _support_parent
+                    and self.bot.get_cog("SupportCog") is not None
+                ):
+                    return
+
         if self._is_admin(message.author.id):
             await self._handle_admin_message(message)
             return
