@@ -20,7 +20,7 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt && \
     pip install --no-cache-dir --no-deps \
-    "vibecomfy @ git+https://github.com/peteromallet/VibeComfy.git@ddac29416ed6b08828cd75cb3f36b6b5a592d224"
+    "vibecomfy @ https://github.com/peteromallet/VibeComfy/archive/ddac29416ed6b08828cd75cb3f36b6b5a592d224.tar.gz"
 
 # Copy the entire application
 COPY . .
