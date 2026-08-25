@@ -71,7 +71,7 @@ def _load_vibecompy():
 
     Raises ImportError when the package is missing so callers can degrade cleanly.
     """
-    from vibecompy.ingest.normalize import _named_import
+    from vibecomfy.ingest.normalize import _named_import
 
     return _named_import
 

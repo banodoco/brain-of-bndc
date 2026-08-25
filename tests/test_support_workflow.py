@@ -75,18 +75,18 @@ def _fake_named_import(raw):
 
 def _install_fake_vibecompy():
     """Install a fake vibecompy package tree into sys.modules."""
-    if isinstance(sys.modules.get("vibecompy"), types.ModuleType) \
-            and getattr(sys.modules["vibecompy"], "__fake__", False):
+    if isinstance(sys.modules.get("vibecomfy"), types.ModuleType) \
+            and getattr(sys.modules["vibecomfy"], "__fake__", False):
         return
-    vibecompy = types.ModuleType("vibecompy")
+    vibecompy = types.ModuleType("vibecomfy")
     vibecompy.__fake__ = True
-    ingest_pkg = types.ModuleType("vibecompy.ingest")
+    ingest_pkg = types.ModuleType("vibecomfy.ingest")
     ingest_pkg.__path__ = []
-    normalize = types.ModuleType("vibecompy.ingest.normalize")
+    normalize = types.ModuleType("vibecomfy.ingest.normalize")
     normalize._named_import = _fake_named_import
-    sys.modules["vibecompy"] = vibecompy
-    sys.modules["vibecompy.ingest"] = ingest_pkg
-    sys.modules["vibecompy.ingest.normalize"] = normalize
+    sys.modules["vibecomfy"] = vibecompy
+    sys.modules["vibecomfy.ingest"] = ingest_pkg
+    sys.modules["vibecomfy.ingest.normalize"] = normalize
 
 
 _install_fake_vibecompy()
@@ -138,7 +138,7 @@ async def test_edit_without_ops_errors():
 async def test_vibecompy_not_installed_degrades_cleanly(monkeypatch):
     monkeypatch.setitem(sys.modules, "vibecompy", None)  # None -> ImportError on import
     for name in list(sys.modules):
-        if name.startswith("vibecompy.") :
+        if name.startswith("vibecomfy.") :
             monkeypatch.delitem(sys.modules, name, raising=False)
     result = await comfy_tools.execute_comfy_workflow({"source": API_JSON, "mode": "describe"})
     assert result == {"success": False, "error": "vibecomfy package not installed on this host"}
@@ -172,7 +172,7 @@ async def test_validate_reports_digest(monkeypatch):
             return report
 
     monkeypatch.setattr(
-        sys.modules["vibecompy.ingest.normalize"], "_named_import", lambda raw: ReportingWorkflow(raw)
+        sys.modules["vibecomfy.ingest.normalize"], "_named_import", lambda raw: ReportingWorkflow(raw)
     )
     result = await comfy_tools.execute_comfy_workflow({"source": API_JSON, "mode": "validate"})
     assert result["success"] is True
@@ -274,7 +274,7 @@ async def test_vibecompy_exception_caught_as_failure(monkeypatch):
     def boom(_raw):
         raise RuntimeError("ingest exploded")
 
-    monkeypatch.setattr(sys.modules["vibecompy.ingest.normalize"], "_named_import", boom)
+    monkeypatch.setattr(sys.modules["vibecomfy.ingest.normalize"], "_named_import", boom)
     result = await comfy_tools.execute_comfy_workflow({"source": API_JSON, "mode": "describe"})
     assert result["success"] is False
     assert "RuntimeError" in result["error"]
