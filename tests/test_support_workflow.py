@@ -108,8 +108,8 @@ def test_tool_definition_is_anthropic_shaped():
     assert tool["name"] == "comfy_workflow"
     schema = tool["input_schema"]
     assert schema["type"] == "object"
-    assert set(schema["required"]) == {"source", "mode"}
-    assert schema["properties"]["mode"]["enum"] == ["describe", "validate", "edit"]
+    assert set(schema["required"]) == {"mode"}
+    assert schema["properties"]["mode"]["enum"] == ["describe", "validate", "edit", "deliver"]
 
 
 # ========== Input validation / degradation ==========
@@ -211,28 +211,33 @@ async def test_edit_set_widget_by_name_and_remove_by_title():
         {"op": "remove_node", "node": 0},
     ]
     result = await comfy_tools.execute_comfy_workflow(
-        {"source": API_JSON, "mode": "edit", "edit_ops": ops}
+        {"source": API_JSON, "mode": "edit", "edit_ops": ops, "thread_id": 1}
     )
     assert result["success"] is True
-    edited = json.loads(result["workflow_json"])
+    assert result["staged"] is True
+    assert "set text on CLIPTextEncode (id=7)" in result["summary"] or \
+           "removed KSampler (id=6)" in result["summary"]
+    assert "2 total edit(s) staged" in result["summary"]
+    assert "no issues" in result["summary"]
+    staged = comfy_tools._STAGED[1]
+    exported = staged["workflow"].export_to_json(format="api")
+    edited = json.loads(exported) if isinstance(exported, str) else exported
     assert set(edited.keys()) == {"7"}
     assert edited["7"]["inputs"]["text"] == "updated prompt"
-    assert "set text on CLIPTextEncode (id=7)" in result["summary"]
-    assert "removed KSampler (id=6)" in result["summary"]
-    assert "no issues" in result["summary"]
 
 
 @pytest.mark.anyio
 async def test_edit_set_widget_by_index_and_class_type_match():
     ops = [{"op": "set_widget", "node": "CLIPTextEncode", "widget": 0, "value": "by index"}]
     result = await comfy_tools.execute_comfy_workflow(
-        {"source": API_JSON, "mode": "edit", "edit_ops": ops}
+        {"source": API_JSON, "mode": "edit", "edit_ops": ops, "thread_id": 2}
     )
     assert result["success"] is True
-    edited = json.loads(result["workflow_json"])
+    staged = comfy_tools._STAGED[2]
+    exported = staged["workflow"].export_to_json(format="api")
+    edited = json.loads(exported) if isinstance(exported, str) else exported
     # widget index 0 resolves into the first scalar param of the matched node
     assert any(v == "by index" for node in edited.values() for v in node["inputs"].values())
-
 
 @pytest.mark.anyio
 async def test_edit_unknown_widget_lists_available():
@@ -308,79 +313,96 @@ def _big_api_json(target_chars=2500):
 
 
 @pytest.mark.anyio
-async def test_large_output_posted_as_file_to_thread():
+async def test_edit_stages_without_sending_then_deliver_attaches_once():
+    """Edits stage silently; only mode=deliver attaches the file."""
+    comfy_tools._STAGED.clear()
     thread = FakeThread()
     bot = FakeBot(thread)
-    result = await comfy_tools.execute_comfy_workflow(
-        {"source": _big_api_json(), "mode": "edit",
-         "edit_ops": [{"op": "set_widget", "node": 0, "widget": "text", "value": "edited!"}],
-         "thread_id": 12345},
-        bot=bot,
-    )
-    assert result["success"] is True
-    assert result["posted_as_file"] is True
-    assert "1 edit(s) applied" in result["summary"]
-    assert len(thread.sent) == 1
-    file = thread.sent[0]["file"]
-    payload = file.fp.read().decode("utf-8")
-    assert json.loads(payload)["100"]["inputs"]["text"] == "edited!"
-    assert file.filename.startswith("edited_workflow_")
-    assert file.filename.endswith(".json")
 
-
-@pytest.mark.anyio
-async def test_large_output_without_thread_id_truncates():
-    big = _big_api_json()
-    result = await comfy_tools.execute_comfy_workflow(
-        {"source": big, "mode": "edit",
-         "edit_ops": [{"op": "set_widget", "node": 0, "widget": "text", "value": "edited!"}]}
-    )
-    assert result["success"] is True
-    assert result.get("posted_as_file") is None
-    assert result["truncated"] is True
-    assert len(result["preview"]) == comfy_tools.TRUNCATED_PREVIEW_CHARS
-    assert "truncated preview" in result["note"]
-    assert result["preview"] != ""
-
-
-@pytest.mark.anyio
-async def test_large_output_falls_back_to_truncation_when_posting_fails():
-    result = await comfy_tools.execute_comfy_workflow(
-        {"source": _big_api_json(), "mode": "edit",
-         "edit_ops": [{"op": "remove_node", "node": "100"}],
-         "thread_id": 999},
-        bot=FakeBot(channel=None),  # no resolvable channel -> post fails
-    )
-    assert result["success"] is True
-    assert result.get("posted_as_file") is None
-    assert result["truncated"] is True
-    assert "could not be posted as a file" in result["note"]
-
-
-@pytest.mark.anyio
-async def test_small_output_also_posted_as_file_when_thread_available():
-    """File attachment is the primary delivery path regardless of size."""
-    thread = FakeThread()
-    result = await comfy_tools.execute_comfy_workflow(
+    first = await comfy_tools.execute_comfy_workflow(
         {"source": API_JSON, "mode": "edit",
          "edit_ops": [{"op": "set_widget", "node": "6", "widget": "seed", "value": 7}],
          "thread_id": 555},
-        bot=FakeBot(thread),
+        bot=bot,
     )
-    assert result["success"] is True
-    assert result["posted_as_file"] is True
-    assert len(result["preview"]) <= comfy_tools.PREVIEW_CHARS
+    assert first["success"] is True and first["staged"] is True
+    assert len(thread.sent) == 0  # nothing sent yet
+
+    # Follow-up edit omits source -> stacks on the staged copy.
+    second = await comfy_tools.execute_comfy_workflow(
+        {"mode": "edit",
+         "edit_ops": [{"op": "set_widget", "node": "7", "widget": "text", "value": "fixed!"}],
+         "thread_id": 555},
+        bot=bot,
+    )
+    assert second["success"] is True
+    assert "2 total edit(s) staged" in second["summary"]
+    assert len(thread.sent) == 0
+
+    deliver = await comfy_tools.execute_comfy_workflow(
+        {"mode": "deliver", "thread_id": 555}, bot=bot,
+    )
+    assert deliver["success"] is True and deliver["posted_as_file"] is True
+    assert "REMINDER" in deliver["summary"]
     assert len(thread.sent) == 1
     payload = thread.sent[0]["file"].fp.read().decode("utf-8")
-    assert json.loads(payload)["6"]["inputs"]["seed"] == 7
+    doc = json.loads(payload)
+    assert doc["6"]["inputs"]["seed"] == 7  # both edits present
+    assert "100" not in doc
 
 
 @pytest.mark.anyio
-async def test_small_output_in_band_without_thread():
+async def test_deliver_with_nothing_staged_errors():
+    comfy_tools._STAGED.clear()
     result = await comfy_tools.execute_comfy_workflow(
-        {"source": API_JSON, "mode": "edit",
-         "edit_ops": [{"op": "set_widget", "node": "6", "widget": "seed", "value": 7}]},
+        {"mode": "deliver", "thread_id": 1}, bot=FakeBot(FakeThread()),
     )
-    assert result["success"] is True
-    assert "workflow_json" in result
-    assert json.loads(result["workflow_json"])["6"]["inputs"]["seed"] == 7
+    assert result["success"] is False
+    assert "nothing staged" in result["error"]
+
+
+@pytest.mark.anyio
+async def test_new_source_starts_fresh_staging():
+    comfy_tools._STAGED.clear()
+    thread = FakeThread()
+    bot = FakeBot(thread)
+    await comfy_tools.execute_comfy_workflow(
+        {"source": API_JSON, "mode": "edit",
+         "edit_ops": [{"op": "set_widget", "node": "6", "widget": "seed", "value": 7}],
+         "thread_id": 42}, bot=bot,
+    )
+    again = await comfy_tools.execute_comfy_workflow(
+        {"source": _big_api_json(), "mode": "edit",
+         "edit_ops": [{"op": "set_widget", "node": 0, "widget": "text", "value": "x"}],
+         "thread_id": 42}, bot=bot,
+    )
+    assert again["success"] is True
+    assert "1 total edit(s) staged" in again["summary"]
+
+
+@pytest.mark.anyio
+async def test_deliver_post_failure_is_a_clean_error():
+    comfy_tools._STAGED.clear()
+    # Stage under thread 999, then deliver with a bot that cannot resolve it.
+    await comfy_tools.execute_comfy_workflow(
+        {"source": API_JSON, "mode": "edit",
+         "edit_ops": [{"op": "set_widget", "node": "6", "widget": "seed", "value": 7}],
+         "thread_id": 999}, bot=FakeBot(FakeThread()),
+    )
+    result = await comfy_tools.execute_comfy_workflow(
+        {"mode": "deliver", "thread_id": 999},
+        bot=FakeBot(channel=None),
+    )
+    assert result["success"] is False
+    assert "could not post the file attachment" in result["error"]
+
+
+@pytest.mark.anyio
+async def test_describe_and_validate_still_work_without_staging():
+    comfy_tools._STAGED.clear()
+    r1 = await comfy_tools.execute_comfy_workflow(
+        {"source": API_JSON, "mode": "describe"})
+    assert r1["success"] is True
+    r2 = await comfy_tools.execute_comfy_workflow(
+        {"source": API_JSON, "mode": "validate"})
+    assert r2["success"] is True and r2["ok"] is not None

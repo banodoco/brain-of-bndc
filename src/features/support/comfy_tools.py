@@ -25,27 +25,29 @@ URL_FETCH_TIMEOUT_SECONDS = 20
 COMFY_WORKFLOW_TOOL = {
     "name": "comfy_workflow",
     "description": (
-        "Inspect, validate, or edit a ComfyUI workflow. Pass raw workflow JSON "
-        "(API or UI format) or an http(s) URL to a workflow JSON as source. "
+        "Inspect, validate, or iteratively edit a ComfyUI workflow. Pass raw "
+        "workflow JSON (API or UI format) or an http(s) URL as source. "
         "mode=describe returns a node-by-node summary with widget values; "
         "mode=validate returns a validation report digest; mode=edit applies "
         "structured edit_ops (e.g. {\"op\":\"set_widget\",\"node\":<index-or-title>,"
         "\"widget\":<name-or-index>,\"value\":...} or {\"op\":\"remove_node\","
-        "\"node\":<index-or-title>}), validates the result, and returns the edited "
-        "API-format JSON. Large edited JSON is posted as a .json file attachment "
-        "to thread_id when provided, otherwise returned as a truncated preview."
+        "\"node\":<index-or-title>}) to a per-thread STAGED working copy — edits "
+        "are NOT sent to the member. Repeat mode=edit (omitting source) to stack "
+        "more changes on the staged copy. When completely done, call mode=deliver "
+        "ONCE: it attaches the finished workflow to the thread as a downloadable "
+        ".json file for the member."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
             "source": {
                 "type": "string",
-                "description": "Raw workflow JSON string (API or UI format), or an http(s) URL pointing at one.",
+                "description": "Raw workflow JSON string (API or UI format), or an http(s) URL pointing at one. Required for describe/validate and for the first edit of a thread; omit on follow-up edits to keep modifying the staged copy.",
             },
             "mode": {
                 "type": "string",
-                "enum": ["describe", "validate", "edit"],
-                "description": "describe = summarize nodes/widgets; validate = run the validator; edit = apply edit_ops and return edited JSON.",
+                "enum": ["describe", "validate", "edit", "deliver"],
+                "description": "describe = summarize nodes/widgets; validate = run the validator; edit = apply edit_ops to the staged copy (nothing is sent); deliver = attach the staged result to the thread as a downloadable .json file (call once, when done).",
             },
             "edit_ops": {
                 "type": "array",
@@ -54,10 +56,10 @@ COMFY_WORKFLOW_TOOL = {
             },
             "thread_id": {
                 "type": "integer",
-                "description": "Optional Discord thread/channel ID. When the edited JSON exceeds chat limits it is posted there as a file attachment instead.",
+                "description": "Discord thread/channel ID used to key the staged working copy and as the delivery target for mode=deliver.",
             },
         },
-        "required": ["source", "mode"],
+        "required": ["mode"],
     },
 }
 
@@ -264,20 +266,55 @@ def _describe_summary(workflow: Any, report: Any) -> str:
     return '\n'.join(lines)
 
 
+# Per-thread staging for iterative edits: mode=edit stores the working IR
+# here; mode=deliver attaches it. Keyed by thread id, overwritten whenever
+# a new source is ingested — intentionally in-memory and ephemeral.
+_STAGED: Dict[int, Dict[str, Any]] = {}
+
+
 async def execute_comfy_workflow(tool_input: Dict[str, Any], bot: Optional[Any] = None) -> Dict[str, Any]:
-    """Execute the comfy_workflow tool: describe / validate / edit a workflow."""
-    source = tool_input.get('source')
-    if not isinstance(source, str) or not source.strip():
-        return {"success": False, "error": "source is required: workflow JSON string or http(s) URL"}
-
+    """Execute the comfy_workflow tool: describe / validate / edit / deliver."""
     mode = tool_input.get('mode')
-    if mode not in ('describe', 'validate', 'edit'):
-        return {"success": False, "error": "mode must be one of: describe, validate, edit"}
+    if mode not in ('describe', 'validate', 'edit', 'deliver'):
+        return {"success": False, "error": "mode must be one of: describe, validate, edit, deliver"}
 
-    edit_ops = tool_input.get('edit_ops')
+    thread_id = tool_input.get('thread_id')
+    source = tool_input.get('source')
+
+    if mode == 'deliver':
+        staged = _STAGED.get(thread_id) if thread_id is not None else None
+        if not staged:
+            return {"success": False,
+                    "error": "nothing staged to deliver: run edit mode first (it stages automatically)"}
+        workflow_json = json.dumps(staged['workflow'].export_to_json(format="api"))
+        summary = (
+            f"Delivered {len(staged['applied'])} staged edit(s): " + '; '.join(staged['applied'])
+            + '. ' + '\n'.join(_validation_lines(staged['workflow'].validate()))
+        )
+        nudge = (
+            "REMINDER for your reply: the fixed workflow is attached above as "
+            "edited_workflow_<timestamp>.json — tell the member to download it and "
+            "open it in ComfyUI (or drag it onto the canvas). If they want more "
+            "changes, they can attach the .json again in their next message."
+        )
+        posted = False
+        if thread_id is not None and bot is not None:
+            posted = await _post_workflow_file(bot, thread_id, workflow_json)
+        if not posted:
+            return {"success": False, "error": "could not post the file attachment to this thread"}
+        return {
+            "success": True,
+            "posted_as_file": True,
+            "summary": summary + ' ' + nudge,
+            "preview": workflow_json[:PREVIEW_CHARS],
+        }
+
     if mode == 'edit':
+        edit_ops = tool_input.get('edit_ops')
         if not isinstance(edit_ops, list) or not edit_ops:
             return {"success": False, "error": "edit mode requires a non-empty edit_ops list"}
+    elif not isinstance(source, str) or not source.strip():
+        return {"success": False, "error": "source is required: workflow JSON string or http(s) URL"}
 
     try:
         named_import = _load_vibecompy()
@@ -285,17 +322,42 @@ async def execute_comfy_workflow(tool_input: Dict[str, Any], bot: Optional[Any] 
         return {"success": False, "error": "vibecomfy package not installed on this host"}
 
     try:
-        raw, url = _load_raw_source(source)
-        if url is not None:
-            raw = await _fetch_workflow_json(url)
-        workflow = named_import(raw)
+        staged = _STAGED.get(thread_id) if thread_id is not None else None
 
-        applied: List[str] = []
+        # Ingest priority: explicit source > staged working copy.
+        if isinstance(source, str) and source.strip():
+            raw, url = _load_raw_source(source)
+            if url is not None:
+                raw = await _fetch_workflow_json(url)
+            workflow = named_import(raw)
+            applied: List[str] = []
+        elif mode == 'edit' and staged:
+            workflow = staged['workflow']
+            applied = list(staged['applied'])
+        else:
+            return {"success": False,
+                    "error": "source is required (nothing staged yet on this thread)"}
+
         if mode == 'edit':
             for op in edit_ops:
                 applied.append(_apply_edit_op(workflow, op))
 
         report = workflow.validate()
+
+        if mode == 'edit':
+            if thread_id is not None:
+                _STAGED[thread_id] = {'workflow': workflow, 'applied': applied}
+            preview_json = json.dumps(workflow.export_to_json(format="api"))
+            return {
+                "success": True,
+                "staged": True,
+                "summary": (
+                    f"{len(applied)} total edit(s) staged (latest: {applied[-1]})"
+                    + '. ' + '\n'.join(_validation_lines(report))
+                    + " Nothing sent to the member yet — call mode='deliver' when done."
+                ),
+                "preview": preview_json[:PREVIEW_CHARS],
+            }
 
         if mode == 'describe':
             return {
@@ -305,54 +367,12 @@ async def execute_comfy_workflow(tool_input: Dict[str, Any], bot: Optional[Any] 
                 "issues": _issues_digest(report),
             }
 
-        if mode == 'validate':
-            return {
-                "success": True,
-                "ok": bool(getattr(report, 'ok', False)),
-                "formatted": '\n'.join(_validation_lines(report)),
-                "issues": _issues_digest(report),
-            }
-
-        # mode == 'edit'
-        workflow_json = json.dumps(workflow.export_to_json(format="api"))
-        summary = (
-            f"{len(applied)} edit(s) applied: " + '; '.join(applied)
-            + '. ' + '\n'.join(_validation_lines(report))
-        )
-        nudge = (
-            "REMINDER for your reply: the fixed workflow is attached above as "
-            "edited_workflow_<timestamp>.json — tell the member to download it and "
-            "open it in ComfyUI (or drag it onto the canvas). If they want more "
-            "changes, they can attach the .json again in their next message."
-        )
-
-        # Primary delivery: ALWAYS attach the edited .json to the thread so
-        # the member gets a downloadable file, regardless of size.
-        thread_id = tool_input.get('thread_id')
-        if thread_id is not None and bot is not None:
-            if await _post_workflow_file(bot, thread_id, workflow_json):
-                return {
-                    "success": True,
-                    "posted_as_file": True,
-                    "summary": summary + ' ' + nudge,
-                    "preview": workflow_json[:PREVIEW_CHARS],
-                }
-
-        # Fallbacks: small enough to inline, else truncated preview.
-        if len(workflow_json) <= LARGE_OUTPUT_CHARS:
-            return {"success": True, "workflow_json": workflow_json, "summary": summary}
-
-        note = (
-            "Edited JSON could not be posted as a file"
-            if thread_id is not None
-            else "No thread available to post the edited JSON as a file"
-        ) + "; showing truncated preview."
+        # mode == 'validate'
         return {
             "success": True,
-            "truncated": True,
-            "preview": workflow_json[:TRUNCATED_PREVIEW_CHARS],
-            "note": note,
-            "summary": summary,
+            "ok": bool(getattr(report, 'ok', False)),
+            "formatted": '\n'.join(_validation_lines(report)),
+            "issues": _issues_digest(report),
         }
     except Exception as exc:
         logger.exception("comfy_workflow failed (mode=%s)", mode)
