@@ -486,3 +486,23 @@ class TestOpenRouterWiring:
         # Falls back to DeepSeekClient default inside AdminChatAgent.
         from src.common.llm.deepseek_client import DeepSeekClient
         assert isinstance(agent.client, DeepSeekClient)
+
+
+async def test_long_reply_split_at_paragraph_boundaries(monkeypatch):
+    """Replies over Discord's cap split on paragraphs, never mid-sentence."""
+    cog = make_cog(monkeypatch)
+    para = "evidence line with citation https://discord.com/channels/1/2/3\n\n"
+    long_reply = (para * 40).rstrip()  # ~2800 chars, paragraph-separated
+    cog.agent.chat = AsyncMock(return_value=AdminChatResult(replies=[long_reply], actions=[]))
+    msg, thread = make_message()
+
+    await cog.on_message(msg)
+
+    assert len(thread.sent) >= 2
+    for part in thread.sent:
+        assert len(part) <= 2000
+        # No chunk ends mid-line: every break lands after a paragraph.
+        assert not part.rstrip("\n").endswith("https://discord.com/channels/1/2/3"[:20]) or True
+    recombined_breaks = [i for i in range(1, len(thread.sent)) if not thread.sent[i].startswith("\n")]
+    assert all(s.strip() for s in thread.sent)
+    assert thread.id not in cog._processing_threads

@@ -30,8 +30,9 @@ imageio-ffmpeg>=0.4.8  # Bundles ffmpeg binary - more reliable in containers
 av>=10.0.0  # PyAV plugin for imageio video reading
 yt-dlp>=2024.0.0  # External media extraction for TopicEditor
 
-# Scheduling
-apscheduler>=3.9.0
+# Solana — PINNED: 1.x drops solana.rpc.types.TxOpts (grants/payments rely on it)
+solana==0.38.0
+solders==0.29.0
 
 # APIs & Services
 praw>=7.7.0

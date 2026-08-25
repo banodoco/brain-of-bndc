@@ -10,6 +10,46 @@ from discord.ext import commands
 from src.common.rate_limiter import RateLimiter
 
 
+
+def split_message(text: str, limit: int = 2000) -> List[str]:
+    """Split text into chunks under Discord's message length cap.
+
+    Prefers paragraph breaks (blank lines), then single line breaks,
+    then hard slices — so replies break at natural boundaries instead
+    of mid-sentence.
+    """
+    if len(text) <= limit:
+        return [text] if text.strip() else []
+
+    # Explode into progressively finer units.
+    paragraphs = text.split("\n\n")
+    units: List[str] = []
+    for para in paragraphs:
+        if len(para) <= limit:
+            units.append(para)
+            continue
+        for line in para.split("\n"):
+            if len(line) <= limit:
+                units.append(line)
+                continue
+            for i in range(0, len(line), limit):
+                units.append(line[i:i + limit])
+
+    chunks: List[str] = []
+    current = ""
+    for unit in units:
+        candidate = f"{current}\n\n{unit}" if current else unit
+        if len(candidate) <= limit:
+            current = candidate
+            continue
+        if current:
+            chunks.append(current)
+        current = unit
+    if current:
+        chunks.append(current)
+    return [c for c in (chunk.strip() for chunk in chunks) if c]
+
+
 def emoji_to_str(emoji) -> str:
     """Convert a discord emoji to a string representation.
 

@@ -13,6 +13,7 @@ from discord.ext import commands, tasks
 
 from src.common.llm.deepseek_client import DeepSeekClient
 from src.common.db_handler import WalletUpdateBlockedError
+from src.common.discord_utils import split_message
 from src.features.payments.payment_service import PaymentActor, PaymentActorKind
 from .agent import AdminChatAgent
 from src.features.grants.solana_client import is_valid_solana_address
@@ -1993,8 +1994,7 @@ class AdminChatCog(commands.Cog):
                             await _send_with_retry(message.channel, part, reference=reply_ref)
                             messages_sent += 1
                         else:
-                            chunks = [part[i:i + 1990] for i in range(0, len(part), 1990)]
-                            for chunk in chunks:
+                            for chunk in split_message(part):
                                 if chunk.strip():
                                     await _send_with_retry(message.channel, chunk, reference=reply_ref)
                                     messages_sent += 1

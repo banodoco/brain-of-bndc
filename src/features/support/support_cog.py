@@ -19,6 +19,7 @@ from discord.ext import commands
 
 from src.common.llm.deepseek_client import DeepSeekClient
 from src.features.admin_chat.agent import AdminChatAgent
+from src.common.discord_utils import split_message
 
 logger = logging.getLogger('DiscordBot')
 
@@ -248,7 +249,8 @@ class SupportCog(commands.Cog):
                 channel=thread,
             )
             for reply in (result.replies or []):
-                await thread.send(reply)
+                for chunk in split_message(reply):
+                    await thread.send(chunk)
         except Exception as e:
             logger.error(
                 "[Support] Turn failed for thread %s: %s", thread.id, e, exc_info=True
