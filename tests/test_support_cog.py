@@ -17,6 +17,7 @@ import src.features.support.support_cog as support_cog_module
 import pytest
 
 from src.features.admin_chat.agent import AdminChatAgent, AdminChatResult, _conversations
+import src.features.admin_chat.agent as admin_chat_agent_module
 from src.features.support.support_cog import SupportCog, build_seed_history
 
 pytestmark = pytest.mark.anyio
@@ -205,6 +206,105 @@ class TestSupportTurnAllowlist:
         assert names.isdisjoint({
             "query_table", "search_logs", "resolve_user", "get_active_channels",
         })
+        _conversations.clear()
+
+
+def _make_tool_use_block(name, tool_input, tid="tu_1"):
+    block = MagicMock()
+    block.type = "tool_use"
+    block.name = name
+    block.input = dict(tool_input)
+    block.id = tid
+    return block
+
+
+class TestRequesterScoping:
+    """Support turns propagate requester_id and force guild_id so tool reads
+    run with the member's channel visibility, not the bot's full view."""
+
+    def _agent_with_llm(self, responses):
+        bot = SimpleNamespace(user=SimpleNamespace(id=999))
+        agent = AdminChatAgent(bot, MagicMock(), MagicMock())
+        fake_client = MagicMock()
+        fake_client.generate_chat_completion = AsyncMock(side_effect=list(responses))
+        agent.client = fake_client
+        return agent
+
+    async def test_support_turn_passes_requester_id_to_execute_tool(self, monkeypatch):
+        captured = {}
+
+        async def _fake_execute_tool(**kwargs):
+            captured.update(kwargs)
+            return {"success": True}
+
+        monkeypatch.setattr(admin_chat_agent_module, "execute_tool", _fake_execute_tool)
+        agent = self._agent_with_llm([
+            _make_response(_make_tool_use_block("find_messages", {"query": "upscale"})),
+            _make_response(_make_text_block("here you go")),
+        ])
+        _conversations.clear()
+
+        await agent.chat(
+            user_id=456,
+            user_message="my workflow errors out",
+            channel_context=_make_support_context(),
+            requester_id=42,
+        )
+
+        assert captured["requester_id"] == 42
+        _conversations.clear()
+
+    async def test_support_turn_forces_guild_id_over_llm_choice(self, monkeypatch):
+        captured = {}
+
+        async def _fake_execute_tool(**kwargs):
+            captured.update(kwargs)
+            return {"success": True}
+
+        monkeypatch.setattr(admin_chat_agent_module, "execute_tool", _fake_execute_tool)
+        agent = self._agent_with_llm([
+            # LLM tries to browse a different guild than the member's thread.
+            _make_response(_make_tool_use_block(
+                "find_messages", {"query": "upscale", "guild_id": 31337},
+            )),
+            _make_response(_make_text_block("here you go")),
+        ])
+        _conversations.clear()
+
+        await agent.chat(
+            user_id=458,
+            user_message="my workflow errors out",
+            channel_context=_make_support_context(guild_id="789"),
+            requester_id=42,
+        )
+
+        assert captured["tool_input"]["guild_id"] == 789
+        assert captured["requester_id"] == 42
+        _conversations.clear()
+
+    async def test_admin_path_keeps_default_requester_id_none(self, monkeypatch):
+        """Without support context, execute_tool keeps its unscoped default."""
+        captured = {}
+
+        async def _fake_execute_tool(**kwargs):
+            captured.update(kwargs)
+            return {"success": True}
+
+        monkeypatch.setattr(admin_chat_agent_module, "execute_tool", _fake_execute_tool)
+        agent = self._agent_with_llm([
+            _make_response(_make_tool_use_block("find_messages", {"query": "upscale"})),
+            _make_response(_make_text_block("here you go")),
+        ])
+        _conversations.clear()
+
+        await agent.chat(
+            user_id=1,
+            user_message="my workflow errors out",
+            channel_context={"source": "channel", "guild_id": "789",
+                             "channel_id": "456", "channel_name": "admin-chat"},
+        )
+
+        assert captured["requester_id"] is None
         _conversations.clear()
         _conversations.clear()
 

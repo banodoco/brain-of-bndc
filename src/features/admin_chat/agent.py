@@ -826,6 +826,14 @@ class AdminChatAgent:
                             dm_channel_id = int(channel_context['channel_id'])
                         except (TypeError, ValueError):
                             dm_channel_id = None
+                    # On support turns ALWAYS overwrite guild_id with the
+                    # channel context value: same confused-deputy pattern as
+                    # thread_id above — the LLM never picks the guild, and
+                    # member-visibility scoping keys off this guild.
+                    if channel_context and channel_context.get('support_turn') and channel_context.get('guild_id'):
+                        if tool_input is tool_use.input:
+                            tool_input = dict(tool_input)
+                        tool_input['guild_id'] = int(channel_context['guild_id'])
                     result = await execute_tool(
                         tool_name=tool_name,
                         tool_input=tool_input,
@@ -833,7 +841,7 @@ class AdminChatAgent:
                         db_handler=self.db_handler,
                         sharer=self.sharer,
                         allowed_tools=allowed_tool_names,
-                        requester_id=None,
+                        requester_id=requester_id,
                         trusted_guild_id=int(channel_context['guild_id']) if channel_context and channel_context.get('guild_id') else None,
                         dm_channel_id=dm_channel_id,
                     )
