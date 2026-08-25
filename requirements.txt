@@ -32,7 +32,6 @@ yt-dlp>=2024.0.0  # External media extraction for TopicEditor
 
 # Solana — PINNED: 1.x drops solana.rpc.types.TxOpts (grants/payments rely on it)
 solana==0.38.0
-solders==0.29.0
 
 # APIs & Services
 praw>=7.7.0
