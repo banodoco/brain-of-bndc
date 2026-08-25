@@ -309,8 +309,20 @@ class GrantsCog(commands.Cog):
             finally:
                 self._processing_threads.discard(thread_id)
 
-    # ========== Core Logic ==========
+        elif grant['status'] != 'awaiting_wallet':
+            # Any other stage (reviewing/needs_review/rejected/paid/payment_
+            # requested): don't leave the applicant in silence. A valid-looking
+            # wallet address means they've run ahead of the flow — e.g. they
+            # misread a manual-review notice as an approval. State the actual
+            # stage instead of dropping the message.
+            if is_valid_solana_address(message.content.strip()):
+                await message.reply(
+                    "I'm not collecting a wallet address at this stage of your application "
+                    f"(current stage: `{grant['status']}`). No payment can be sent yet — "
+                    "please wait for instructions in this thread."
+                )
 
+    # ========== Core Logic ==========
     async def _process_new_application(self, thread: discord.Thread):
         """Assess a new grant application and respond."""
         thread_id = thread.id
@@ -409,11 +421,30 @@ class GrantsCog(commands.Cog):
 
         # Gather full conversation: starter message + all follow-up messages
         messages = []
+        applicant_text = []
         async for msg in thread.history(limit=100, oldest_first=True):
             if msg.author.bot:
                 messages.append(f"[Reviewer]: {msg.content}")
             else:
                 messages.append(f"[Applicant]: {msg.content}")
+                applicant_text.append(msg.content)
+
+        # Gate: same rule as new applications — never hand the reviewer a
+        # thread whose only content is the title plus chatter. Without this,
+        # any follow-up (even gibberish) promoted a title-only post to a full
+        # LLM adjudication, and the reviewer fabricated a project from the
+        # title alone.
+        sufficient, reason = is_application_content_sufficient(thread.name, "\n".join(applicant_text))
+        if not sufficient:
+            self.db.update_grant_status(
+                thread_id, guild_id=thread.guild.id, status='needs_info',
+                thread_content=f"**{thread.name}**\n\n" + "\n\n".join(messages),
+            )
+            await thread.send(
+                f"<@{applicant_id}> **More information needed**\n\n{reason}\n\n"
+                f"Please reply here with your writeup as text and I'll review it."
+            )
+            return
 
         thread_content = f"**{thread.name}**\n\n" + "\n\n".join(messages)
 
@@ -575,25 +606,28 @@ class GrantsCog(commands.Cog):
                 f"**More information needed**\n\n{response}\n\n"
                 f"Please reply here with the requested details and I'll re-review your application."
             )
-            self.db.update_grant_status(thread_id, guild_id=guild_id, status='needs_info', llm_assessment=llm_assessment)
-
         elif decision == 'needs_review':
-            # Include LLM's recommended GPU/hours if provided
+            # Include LLM's recommended GPU/hours if provided — framed so the
+            # applicant can't mistake it for acceptance and jump ahead to the
+            # wallet step. The reviewer's reasoning stays out of the thread
+            # (the assessor prompt treats it as internal).
             details = ""
             if assessment.get('gpu_type') and assessment.get('recommended_hours'):
                 gpu_type = assessment['gpu_type']
                 hours = assessment['recommended_hours']
                 cost = calculate_grant_cost(gpu_type, hours)
                 details = (
-                    f"\n\n**LLM recommendation (if approved):** "
+                    f"\n\n**Reviewer recommendation (pending human approval):** "
                     f"{gpu_type.replace('_', ' ')} / {hours}hrs / ${cost:.2f}"
                 )
             await thread.send(
                 f"<@{thread.owner_id}> {response}\n\n"
+                f"**This is not an approval yet** — a moderator will review your application manually. "
                 f"If you have any additional links, examples, or details that would strengthen "
-                f"your application, please share them here.\n\n"
-                f"{self._admin_mention} **Manual review needed**{details}\n"
-                f"**Reasoning:** {reasoning}"
+                f"your application, please share them here. "
+                f"Please don't send a wallet address until you're asked."
+                f"{details}\n"
+                f"{self._admin_mention} **Manual review needed**"
             )
             self.db.update_grant_status(thread_id, guild_id=guild_id, status='needs_review', llm_assessment=llm_assessment)
 
