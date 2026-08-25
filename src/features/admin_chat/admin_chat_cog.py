@@ -2196,18 +2196,22 @@ class AdminChatCog(commands.Cog):
         # never route them through admin chat, even for admins (no admin-power
         # tools are allowed on the public support surface).
         if isinstance(message.channel, discord.Thread):
-            _raw_support_channel = os.getenv("SUPPORT_CHANNEL_ID")
-            if _raw_support_channel:
-                try:
-                    _support_parent = int(_raw_support_channel)
-                except ValueError:
-                    _support_parent = None
-                if (
-                    _support_parent is not None
-                    and message.channel.parent_id == _support_parent
-                    and self.bot.get_cog("SupportCog") is not None
-                ):
-                    return
+            from src.features.support.support_cog import SUPPORT_CHANNEL_ID_DEFAULT
+            # Resolve identically to SupportCog so an unset env var still
+            # routes default-forum threads away from admin chat.
+            _raw_support_channel = os.getenv(
+                "SUPPORT_CHANNEL_ID", SUPPORT_CHANNEL_ID_DEFAULT
+            )
+            try:
+                _support_parent = int(_raw_support_channel)
+            except (TypeError, ValueError):
+                _support_parent = None
+            if (
+                _support_parent is not None
+                and message.channel.parent_id == _support_parent
+                and self.bot.get_cog("SupportCog") is not None
+            ):
+                return
 
         if self._is_admin(message.author.id):
             await self._handle_admin_message(message)

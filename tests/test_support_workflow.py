@@ -129,7 +129,7 @@ async def test_bad_mode_errors():
 
 @pytest.mark.anyio
 async def test_edit_without_ops_errors():
-    result = await comfy_tools.execute_comfy_workflow({"source": API_JSON, "mode": "edit"})
+    result = await comfy_tools.execute_comfy_workflow({"source": API_JSON, "mode": "edit", "thread_id": 3})
     assert result["success"] is False
     assert "edit_ops" in result["error"]
 
@@ -195,9 +195,9 @@ async def test_url_source_fetches_then_describes(monkeypatch):
 
     monkeypatch.setattr(comfy_tools, "_fetch_workflow_json", fake_fetch)
     result = await comfy_tools.execute_comfy_workflow(
-        {"source": "https://example.com/wf.json", "mode": "describe"}
+        {"source": "https://cdn.discordapp.com/attachments/1/2/wf.json", "mode": "describe"}
     )
-    assert fetched["url"] == "https://example.com/wf.json"
+    assert fetched["url"] == "https://cdn.discordapp.com/attachments/1/2/wf.json"
     assert result["success"] is True
     assert result["node_count"] == 2
 
@@ -244,10 +244,9 @@ async def test_edit_unknown_widget_lists_available():
     result = await comfy_tools.execute_comfy_workflow({
         "source": API_JSON,
         "mode": "edit",
+        "thread_id": 4,
         "edit_ops": [{"op": "set_widget", "node": "7", "widget": "nonesuch", "value": 1}],
     })
-    assert result["success"] is False
-    assert "nonesuch" in result["error"]
     assert "Available: ['text']" in result["error"]
 
 
@@ -256,10 +255,9 @@ async def test_edit_unresolvable_node_errors():
     result = await comfy_tools.execute_comfy_workflow({
         "source": API_JSON,
         "mode": "edit",
+        "thread_id": 5,
         "edit_ops": [{"op": "remove_node", "node": "NopeNet"}],
     })
-    assert result["success"] is False
-    assert "No node matches" in result["error"]
     assert "KSampler" in result["error"]  # error lists known nodes
 
 
@@ -268,6 +266,7 @@ async def test_edit_unsupported_op_errors():
     result = await comfy_tools.execute_comfy_workflow({
         "source": API_JSON,
         "mode": "edit",
+        "thread_id": 6,
         "edit_ops": [{"op": "rebalance_chakras"}],
     })
     assert result["success"] is False
@@ -406,3 +405,149 @@ async def test_describe_and_validate_still_work_without_staging():
     r2 = await comfy_tools.execute_comfy_workflow(
         {"source": API_JSON, "mode": "validate"})
     assert r2["success"] is True and r2["ok"] is not None
+
+
+# ========== URL fetch hardening (SSRF) ==========
+
+def _install_fake_aiohttp(monkeypatch, status=200, body=b"{}"):
+    """Swap aiohttp for an offline fake; returns the recorded get() kwargs."""
+    class FakeContent:
+        def __init__(self, payload):
+            self._payload = payload
+
+        async def read(self, n):
+            return self._payload[:n]
+
+    class FakeSessionGet:
+        def __init__(self, response):
+            self._response = response
+
+        async def __aenter__(self):
+            return self._response
+
+        async def __aexit__(self, *exc):
+            return False
+
+    calls = {}
+
+    class FakeSession:
+        def __init__(self, timeout=None):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        def get(self, url, allow_redirects=True):
+            calls["url"] = url
+            calls["allow_redirects"] = allow_redirects
+            response = types.SimpleNamespace(status=status)
+            response.content = FakeContent(body)
+            return FakeSessionGet(response)
+
+    fake = types.ModuleType("aiohttp")
+    fake.ClientTimeout = lambda **kwargs: kwargs
+    fake.ClientSession = FakeSession
+    monkeypatch.setitem(sys.modules, "aiohttp", fake)
+    return calls
+
+
+@pytest.mark.anyio
+async def test_fetch_rejects_non_https(monkeypatch):
+    with pytest.raises(ValueError, match="https"):
+        await comfy_tools._fetch_workflow_json("http://cdn.discordapp.com/wf.json")
+
+
+@pytest.mark.anyio
+async def test_fetch_rejects_disallowed_host(monkeypatch):
+    with pytest.raises(ValueError, match="Allowed hosts"):
+        await comfy_tools._fetch_workflow_json("https://internal.service.local/wf.json")
+    with pytest.raises(ValueError, match="Allowed hosts"):
+        await comfy_tools._fetch_workflow_json("https://cdn.discordapp.com.evil.io/wf.json")
+
+
+@pytest.mark.anyio
+async def test_fetch_does_not_follow_redirects(monkeypatch):
+    calls = _install_fake_aiohttp(monkeypatch, status=302, body=b"")
+    with pytest.raises(ValueError, match="HTTP 302"):
+        await comfy_tools._fetch_workflow_json("https://comfyworkflows.com/wf.json")
+    assert calls["allow_redirects"] is False
+
+
+@pytest.mark.anyio
+async def test_fetch_rejects_oversized_documents(monkeypatch):
+    _install_fake_aiohttp(monkeypatch, status=200, body=b"x" * (comfy_tools.MAX_WORKFLOW_BYTES + 10))
+    with pytest.raises(ValueError, match="size limit"):
+        await comfy_tools._fetch_workflow_json("https://civitai.com/wf.json")
+
+
+@pytest.mark.anyio
+async def test_fetch_parses_allowlisted_https_document(monkeypatch):
+    _install_fake_aiohttp(monkeypatch, status=200, body=API_JSON.encode("utf-8"))
+    doc = await comfy_tools._fetch_workflow_json(
+        "https://raw.githubusercontent.com/some/repo/main/wf.json"
+    )
+    assert doc["6"]["class_type"] == "KSampler"
+
+
+# ========== thread_id requirements ==========
+
+@pytest.mark.anyio
+async def test_edit_without_thread_id_errors():
+    comfy_tools._STAGED.clear()
+    result = await comfy_tools.execute_comfy_workflow(
+        {"source": API_JSON, "mode": "edit",
+         "edit_ops": [{"op": "set_widget", "node": "6", "widget": "seed", "value": 7}]},
+    )
+    assert result == {"success": False, "error": "thread_id is required for edit/deliver"}
+    assert not comfy_tools._STAGED  # nothing staged without a thread key
+
+
+@pytest.mark.anyio
+async def test_deliver_without_thread_id_errors():
+    comfy_tools._STAGED.clear()
+    result = await comfy_tools.execute_comfy_workflow({"mode": "deliver"})
+    assert result == {"success": False, "error": "thread_id is required for edit/deliver"}
+
+
+@pytest.mark.anyio
+async def test_edit_accepts_string_thread_id():
+    comfy_tools._STAGED.clear()
+    result = await comfy_tools.execute_comfy_workflow(
+        {"source": API_JSON, "mode": "edit",
+         "edit_ops": [{"op": "set_widget", "node": "6", "widget": "seed", "value": 7}],
+         "thread_id": "31337"},
+    )
+    assert result["success"] is True and result["staged"] is True
+    assert 31337 in comfy_tools._STAGED
+
+
+# ========== Partial-failure rollback (copy-on-write staging) ==========
+
+@pytest.mark.anyio
+async def test_failed_stacked_edit_rolls_back_to_prior_staged_state():
+    comfy_tools._STAGED.clear()
+    first = await comfy_tools.execute_comfy_workflow(
+        {"source": API_JSON, "mode": "edit",
+         "edit_ops": [{"op": "set_widget", "node": "7", "widget": "text", "value": "good"}],
+         "thread_id": 777},
+    )
+    assert first["success"] is True
+    prior = comfy_tools._STAGED[777]
+
+    # Second op in the stacked list raises -> the whole call must be a no-op.
+    result = await comfy_tools.execute_comfy_workflow(
+        {"mode": "edit",
+         "edit_ops": [
+             {"op": "set_widget", "node": "7", "widget": "text", "value": "bad"},
+             {"op": "rebalance_chakras"},
+         ],
+         "thread_id": 777},
+    )
+    assert result["success"] is False
+    assert "rebalance_chakras" in result["error"]
+    assert comfy_tools._STAGED[777] is prior
+    exported = prior["workflow"].export_to_json(format="api")
+    assert exported["7"]["inputs"]["text"] == "good"

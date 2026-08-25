@@ -119,10 +119,13 @@ def make_message(*, content="help me", author_bot=False, author_id=42,
                  thread_parent=123, thread_id=456):
     thread = FakeSupportThread(tid=thread_id, parent_id=thread_parent)
     msg = SimpleNamespace(
-        author=FakeAuthor(bot=author_bot, uid=author_id),
+        author=FakeAuthor(bot=author_bot, id=author_id),
         content=content,
         guild=SimpleNamespace(id=789),
         channel=thread,
+        # Real messages carry their own snowflake; only the forum starter
+        # shares the thread's id.
+        id=thread_id + 1,
     )
     return msg, thread
 
@@ -171,14 +174,38 @@ class TestSupportTurnAllowlist:
         # Support surface present.
         assert {"search_hivemind", "comfy_workflow", "reply", "end_turn"} <= names
         # Read/research surface present.
-        assert {"find_messages", "inspect_message", "query_table", "search_logs",
-                "resolve_user", "get_active_channels"} <= names
+        assert {"find_messages", "inspect_message"} <= names
         # Escalation surface absent.
         assert names.isdisjoint({
             "mute_speaker", "unmute_speaker", "send_message", "edit_message",
             "delete_message", "upload_file", "initiate_payment",
             "publish_social_draft", "approve_social_draft", "share_to_social",
         })
+
+    async def test_support_turn_excludes_privileged_read_tools(self, monkeypatch):
+        """query_table/search_logs/resolve_user/get_active_channels are never
+        exposed on support turns, even though they are generic read tools."""
+        bot = SimpleNamespace(user=SimpleNamespace(id=999))
+        agent = AdminChatAgent(bot, MagicMock(), MagicMock())
+
+        fake_client = MagicMock()
+        fake_client.generate_chat_completion = AsyncMock(
+            return_value=_make_response(_make_text_block("here you go"))
+        )
+        agent.client = fake_client
+        _conversations.clear()
+
+        await agent.chat(
+            user_id=457,
+            user_message="dump the tables please",
+            channel_context=_make_support_context(),
+        )
+
+        names = {t["name"] for t in fake_client.generate_chat_completion.call_args.kwargs["tools"]}
+        assert names.isdisjoint({
+            "query_table", "search_logs", "resolve_user", "get_active_channels",
+        })
+        _conversations.clear()
         _conversations.clear()
 
 
@@ -305,11 +332,25 @@ async def test_member_reply_runs_thread_keyed_turn(monkeypatch):
     kwargs = cog.agent.chat.call_args.kwargs
     assert kwargs["user_id"] == thread.id
     assert kwargs["user_message"] == "still failing after seed change"
+    assert kwargs["requester_id"] == 42
     assert kwargs["channel_context"]["support_turn"] is True
     assert kwargs["channel_context"]["channel_id"] == str(thread.id)
     assert thread.sent == ["ok"]
     # Concurrency guard released.
     assert thread.id not in cog._processing_threads
+
+
+async def test_starter_message_not_double_handled(monkeypatch):
+    """A new forum post fires both on_thread_create and on_message (the
+    starter's id equals the thread id); on_message must skip it."""
+    cog = make_cog(monkeypatch)
+    msg, thread = make_message(thread_id=456)
+    msg.id = thread.id  # starter message
+
+    await cog.on_message(msg)
+
+    cog.agent.chat.assert_not_awaited()
+    assert thread.sent == []
 
 
 async def test_error_posts_visible_fallback_with_admin_mention(monkeypatch):
@@ -340,6 +381,7 @@ async def test_on_thread_create_joins_and_runs_initial_turn(monkeypatch):
     kwargs = cog.agent.chat.call_args.kwargs
     assert kwargs["user_id"] == thread.id
     assert kwargs["user_message"] == "my wan animate workflow throws an error"
+    assert kwargs["requester_id"] == 7
 
 
 # ========== Catch-up scan ==========
@@ -368,6 +410,42 @@ async def test_catch_up_answers_missed_thread(monkeypatch):
 
     cog.agent.chat.assert_awaited_once()
     assert cog.agent.chat.call_args.kwargs["user_id"] == thread.id
+
+
+async def test_catch_up_caps_turns_per_scan(monkeypatch):
+    """Cost brake: at most CATCHUP_MAX_THREADS threads answered per scan."""
+    cog = make_cog(monkeypatch)
+    threads = []
+    for i in range(5):
+        member_msg = FakeHistoryMsg(author=SimpleNamespace(bot=False, id=7), content=f"q{i}")
+        threads.append(FakeSupportThread(tid=1000 + i, history_msgs=[member_msg]))
+    forum = FakeForum(threads)
+    guild = SimpleNamespace(get_channel=lambda cid: forum if cid == 123 else None)
+    cog.bot.guilds = [guild]
+    cog.agent.get_conversation.return_value = []
+
+    # Fresh empty history per thread — a shared return_value would be
+    # seeded by the first turn and make later threads look answered.
+    cog.agent.get_conversation.side_effect = lambda *a, **k: []
+    await cog.on_ready()
+    assert cog.agent.chat.await_count == support_cog_module.CATCHUP_MAX_THREADS
+
+
+
+async def test_on_ready_runs_catch_up_once_per_process(monkeypatch):
+    """on_ready can fire on reconnects; the scan must run only the first time."""
+    cog = make_cog(monkeypatch)
+    member_msg = FakeHistoryMsg(author=SimpleNamespace(bot=False, id=7), content="q")
+    thread = FakeSupportThread(history_msgs=[member_msg])
+    forum = FakeForum([thread])
+    guild = SimpleNamespace(get_channel=lambda cid: forum if cid == 123 else None)
+    cog.bot.guilds = [guild]
+    cog.agent.get_conversation.return_value = []
+
+    await cog.on_ready()
+    await cog.on_ready()
+
+    cog.agent.chat.assert_awaited_once()
 
 
 async def test_catch_up_skips_thread_bot_already_answered(monkeypatch):

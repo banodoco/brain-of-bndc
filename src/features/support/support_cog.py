@@ -49,6 +49,9 @@ class OpenRouterClient(DeepSeekClient):
 CATCHUP_MAX_AGE_SECONDS = 48 * 3600
 HISTORY_SEED_LIMIT = 20
 
+# Cost brake: at most this many missed threads answered per catch-up scan.
+CATCHUP_MAX_THREADS = 3
+
 # Persona appended to the system prompt as "## Channel Guidance".
 # {ADMIN_MENTION} is substituted at call time so ADMIN_USER_ID changes
 # never require a restart.
@@ -71,9 +74,9 @@ you are completely done, call mode=deliver EXACTLY ONCE: it attaches the \
 finished workflow as a downloadable edited_workflow_<timestamp>.json file \
 in this thread. Then tell the member the file is attached, how to open it \
 in ComfyUI, and walk through what you changed and why, node by node.
-- File exchange: members send workflows by attaching a .json (or a PNG with \
-an embedded graph) to their post; if they want more changes later, they can \
-attach the file again in a new message and you start a fresh staging round.
+- File exchange: members send workflows by attaching a .json file to their \
+post; if they want more changes later, they can attach the file again in a \
+new message and you start a fresh staging round.
 - If a tool fails (e.g. vibecomfy unavailable), say so plainly, answer from \
 evidence you do have, and note the member can re-post to retry later.
 - When relevant, onboard members to VibeComfy: \
@@ -130,6 +133,10 @@ class SupportCog(commands.Cog):
 
         # In-memory guard against concurrent processing of the same thread.
         self._processing_threads: set = set()
+
+        # on_ready can fire more than once per process (reconnects); run
+        # the catch-up scan only the first time.
+        self._catchup_done: bool = False
 
     # ========== Helpers ==========
 
@@ -211,9 +218,12 @@ class SupportCog(commands.Cog):
             len(seeded), thread.id,
         )
         return True
+    async def _starter_content(self, thread: discord.Thread) -> tuple:
+        """Best-effort text and author of the post that started this thread.
 
-    async def _starter_content(self, thread: discord.Thread) -> str:
-        """Best-effort text of the post that started this thread."""
+        Returns (content, requester_id); requester_id is None when the
+        starter's author cannot be resolved.
+        """
         starter = getattr(thread, 'starter_message', None)
         if starter is None:
             try:
@@ -226,7 +236,8 @@ class SupportCog(commands.Cog):
                 except Exception:
                     starter = None
         content = (getattr(starter, 'content', None) or "").strip()
-        return content or thread.name
+        requester_id = getattr(getattr(starter, 'author', None), 'id', None)
+        return (content or thread.name), requester_id
 
     async def _send_fallback(self, thread: discord.Thread):
         """Silence-is-failure: always leave a visible trace on errors."""
@@ -237,7 +248,8 @@ class SupportCog(commands.Cog):
         except Exception:
             logger.exception("[Support] Fallback message failed for thread %s", thread.id)
 
-    async def _run_turn_guarded(self, thread: discord.Thread, user_message: str):
+    async def _run_turn_guarded(self, thread: discord.Thread, user_message: str,
+                                requester_id=None):
         try:
             agent = self._ensure_agent()
             if agent is None:
@@ -255,6 +267,7 @@ class SupportCog(commands.Cog):
                 user_message=user_message,
                 channel_context=self._build_context(thread),
                 channel=thread,
+                requester_id=requester_id,
             )
             for reply in (result.replies or []):
                 for chunk in split_message(reply):
@@ -282,8 +295,8 @@ class SupportCog(commands.Cog):
                 await thread.join()
             except Exception:
                 logger.warning("[Support] Could not join thread %s", thread.id)
-            user_message = await self._starter_content(thread)
-            await self._run_turn_guarded(thread, user_message)
+            user_message, requester_id = await self._starter_content(thread)
+            await self._run_turn_guarded(thread, user_message, requester_id)
         finally:
             self._processing_threads.discard(thread.id)
 
@@ -299,11 +312,17 @@ class SupportCog(commands.Cog):
             return
         if not channel.parent_id or channel.parent_id != self.support_channel_id:
             return
+        # A new forum post fires BOTH on_thread_create and on_message (the
+        # starter message's id equals the thread id). on_thread_create owns
+        # the initial turn; the on_ready catch-up covers any misses.
+        if message.id == channel.id:
+            return
         if channel.id in self._processing_threads:
             return
         self._processing_threads.add(channel.id)
         try:
-            await self._run_turn_guarded(channel, message.content)
+            await self._run_turn_guarded(channel, message.content,
+                                         requester_id=message.author.id)
         finally:
             self._processing_threads.discard(channel.id)
 
@@ -312,6 +331,9 @@ class SupportCog(commands.Cog):
         """Catch-up scan: answer threads that got no bot reply while we were down."""
         if not self.configured:
             return
+        if self._catchup_done:
+            return
+        self._catchup_done = True
         try:
             await self._catch_up()
         except Exception as e:
@@ -335,6 +357,10 @@ class SupportCog(commands.Cog):
             logger.warning("[Support] Could not list archived threads", exc_info=True)
 
         now = discord.utils.utcnow()
+        # Cost brake: answer at most CATCHUP_MAX_THREADS threads per scan,
+        # oldest first so the longest-waiting posts get served.
+        candidates.sort(key=lambda t: getattr(t, 'created_at', None) or now)
+        answered = 0
         for thread in candidates:
             if thread.archived:
                 continue
@@ -358,8 +384,11 @@ class SupportCog(commands.Cog):
                 if last is not None and getattr(last.author, 'id', None) == self.bot.user.id:
                     continue
                 logger.info("[Support] Catch-up: answering missed thread %s", thread.id)
-                user_message = await self._starter_content(thread)
-                await self._run_turn_guarded(thread, user_message)
+                user_message, requester_id = await self._starter_content(thread)
+                await self._run_turn_guarded(thread, user_message, requester_id)
+                answered += 1
+                if answered >= CATCHUP_MAX_THREADS:
+                    break
             except Exception as e:
                 logger.error(
                     "[Support] Catch-up error for thread %s: %s", thread.id, e,

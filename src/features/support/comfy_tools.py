@@ -5,6 +5,7 @@ by delegating to the vibecompy package when it is available on this host.
 Concreteness over advice: the tool hands back specific artifacts — a node
 listing, a validation digest, or edited workflow JSON — never generic tips.
 """
+import copy
 import io
 import json
 import logging
@@ -15,10 +16,20 @@ import discord
 
 logger = logging.getLogger('DiscordBot')
 
-LARGE_OUTPUT_CHARS = 1800
-TRUNCATED_PREVIEW_CHARS = 1500
 PREVIEW_CHARS = 800
 URL_FETCH_TIMEOUT_SECONDS = 20
+
+# SSRF guard for remote workflow sources: https only, fixed host allowlist,
+# no redirects followed, hard size cap.
+ALLOWED_WORKFLOW_HOSTS = frozenset({
+    'cdn.discordapp.com',
+    'media.discordapp.net',
+    'raw.githubusercontent.com',
+    'github.com',
+    'comfyworkflows.com',
+    'civitai.com',
+})
+MAX_WORKFLOW_BYTES = 5 * 1024 * 1024
 
 # ========== Tool Definitions (Anthropic format) ==========
 
@@ -26,7 +37,9 @@ COMFY_WORKFLOW_TOOL = {
     "name": "comfy_workflow",
     "description": (
         "Inspect, validate, or iteratively edit a ComfyUI workflow. Pass raw "
-        "workflow JSON (API or UI format) or an http(s) URL as source. "
+        "workflow JSON (API or UI format) or an https URL from an allowed host "
+        "(cdn.discordapp.com, media.discordapp.net, raw.githubusercontent.com, "
+        "github.com, comfyworkflows.com, civitai.com) as source. "
         "mode=describe returns a node-by-node summary with widget values; "
         "mode=validate returns a validation report digest; mode=edit applies "
         "structured edit_ops (e.g. {\"op\":\"set_widget\",\"node\":<index-or-title>,"
@@ -42,7 +55,7 @@ COMFY_WORKFLOW_TOOL = {
         "properties": {
             "source": {
                 "type": "string",
-                "description": "Raw workflow JSON string (API or UI format), or an http(s) URL pointing at one. Required for describe/validate and for the first edit of a thread; omit on follow-up edits to keep modifying the staged copy.",
+                "description": "Raw workflow JSON string (API or UI format), or an https URL pointing at one (only allowed hosts: cdn.discordapp.com, media.discordapp.net, raw.githubusercontent.com, github.com, comfyworkflows.com, civitai.com). Required for describe/validate and for the first edit of a thread; omit on follow-up edits to keep modifying the staged copy.",
             },
             "mode": {
                 "type": "string",
@@ -79,15 +92,46 @@ def _load_vibecompy():
 
 
 async def _fetch_workflow_json(url: str) -> Dict[str, Any]:
-    """Fetch a workflow JSON document over http(s)."""
+    """Fetch a workflow JSON document over https from an allowlisted host."""
     import aiohttp
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    if parsed.scheme != 'https':
+        raise ValueError("Only https:// URLs are accepted as workflow sources")
+    if parsed.hostname not in ALLOWED_WORKFLOW_HOSTS:
+        raise ValueError(
+            f"Host {parsed.hostname!r} is not allowed for workflow sources. "
+            f"Allowed hosts: {', '.join(sorted(ALLOWED_WORKFLOW_HOSTS))}"
+        )
 
     timeout = aiohttp.ClientTimeout(total=URL_FETCH_TIMEOUT_SECONDS)
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(url) as response:
+        # allow_redirects=False so a benign-looking URL cannot bounce to an
+        # internal or non-allowlisted host.
+        async with session.get(url, allow_redirects=False) as response:
             if response.status != 200:
                 raise ValueError(f"Fetching {url} returned HTTP {response.status}")
-            return await response.json()
+            payload = await response.content.read(MAX_WORKFLOW_BYTES + 1)
+    if len(payload) > MAX_WORKFLOW_BYTES:
+        raise ValueError(
+            f"Workflow document at {url} exceeds the "
+            f"{MAX_WORKFLOW_BYTES // (1024 * 1024)}MB size limit"
+        )
+    try:
+        return json.loads(payload.decode('utf-8'))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ValueError(f"Workflow document at {url} is not valid JSON: {exc}") from exc
+
+
+def _coerce_thread_id(value: Any) -> Optional[int]:
+    """Best-effort int coercion of a thread id; None when absent/unparseable."""
+    if value is None:
+        return None
+    try:
+        return int(str(value).strip())
+    except ValueError:
+        return None
 
 
 def _load_raw_source(source: str):
@@ -278,11 +322,14 @@ async def execute_comfy_workflow(tool_input: Dict[str, Any], bot: Optional[Any] 
     if mode not in ('describe', 'validate', 'edit', 'deliver'):
         return {"success": False, "error": "mode must be one of: describe, validate, edit, deliver"}
 
-    thread_id = tool_input.get('thread_id')
+    thread_id = _coerce_thread_id(tool_input.get('thread_id'))
+    if mode in ('edit', 'deliver') and thread_id is None:
+        return {"success": False, "error": "thread_id is required for edit/deliver"}
+
     source = tool_input.get('source')
 
     if mode == 'deliver':
-        staged = _STAGED.get(thread_id) if thread_id is not None else None
+        staged = _STAGED.get(thread_id)
         if not staged:
             return {"success": False,
                     "error": "nothing staged to deliver: run edit mode first (it stages automatically)"}
@@ -298,7 +345,7 @@ async def execute_comfy_workflow(tool_input: Dict[str, Any], bot: Optional[Any] 
             "changes, they can attach the .json again in their next message."
         )
         posted = False
-        if thread_id is not None and bot is not None:
+        if bot is not None:
             posted = await _post_workflow_file(bot, thread_id, workflow_json)
         if not posted:
             return {"success": False, "error": "could not post the file attachment to this thread"}
@@ -322,7 +369,7 @@ async def execute_comfy_workflow(tool_input: Dict[str, Any], bot: Optional[Any] 
         return {"success": False, "error": "vibecomfy package not installed on this host"}
 
     try:
-        staged = _STAGED.get(thread_id) if thread_id is not None else None
+        staged = _STAGED.get(thread_id)
 
         # Ingest priority: explicit source > staged working copy.
         if isinstance(source, str) and source.strip():
@@ -332,7 +379,7 @@ async def execute_comfy_workflow(tool_input: Dict[str, Any], bot: Optional[Any] 
             workflow = named_import(raw)
             applied: List[str] = []
         elif mode == 'edit' and staged:
-            workflow = staged['workflow']
+            workflow = copy.deepcopy(staged['workflow'])
             applied = list(staged['applied'])
         else:
             return {"success": False,
@@ -345,8 +392,7 @@ async def execute_comfy_workflow(tool_input: Dict[str, Any], bot: Optional[Any] 
         report = workflow.validate()
 
         if mode == 'edit':
-            if thread_id is not None:
-                _STAGED[thread_id] = {'workflow': workflow, 'applied': applied}
+            _STAGED[thread_id] = {'workflow': workflow, 'applied': applied}
             preview_json = json.dumps(workflow.export_to_json(format="api"))
             return {
                 "success": True,
