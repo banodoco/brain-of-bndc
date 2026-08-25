@@ -17,6 +17,7 @@ logger = logging.getLogger('DiscordBot')
 
 LARGE_OUTPUT_CHARS = 1800
 TRUNCATED_PREVIEW_CHARS = 1500
+PREVIEW_CHARS = 800
 URL_FETCH_TIMEOUT_SECONDS = 20
 
 # ========== Tool Definitions (Anthropic format) ==========
@@ -318,26 +319,32 @@ async def execute_comfy_workflow(tool_input: Dict[str, Any], bot: Optional[Any] 
             f"{len(applied)} edit(s) applied: " + '; '.join(applied)
             + '. ' + '\n'.join(_validation_lines(report))
         )
+
+        # Primary delivery: ALWAYS attach the edited .json to the thread so
+        # the member gets a downloadable file, regardless of size.
+        thread_id = tool_input.get('thread_id')
+        if thread_id is not None and bot is not None:
+            if await _post_workflow_file(bot, thread_id, workflow_json):
+                return {
+                    "success": True,
+                    "posted_as_file": True,
+                    "summary": summary,
+                    "preview": workflow_json[:PREVIEW_CHARS],
+                }
+
+        # Fallbacks: small enough to inline, else truncated preview.
         if len(workflow_json) <= LARGE_OUTPUT_CHARS:
             return {"success": True, "workflow_json": workflow_json, "summary": summary}
 
-        posted = False
-        thread_id = tool_input.get('thread_id')
-        if thread_id is not None and bot is not None:
-            posted = await _post_workflow_file(bot, thread_id, workflow_json)
-        if posted:
-            return {"success": True, "posted_as_file": True, "summary": summary}
-
-        preview = workflow_json[:TRUNCATED_PREVIEW_CHARS]
         note = (
-            "Edited JSON is too large for chat"
-            + (" and could not be posted as a file" if thread_id is not None else "")
-            + "; showing truncated preview."
-        )
+            "Edited JSON could not be posted as a file"
+            if thread_id is not None
+            else "No thread available to post the edited JSON as a file"
+        ) + "; showing truncated preview."
         return {
             "success": True,
             "truncated": True,
-            "preview": preview,
+            "preview": workflow_json[:TRUNCATED_PREVIEW_CHARS],
             "note": note,
             "summary": summary,
         }

@@ -358,12 +358,28 @@ async def test_large_output_falls_back_to_truncation_when_posting_fails():
 
 
 @pytest.mark.anyio
-async def test_small_output_returned_in_band():
+async def test_small_output_also_posted_as_file_when_thread_available():
+    """File attachment is the primary delivery path regardless of size."""
+    thread = FakeThread()
     result = await comfy_tools.execute_comfy_workflow(
         {"source": API_JSON, "mode": "edit",
          "edit_ops": [{"op": "set_widget", "node": "6", "widget": "seed", "value": 7}],
          "thread_id": 555},
-        bot=FakeBot(FakeThread()),
+        bot=FakeBot(thread),
+    )
+    assert result["success"] is True
+    assert result["posted_as_file"] is True
+    assert len(result["preview"]) <= comfy_tools.PREVIEW_CHARS
+    assert len(thread.sent) == 1
+    payload = thread.sent[0]["file"].fp.read().decode("utf-8")
+    assert json.loads(payload)["6"]["inputs"]["seed"] == 7
+
+
+@pytest.mark.anyio
+async def test_small_output_in_band_without_thread():
+    result = await comfy_tools.execute_comfy_workflow(
+        {"source": API_JSON, "mode": "edit",
+         "edit_ops": [{"op": "set_widget", "node": "6", "widget": "seed", "value": 7}]},
     )
     assert result["success"] is True
     assert "workflow_json" in result
