@@ -6,6 +6,13 @@ python-dateutil>=2.8.0
 PyYAML>=6.0.0
 requests>=2.25.0
 
+# Support-agent workflow tools (VibeComfy). Installed --no-deps from a pinned
+# commit (see railway.json buildCommand) because main drags in the Arnold
+# agent runtime; these are its actual runtime deps for load/validate/edit:
+huggingface_hub>=0.32
+httpx>=0.25
+websockets>=12
+
 # AI/ML
 anthropic>=0.3.0
 numpy>=1.20.0

@@ -2,10 +2,10 @@
 # This file optimizes the build process on Railway
 
 [phases.setup]
-nixPkgs = ["python310", "ffmpeg"]
+nixPkgs = ["python311", "ffmpeg"]
 
 [phases.install]
-cmds = ["pip install -r requirements.txt"]
+cmds = ["pip install -r requirements.txt", "pip install --no-deps \"vibecomfy @ git+https://github.com/peteromallet/VibeComfy.git@ddac29416ed6b08828cd75cb3f36b6b5a592d224\""]
 
 [phases.build]
 cmds = ["mkdir -p /app/data"]
