@@ -377,15 +377,23 @@ class SupportCog(commands.Cog):
                       for chunk in split_message(reply)]
             should_attach = chunks and thread.id not in self._buttons_shown
             if should_attach:
-                # If an outcome was already recorded (e.g. before a restart,
-                # _buttons_shown is empty but DB has the row), don't re-attach.
+                # True once per thread ever, across restarts. Check both
+                # support_agent_turns (any prior bot turn) and
+                # support_thread_outcomes (already resolved). Either being
+                # present means buttons were already shown on the first turn.
                 try:
                     sb = getattr(getattr(self.db_handler, "supabase", None), "table", None)
                     if sb is not None:
-                        resp = sb("support_thread_outcomes").select("thread_id").eq("thread_id", thread.id).execute()
-                        if getattr(resp, "data", None):
+                        # Prior turn exists? Then this is a follow-up.
+                        resp_turns = sb("support_agent_turns").select("id").eq("thread_id", thread.id).limit(1).execute()
+                        if getattr(resp_turns, "data", None):
                             should_attach = False
                             self._buttons_shown.add(thread.id)
+                        else:
+                            resp_out = sb("support_thread_outcomes").select("thread_id").eq("thread_id", thread.id).execute()
+                            if getattr(resp_out, "data", None):
+                                should_attach = False
+                                self._buttons_shown.add(thread.id)
                 except Exception:
                     pass
             for i, chunk in enumerate(chunks):
