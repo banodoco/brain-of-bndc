@@ -732,10 +732,6 @@ class TestOutcomeRecording:
         table.upsert.return_value.execute.return_value = None
         return table
 
-    def _cog_with_table(self):
-        cog = make_cog.__wrapped__(None) if hasattr(make_cog, "__wrapped__") else None
-        return cog
-
     async def test_records_choice_defers_persists_and_edits(self, monkeypatch):
         cog = make_cog(monkeypatch)
         table = self._sb_table()
@@ -779,6 +775,7 @@ class TestOutcomeRecording:
 
         content = interaction.message.edit.call_args.kwargs["content"]
         assert len(content) <= 2000
+        assert content.startswith("x")  # original answer survives truncation
         assert "Outcome recorded: **Resolved** by <@42>" in content
 
     async def test_short_content_still_appends_note(self, monkeypatch):
@@ -802,3 +799,21 @@ class TestOutcomeRecording:
 
         interaction.response.send_message.assert_awaited_once()
         interaction.response.defer.assert_not_awaited()
+
+
+def test_outcome_view_callbacks_are_coroutine_functions():
+    """An async factory would bind coroutine OBJECTS = inert buttons."""
+    import inspect
+
+    class _Cog:
+        async def record_outcome(self, interaction, choice):
+            pass
+
+    view = support_cog_module.OutcomeView(_Cog())
+    assert [b.custom_id for b in view.children] == [
+        "support_outcome:resolved",
+        "support_outcome:probably_resolved",
+        "support_outcome:not_resolved",
+    ]
+    for child in view.children:
+        assert inspect.iscoroutinefunction(child.callback)
