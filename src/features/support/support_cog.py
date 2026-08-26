@@ -12,6 +12,7 @@ to disable). Documented here rather than .env.example, which is untracked.
 
 import logging
 import os
+import time
 from typing import Any, Dict, List, Optional
 
 import discord
@@ -281,7 +282,16 @@ class SupportCog(commands.Cog):
             logger.exception("[Support] Fallback message failed for thread %s", thread.id)
 
     async def _run_turn_guarded(self, thread: discord.Thread, user_message: str,
-                                requester_id=None):
+                                requester_id=None, trigger: str = "follow_up"):
+        """Run one agent turn and persist it structurally.
+
+        Every turn — including tool-call traces and failures — lands in the
+        support_agent_turns table (best-effort) so conversations are
+        debuggable after the fact instead of living only in memory/stdout.
+        """
+        started = time.time()
+        error_text = None
+        result = None
         try:
             agent = self._ensure_agent()
             if agent is None:
@@ -308,10 +318,49 @@ class SupportCog(commands.Cog):
                 view = self._outcome_view() if chunks and i == len(chunks) - 1 else None
                 await thread.send(chunk, view=view)
         except Exception as e:
+            error_text = f"{type(e).__name__}: {e}"
             logger.error(
                 "[Support] Turn failed for thread %s: %s", thread.id, e, exc_info=True
             )
             await self._send_fallback(thread)
+        finally:
+            await self._persist_turn(
+                thread=thread,
+                trigger=trigger,
+                user_message=user_message,
+                requester_id=requester_id,
+                result=result,
+                error=error_text,
+                duration_ms=int((time.time() - started) * 1000),
+            )
+
+    async def _persist_turn(self, *, thread, trigger, user_message, requester_id,
+                            result, error, duration_ms):
+        """Best-effort structured record of one agent turn. Never raises."""
+        try:
+            sb = getattr(getattr(self.db_handler, "supabase", None), "table", None)
+            if sb is None:
+                return
+            row = {
+                "thread_id": thread.id,
+                "guild_id": getattr(getattr(thread, "guild", None), "id", None) or 0,
+                "member_id": requester_id,
+                "trigger": trigger,
+                "user_message": user_message[:4000],
+                "replies": (result.replies if result else None),
+                "tool_calls": (result.actions if result else None),
+                "model": os.getenv("SUPPORT_AGENT_MODEL",
+                                   SUPPORT_AGENT_MODEL_DEFAULT),
+                "error": error,
+                "duration_ms": duration_ms,
+            }
+            (sb("support_agent_turns").insert(row).execute())
+        except Exception:
+            logger.warning(
+                "[Support] Could not persist turn for thread %s "
+                "(table missing? run the staged migration)", thread.id,
+                exc_info=True,
+            )
 
     # ========== Listeners ==========
 
@@ -331,7 +380,8 @@ class SupportCog(commands.Cog):
             except Exception:
                 logger.warning("[Support] Could not join thread %s", thread.id)
             user_message, requester_id = await self._starter_content(thread)
-            await self._run_turn_guarded(thread, user_message, requester_id)
+            await self._run_turn_guarded(thread, user_message, requester_id,
+                                         trigger="new_post")
         finally:
             self._processing_threads.discard(thread.id)
 
@@ -357,7 +407,8 @@ class SupportCog(commands.Cog):
         self._processing_threads.add(channel.id)
         try:
             await self._run_turn_guarded(channel, message.content,
-                                         requester_id=message.author.id)
+                                         requester_id=message.author.id,
+                                         trigger="follow_up")
         finally:
             self._processing_threads.discard(channel.id)
 
@@ -497,7 +548,8 @@ class SupportCog(commands.Cog):
                     continue
                 logger.info("[Support] Catch-up: answering missed thread %s", thread.id)
                 user_message, requester_id = await self._starter_content(thread)
-                await self._run_turn_guarded(thread, user_message, requester_id)
+                await self._run_turn_guarded(thread, user_message, requester_id,
+                                             trigger="catch_up")
                 answered += 1
                 if answered >= CATCHUP_MAX_THREADS:
                     break

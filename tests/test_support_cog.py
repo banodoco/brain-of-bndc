@@ -817,3 +817,63 @@ def test_outcome_view_callbacks_are_coroutine_functions():
     ]
     for child in view.children:
         assert inspect.iscoroutinefunction(child.callback)
+
+
+class TestTurnPersistence:
+    """Every turn lands in support_agent_turns — replies, tool trace, errors."""
+
+    def _table(self):
+        table = MagicMock()
+        table.insert.return_value.execute.return_value = None
+        return table
+
+    async def test_successful_turn_persists_replies_and_tool_trace(self, monkeypatch):
+        cog = make_cog(monkeypatch)
+        table = self._table()
+        monkeypatch.setattr(cog.db_handler, "supabase", SimpleNamespace(table=sb) if False else SimpleNamespace(table=lambda name: table))
+        actions = [{"tool": "search_hivemind", "input": {"query": "x"}, "result": {"success": True}}]
+        cog.agent.chat = AsyncMock(return_value=AdminChatResult(
+            replies=["answer"], actions=actions))
+        msg, thread = make_message()
+
+        await cog.on_message(msg)
+
+        row = table.insert.call_args.args[0]
+        assert row["thread_id"] == thread.id
+        assert row["trigger"] == "follow_up"
+        assert row["member_id"] == 42
+        assert row["replies"] == ["answer"]
+        assert row["tool_calls"] == actions
+        assert row["error"] is None
+        assert isinstance(row["duration_ms"], int)
+
+    async def test_failed_turn_persists_error(self, monkeypatch):
+        cog = make_cog(monkeypatch)
+        table = self._table()
+        monkeypatch.setattr(cog.db_handler, "supabase", SimpleNamespace(table=lambda name: table))
+        cog.agent.chat = AsyncMock(side_effect=RuntimeError("boom"))
+        monkeypatch.setenv("ADMIN_USER_ID", "42")
+        msg, thread = make_message()
+
+        await cog.on_message(msg)
+
+        row = table.insert.call_args.args[0]
+        assert "RuntimeError: boom" in row["error"]
+        assert row["trigger"] == "follow_up"
+
+    async def test_missing_table_never_raises(self, monkeypatch):
+        cog = make_cog(monkeypatch)
+        monkeypatch.setattr(cog.db_handler, "supabase", None)
+        msg, thread = make_message()
+        await cog.on_message(msg)  # must not raise
+        assert thread.sent == ["ok"]
+
+    async def test_new_post_trigger_tagged(self, monkeypatch):
+        cog = make_cog(monkeypatch)
+        table = self._table()
+        monkeypatch.setattr(cog.db_handler, "supabase", SimpleNamespace(table=lambda name: table))
+        msg, thread = make_message()
+        thread.id = msg.id  # starter path
+        await cog.on_thread_create(thread)
+        row = table.insert.call_args.args[0]
+        assert row["trigger"] == "new_post"
