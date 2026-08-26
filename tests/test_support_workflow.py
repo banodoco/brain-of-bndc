@@ -38,6 +38,11 @@ class FakeNode:
         self.metadata = metadata or {}
 
 
+class FakeNodeHandle:
+    def __init__(self, id):
+        self.id = id
+
+
 class FakeWorkflow:
     """Minimal VibeWorkflow stand-in over an API-format dict."""
 
@@ -56,6 +61,37 @@ class FakeWorkflow:
 
     def remove_node(self, node_id):
         del self.nodes[node_id]
+
+    def add_node(self, class_type, _id=None, **inputs):
+        new_id = str(_id if _id is not None else max((int(n) for n in self.nodes), default=0) + 1)
+        node = FakeNode(new_id, class_type, dict(inputs), {})
+        self.nodes[new_id] = node
+        return FakeNodeHandle(new_id)
+
+    def connect(self, from_ref, to_ref):
+        # Model an edge as: target node gains an input entry pointing at source id.
+        to_node, _, to_input = to_ref.partition(".")
+        src_node, _, _src_out = from_ref.partition(".")
+        if to_node in self.nodes and isinstance(self.nodes[to_node].inputs, dict):
+            self.nodes[to_node].inputs[to_input] = [src_node]
+        else:
+            raise ValueError(f"disconnect/connect: unknown target {to_ref!r}")
+
+    def disconnect(self, to_ref):
+        node_id, _, input_name = to_ref.partition(".")
+        if node_id not in self.nodes:
+            return False
+        node = self.nodes[node_id]
+        removed = node.inputs.pop(input_name, None)
+        return removed is not None
+
+    def disconnect(self, to_ref):
+        node_id = to_ref.split(".", 1)[0]
+        if node_id in self.nodes:
+            node = self.nodes[node_id]
+            node.inputs.pop(to_ref.split(".", 1)[1], None)
+            return True
+        return False
 
     def export_to_json(self, format="api"):
         assert format == "api"
@@ -551,3 +587,58 @@ async def test_failed_stacked_edit_rolls_back_to_prior_staged_state():
     assert comfy_tools._STAGED[777] is prior
     exported = prior["workflow"].export_to_json(format="api")
     assert exported["7"]["inputs"]["text"] == "good"
+
+
+@pytest.mark.anyio
+async def test_add_node_with_scalar_and_link_inputs():
+    comfy_tools._STAGED.clear()
+    result = await comfy_tools.execute_comfy_workflow(
+        {"source": API_JSON, "mode": "edit",
+         "edit_ops": [
+             {"op": "add_node", "class_type": "Set Latent Noise Mask",
+              "node_id": "900",
+              "inputs": {"latent": ["6", 0], "mask": ["7", 1], "strength": 0.8}},
+         ], "thread_id": 801},
+    )
+    assert result["success"] is True
+    assert "added Set Latent Noise Mask (id=900)" in result["summary"]
+    # Rich confirmation includes source refs, not just input names.
+    assert "latent <- 6.0" in result["summary"]
+    assert "mask <- 7.1" in result["summary"]
+    # Graph assertion: node exists with scalar widget; edges were created.
+    staged = comfy_tools._STAGED[801]["workflow"]
+    assert "900" in staged.nodes
+    n900 = staged.nodes["900"]
+    val = None
+    for source in (getattr(n900, "widgets", {}) or {}, getattr(n900, "inputs", {}) or {}):
+        val = source.get("strength", val)
+    val = getattr(val, "value", val)
+    assert val == 0.8
+
+
+@pytest.mark.anyio
+async def test_connect_and_disconnect_ops():
+    # Node must exist before connecting an edge into it.
+    setup = await comfy_tools.execute_comfy_workflow(
+        {"source": API_JSON, "mode": "edit",
+         "edit_ops": [{"op": "add_node", "class_type": "Set Latent Noise Mask",
+                       "node_id": "900"}],
+         "thread_id": 802},
+    )
+    assert setup["success"] is True
+
+    conn = await comfy_tools.execute_comfy_workflow(
+        {"mode": "edit",
+         "edit_ops": [{"op": "connect", "from": "6.0", "to": "900.latent"}],
+         "thread_id": 802},
+    )
+    assert conn["success"] is True
+    assert "connected 6.0 -> 900.latent" in conn["summary"]
+
+    disc = await comfy_tools.execute_comfy_workflow(
+        {"mode": "edit",
+         "edit_ops": [{"op": "disconnect", "on": "900.latent"}],
+         "thread_id": 802},
+    )
+    assert disc["success"] is True
+    assert "disconnected edge into 900.latent" in disc["summary"]
