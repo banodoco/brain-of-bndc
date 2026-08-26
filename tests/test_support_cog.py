@@ -75,6 +75,28 @@ class FakeDiscordShim:
 
     utils = SimpleNamespace(utcnow=__import__("datetime").datetime.utcnow)
 
+    class ui:
+        class Button:
+            _is_v2 = True
+
+            def __init__(self, *, label=None, style=None, custom_id=None, disabled=False):
+                self.label = label
+                self.style = style
+                self.custom_id = custom_id
+                self.disabled = disabled
+
+            async def callback(self, interaction):
+                pass
+
+        class View:
+            def __init__(self, timeout=None):
+                self.timeout = timeout
+                self.children = []
+
+            def add_item(self, item):
+                self.children.append(item)
+                return self
+
 
 class FakeSupportThread(FakeDiscordShim.Thread):
     def __init__(self, *, tid=456, parent_id=123, history_msgs=None):
@@ -139,6 +161,7 @@ def make_cog(monkeypatch, *, configured=True, support_channel="123"):
         dev_mode=False,
         user=SimpleNamespace(id=999),
         get_cog=lambda name: None,
+        add_view=lambda view: None,
     )
     cog = SupportCog(bot)
     cog.configured = configured
@@ -380,6 +403,7 @@ class TestBuildSeedHistory:
 
 def make_cog(monkeypatch, *, configured=True, support_channel="123"):
     monkeypatch.setattr(support_cog_module, "discord", FakeDiscordShim)
+    monkeypatch.setattr(SupportCog, "_outcome_view", lambda self: None)
     monkeypatch.setenv("SUPPORT_CHANNEL_ID", support_channel)
     monkeypatch.delenv("ADMIN_USER_ID", raising=False)
     bot = SimpleNamespace(
@@ -387,6 +411,7 @@ def make_cog(monkeypatch, *, configured=True, support_channel="123"):
         dev_mode=False,
         user=SimpleNamespace(id=999),
         get_cog=lambda name: None,
+        add_view=lambda view: None,
         guilds=[],
     )
     cog = SupportCog(bot)
@@ -684,3 +709,72 @@ async def test_long_reply_split_at_paragraph_boundaries(monkeypatch):
     recombined_breaks = [i for i in range(1, len(thread.sent)) if not thread.sent[i].startswith("\n")]
     assert all(s.strip() for s in thread.sent)
     assert thread.id not in cog._processing_threads
+
+
+class TestOutcomeRecording:
+    """Resolution buttons: persist choice, disable buttons, confirm to member."""
+
+    def _interaction(self, monkeypatch, thread_id=555, stored=True):
+        sent = {}
+        thread = FakeSupportThread(tid=thread_id)
+        thread.guild = SimpleNamespace(id=789)
+        msg = SimpleNamespace(id=9999, content="answer text")
+        interaction = SimpleNamespace(
+            channel=thread,
+            user=SimpleNamespace(id=42, bot=False, mention="<@42>"),
+            message=msg,
+            response=SimpleNamespace(
+                edit_message=lambda **kw: sent.update(kw) or sent.update({"edited": True}),
+                send_message=AsyncMock(),
+            ),
+        )
+        return thread, interaction, sent
+
+    async def test_records_choice_disables_buttons_and_confirms(self, monkeypatch):
+        cog = make_cog(monkeypatch)
+        rows = {}
+        table = MagicMock()
+        table.upsert.return_value.execute.return_value = None
+        def sb(name):
+            assert name == "support_thread_outcomes"
+            return table
+        cog.db_handler = SimpleNamespace(supabase=SimpleNamespace(table=sb))
+        thread, interaction, sent = self._interaction(monkeypatch)
+
+        await cog.record_outcome(interaction, "resolved")
+
+        assert rows == {}  # no exception path
+        upsert_kwargs = table.upsert.call_args
+        assert upsert_kwargs.args[0]["outcome"] == "resolved"
+        assert upsert_kwargs.args[0]["thread_id"] == 555
+        assert upsert_kwargs.kwargs.get("on_conflict") == "thread_id"
+        assert sent.get("edited") is True
+        content = sent["content"]
+        assert "**Resolved**" in content and "<@42>" in content
+        # All buttons disabled; chosen one marked with a check.
+        view = sent["view"]
+        labels = [(b.label, b.disabled) for b in view.children]
+        assert ("Resolved ✓", True) in labels
+        assert all(disabled for _, disabled in labels)
+
+    async def test_missing_table_degrades_to_message_edit(self, monkeypatch):
+        cog = make_cog(monkeypatch)
+        cog.db_handler = SimpleNamespace(supabase=None)
+        thread, interaction, sent = self._interaction(monkeypatch)
+
+        await cog.record_outcome(interaction, "not_resolved")
+
+        assert sent.get("edited") is True
+        assert "**Not Resolved**" in sent["content"]
+        assert "(not persisted)" in sent["content"]
+
+    async def test_bots_cannot_vote(self, monkeypatch):
+        cog = make_cog(monkeypatch)
+        thread, interaction, sent = self._interaction(monkeypatch)
+        interaction.user = SimpleNamespace(id=1, bot=True, mention="<@1>")
+        interaction.response.send_message = AsyncMock()
+
+        await cog.record_outcome(interaction, "resolved")
+
+        interaction.response.send_message.assert_awaited_once()
+        assert sent == {}

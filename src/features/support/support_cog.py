@@ -45,9 +45,39 @@ class OpenRouterClient(DeepSeekClient):
         base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
         self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
 
+
 # Threads younger than this may still be picked up by the on_ready catch-up.
 CATCHUP_MAX_AGE_SECONDS = 48 * 3600
 HISTORY_SEED_LIMIT = 20
+
+
+class OutcomeView(discord.ui.View):
+    """Persistent Resolved / Probably Resolved / Not Resolved buttons.
+
+    Attached to the last message of every support turn. Survives restarts:
+    fixed custom_ids, timeout=None, registered once via bot.add_view().
+    """
+
+    CHOICES = {
+        "support_outcome:resolved": ("Resolved", discord.ButtonStyle.success),
+        "support_outcome:probably_resolved": ("Probably Resolved", discord.ButtonStyle.primary),
+        "support_outcome:not_resolved": ("Not Resolved", discord.ButtonStyle.danger),
+    }
+
+    def __init__(self, cog: "SupportCog"):
+        super().__init__(timeout=None)
+        self.cog = cog
+        for custom_id, (label, style) in self.CHOICES.items():
+            button = discord.ui.Button(label=label, style=style, custom_id=custom_id)
+            button.callback = self._make_callback(custom_id.rsplit(":", 1)[1])
+            self.add_item(button)
+
+    async def _make_callback(self, choice: str):
+        async def callback(interaction: discord.Interaction):
+            await self.cog.record_outcome(interaction, choice)
+        return callback
+
+
 
 # Cost brake: at most this many missed threads answered per catch-up scan.
 CATCHUP_MAX_THREADS = 3
@@ -269,9 +299,12 @@ class SupportCog(commands.Cog):
                 channel=thread,
                 requester_id=requester_id,
             )
-            for reply in (result.replies or []):
-                for chunk in split_message(reply):
-                    await thread.send(chunk)
+            chunks = [chunk for reply in (result.replies or [])
+                      for chunk in split_message(reply)]
+            for i, chunk in enumerate(chunks):
+                # Resolution buttons ride on the LAST message of the turn.
+                view = self._outcome_view() if chunks and i == len(chunks) - 1 else None
+                await thread.send(chunk, view=view)
         except Exception as e:
             logger.error(
                 "[Support] Turn failed for thread %s: %s", thread.id, e, exc_info=True
@@ -331,6 +364,8 @@ class SupportCog(commands.Cog):
         """Catch-up scan: answer threads that got no bot reply while we were down."""
         if not self.configured:
             return
+        # Persistent resolution buttons survive restarts via fixed custom_ids.
+        self.bot.add_view(self._outcome_view())
         if self._catchup_done:
             return
         self._catchup_done = True
@@ -338,6 +373,69 @@ class SupportCog(commands.Cog):
             await self._catch_up()
         except Exception as e:
             logger.error(f"SupportCog: catch-up scan failed: {e}", exc_info=True)
+
+    def _outcome_view(self):
+        """Build the persistent resolution-button view (stubbed in tests)."""
+        return OutcomeView(self)
+
+    async def record_outcome(self, interaction: discord.Interaction, choice: str):
+        """Persist a Resolved / Probably Resolved / Not Resolved selection."""
+        thread = interaction.channel
+        member = interaction.user
+        if getattr(member, "bot", False):
+            await interaction.response.send_message("Bots can't vote.", ephemeral=True)
+            return
+
+        # Persist (best-effort; the feature degrades to message-edit only if
+        # the staged migration has not been applied yet).
+        stored = False
+        sb = getattr(getattr(self.db_handler, "supabase", None), "table", None)
+        if sb is not None:
+            try:
+                row = {
+                    "thread_id": thread.id,
+                    "guild_id": getattr(thread.guild, "id", None) or 0,
+                    "message_id": interaction.message.id if interaction.message else None,
+                    "member_id": member.id,
+                    "outcome": choice,
+                }
+                (sb("support_thread_outcomes")
+                 .upsert(row, on_conflict="thread_id")
+                 .execute())
+                stored = True
+            except Exception:
+                logger.warning(
+                    "[Support] Could not store outcome for thread %s "
+                    "(table missing? run the staged migration)", thread.id,
+                    exc_info=True,
+                )
+
+        # Disable the buttons and show who marked what.
+        label = dict(OutcomeView.CHOICES.items())[f"support_outcome:{choice}"][0]
+        view = discord.ui.View(timeout=None)
+        for custom_id, (text, style) in OutcomeView.CHOICES.items():
+            button = discord.ui.Button(
+                label=text, style=style, custom_id=custom_id, disabled=True,
+            )
+            if custom_id == f"support_outcome:{choice}":
+                button.label = f"{text} ✓"
+            view.add_item(button)
+        note = (
+            f"Outcome recorded: **{label}** by {member.mention}"
+            + ("" if stored else " (not persisted)")
+        )
+        try:
+            await interaction.response.edit_message(view=view, content=(
+                (interaction.message.content or "") + f"\n\n{note}"
+            ))
+        except Exception:
+            logger.exception(
+                "[Support] Failed to edit outcome message in thread %s", thread.id,
+            )
+            try:
+                await interaction.response.send_message(note, ephemeral=True)
+            except Exception:
+                pass
 
     async def _catch_up(self):
         forum = None
