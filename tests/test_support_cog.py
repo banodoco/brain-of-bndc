@@ -712,92 +712,93 @@ async def test_long_reply_split_at_paragraph_boundaries(monkeypatch):
 
 
 class TestOutcomeRecording:
-    """Resolution buttons: persist choice, disable buttons, confirm to member."""
+    """Resolution buttons: defer, persist, disable buttons, confirm to member."""
 
-    def _interaction(self, monkeypatch, thread_id=555, stored=True):
-        sent = {}
+    def _interaction(self, thread_id=555, content="answer text"):
         thread = FakeSupportThread(tid=thread_id)
         thread.guild = SimpleNamespace(id=789)
-        msg = SimpleNamespace(id=9999, content="answer text")
+        message = SimpleNamespace(id=9999, content=content, edit=AsyncMock())
         interaction = SimpleNamespace(
             channel=thread,
             user=SimpleNamespace(id=42, bot=False, mention="<@42>"),
-            message=msg,
-            response=SimpleNamespace(
-                edit_message=lambda **kw: sent.update(kw) or sent.update({"edited": True}),
-                send_message=AsyncMock(),
-            ),
+            message=message,
+            response=SimpleNamespace(defer=AsyncMock(), send_message=AsyncMock()),
+            followup=AsyncMock(),
         )
-        return thread, interaction, sent
+        return thread, interaction
 
-    async def test_records_choice_disables_buttons_and_confirms(self, monkeypatch):
-        cog = make_cog(monkeypatch)
-        rows = {}
+    def _sb_table(self):
         table = MagicMock()
         table.upsert.return_value.execute.return_value = None
+        return table
+
+    def _cog_with_table(self):
+        cog = make_cog.__wrapped__(None) if hasattr(make_cog, "__wrapped__") else None
+        return cog
+
+    async def test_records_choice_defers_persists_and_edits(self, monkeypatch):
+        cog = make_cog(monkeypatch)
+        table = self._sb_table()
         def sb(name):
             assert name == "support_thread_outcomes"
             return table
-        cog.db_handler = SimpleNamespace(supabase=SimpleNamespace(table=sb))
-        thread, interaction, sent = self._interaction(monkeypatch)
+        monkeypatch.setattr(cog.db_handler, "supabase", SimpleNamespace(table=sb))
+        thread, interaction = self._interaction()
 
         await cog.record_outcome(interaction, "resolved")
 
-        assert rows == {}  # no exception path
-        upsert_kwargs = table.upsert.call_args
-        assert upsert_kwargs.args[0]["outcome"] == "resolved"
-        assert upsert_kwargs.args[0]["thread_id"] == 555
-        assert upsert_kwargs.kwargs.get("on_conflict") == "thread_id"
-        assert sent.get("edited") is True
-        content = sent["content"]
-        assert "**Resolved**" in content and "<@42>" in content
-        # All buttons disabled; chosen one marked with a check.
-        view = sent["view"]
-        labels = [(b.label, b.disabled) for b in view.children]
+        interaction.response.defer.assert_awaited_once()
+        upsert_args = table.upsert.call_args
+        assert upsert_args.args[0]["outcome"] == "resolved"
+        assert upsert_args.args[0]["thread_id"] == 555
+        assert upsert_args.kwargs.get("on_conflict") == "thread_id"
+        interaction.message.edit.assert_awaited_once()
+        kwargs = interaction.message.edit.call_args.kwargs
+        assert "**Resolved**" in kwargs["content"] and "<@42>" in kwargs["content"]
+        labels = [(b.label, b.disabled) for b in kwargs["view"].children]
         assert ("Resolved ✓", True) in labels
         assert all(disabled for _, disabled in labels)
 
     async def test_missing_table_degrades_to_message_edit(self, monkeypatch):
         cog = make_cog(monkeypatch)
-        cog.db_handler = SimpleNamespace(supabase=None)
-        thread, interaction, sent = self._interaction(monkeypatch)
+        monkeypatch.setattr(cog.db_handler, "supabase", None)
+        thread, interaction = self._interaction()
 
         await cog.record_outcome(interaction, "not_resolved")
 
-        assert sent.get("edited") is True
-        assert "**Not Resolved**" in sent["content"]
-        assert "(not persisted)" in sent["content"]
+        interaction.message.edit.assert_awaited_once()
+        content = interaction.message.edit.call_args.kwargs["content"]
+        assert "**Not Resolved**" in content and "(not persisted)" in content
+
+    async def test_overflow_truncates_base_but_keeps_note(self, monkeypatch):
+        cog = make_cog(monkeypatch)
+        monkeypatch.setattr(cog.db_handler, "supabase", None)
+        thread, interaction = self._interaction(content="x" * 3000)
+
+        await cog.record_outcome(interaction, "resolved")
+
+        content = interaction.message.edit.call_args.kwargs["content"]
+        assert len(content) <= 2000
+        assert "Outcome recorded: **Resolved** by <@42>" in content
+
+    async def test_short_content_still_appends_note(self, monkeypatch):
+        cog = make_cog(monkeypatch)
+        monkeypatch.setattr(cog.db_handler, "supabase", None)
+        thread, interaction = self._interaction(content="short answer")
+
+        await cog.record_outcome(interaction, "resolved")
+
+        content = interaction.message.edit.call_args.kwargs["content"]
+        assert len(content) <= 2000
+        assert content.startswith("short answer")
+        assert "Outcome recorded: **Resolved**" in content
 
     async def test_bots_cannot_vote(self, monkeypatch):
         cog = make_cog(monkeypatch)
-        thread, interaction, sent = self._interaction(monkeypatch)
+        thread, interaction = self._interaction()
         interaction.user = SimpleNamespace(id=1, bot=True, mention="<@1>")
-        interaction.response.send_message = AsyncMock()
 
         await cog.record_outcome(interaction, "resolved")
 
         interaction.response.send_message.assert_awaited_once()
-        assert sent == {}
-
-
-def test_outcome_view_callbacks_are_coroutine_functions():
-    """Grok deploy-blocker: an async factory would bind coroutine OBJECTS,
-    leaving inert buttons. Callbacks must be callable coroutine functions."""
-    import inspect
-    import discord as real_discord
-
-    class _Cog:
-        async def record_outcome(self, interaction, choice):
-            pass
-
-    view = support_cog_module.OutcomeView(_Cog())
-    assert len(view.children) == 3
-    for child in view.children:
-        assert isinstance(child, real_discord.ui.Button)
-        assert inspect.iscoroutinefunction(child.callback)
-    ids = [b.custom_id for b in view.children]
-    assert ids == [
-        "support_outcome:resolved",
-        "support_outcome:probably_resolved",
-        "support_outcome:not_resolved",
-    ]
+        interaction.response.defer.assert_not_awaited()

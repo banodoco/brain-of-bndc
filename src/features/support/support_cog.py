@@ -388,6 +388,10 @@ class SupportCog(commands.Cog):
             await interaction.response.send_message("Bots can't vote.", ephemeral=True)
             return
 
+        # Acknowledge immediately so a slow persist can't blow Discord's
+        # 3-second interaction window ("This interaction failed").
+        await interaction.response.defer()
+
         # Persist (best-effort; the feature degrades to message-edit only if
         # the staged migration has not been applied yet).
         stored = False
@@ -426,21 +430,26 @@ class SupportCog(commands.Cog):
             f"Outcome recorded: **{label}** by {member.mention}"
             + ("" if stored else " (not persisted)")
         )
-        try:
-            base = interaction.message.content or ""
+
+        base = interaction.message.content or ""
+        if len(base) + len(note) + 2 <= 2000:
             new_content = f"{base}\n\n{note}" if base else note
-            if len(new_content) > 2000:
-                # Never blow Discord's cap appending the outcome note.
-                new_content = note
-            await interaction.response.edit_message(view=view, content=new_content)
+        elif base:
+            # Truncate the ORIGINAL text to fit — never wipe it.
+            allowed = max(0, 2000 - len(note) - 2)
+            new_content = base[:allowed].rstrip() + "\n\n" + note
+        else:
+            new_content = note[:2000]
+        try:
+            await interaction.message.edit(content=new_content, view=view)
         except Exception:
             logger.exception(
                 "[Support] Failed to edit outcome message in thread %s", thread.id,
             )
-            try:
-                await interaction.response.send_message(note, ephemeral=True)
-            except Exception:
-                pass
+        try:
+            await interaction.followup.send(note, ephemeral=True)
+        except Exception:
+            pass
 
     async def _catch_up(self):
         forum = None
