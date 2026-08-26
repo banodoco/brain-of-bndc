@@ -300,6 +300,7 @@ class SupportCog(commands.Cog):
         try:
             agent = self._ensure_agent()
             if agent is None:
+                error_text = "agent_unavailable: failed to initialize AdminChatAgent"
                 await self._send_fallback(thread)
                 return
             try:
