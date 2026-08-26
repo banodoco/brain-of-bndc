@@ -27,9 +27,9 @@ logger = logging.getLogger('DiscordBot')
 
 SUPPORT_CHANNEL_ID_DEFAULT = "1163250319107555388"
 
-# Support turns run on Ox Alpha via OpenRouter (OpenAI-compatible endpoint).
-# Override the slug with SUPPORT_AGENT_MODEL if OpenRouter renames it.
-SUPPORT_AGENT_MODEL_DEFAULT = "stealth/ox-alpha"
+# Support turns run on Muse Spark 1.2 Contributor via OpenRouter
+# (OpenAI-compatible endpoint). Override with SUPPORT_AGENT_MODEL if needed.
+SUPPORT_AGENT_MODEL_DEFAULT = "meta/muse-spark-1.2-contributor"
 
 
 class OpenRouterClient(DeepSeekClient):
