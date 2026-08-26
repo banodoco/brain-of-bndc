@@ -16,38 +16,210 @@ def split_message(text: str, limit: int = 2000) -> List[str]:
 
     Prefers paragraph breaks (blank lines), then single line breaks,
     then hard slices — so replies break at natural boundaries instead
-    of mid-sentence.
+    of mid-sentence. Fence-aware: tracks ``` blocks (lines starting
+    with ```), avoids splitting inside a fence; if a fence block alone
+    exceeds the limit it is force-split with closing ``` and reopening
+    ``` so each chunk remains valid markdown. Guard covers code block +
+    long text co-occurrence.
     """
     if len(text) <= limit:
         return [text] if text.strip() else []
 
-    # Explode into progressively finer units.
-    paragraphs = text.split("\n\n")
-    units: List[str] = []
-    for para in paragraphs:
-        if len(para) <= limit:
-            units.append(para)
-            continue
-        for line in para.split("\n"):
-            if len(line) <= limit:
-                units.append(line)
-                continue
-            for i in range(0, len(line), limit):
-                units.append(line[i:i + limit])
+    def _is_fence(line: str) -> bool:
+        return line.lstrip().startswith("```")
 
+    # Decompose into fence blocks vs plain-text blocks preserving order.
+    # A fence block is from an opening ``` line through its matching closing
+    # ``` line (or EOF if unclosed, treated as fenced).
+    lines = text.split("\n")
+    blocks: List[tuple] = []  # (kind, block_text) kind in ("text", "fence")
+    cur_lines: List[str] = []
+    in_fence = False
+    for line in lines:
+        is_fence = _is_fence(line)
+        if is_fence:
+            if not in_fence:
+                if cur_lines:
+                    blocks.append(("text", "\n".join(cur_lines)))
+                    cur_lines = []
+                cur_lines.append(line)
+                in_fence = True
+            else:
+                cur_lines.append(line)
+                blocks.append(("fence", "\n".join(cur_lines)))
+                cur_lines = []
+                in_fence = False
+        else:
+            cur_lines.append(line)
+    if cur_lines:
+        blocks.append(("fence" if in_fence else "text", "\n".join(cur_lines)))
+
+    # Turn each block into packable units; fence blocks stay atomic unless
+    # they alone exceed the limit (then force-split with fence wrappers).
+    all_units: List[str] = []
+    for kind, block in blocks:
+        if kind == "text":
+            if not block.strip():
+                continue
+            paragraphs = block.split("\n\n")
+            for para in paragraphs:
+                if len(para) <= limit:
+                    all_units.append(para)
+                    continue
+                for line in para.split("\n"):
+                    if len(line) <= limit:
+                        all_units.append(line)
+                        continue
+                    for i in range(0, len(line), limit):
+                        all_units.append(line[i:i + limit])
+        else:
+            # fence block
+            if len(block) <= limit:
+                all_units.append(block)
+                continue
+            # Force-split: inner content sliced with wrappers so each
+            # chunk has balanced fences. Prefer \n\n / \n boundaries
+            # inside the fence when possible, else hard slice.
+            blk_lines = block.split("\n")
+            opening = blk_lines[0]
+            # Detect closing line
+            if blk_lines[-1].lstrip().startswith("```"):
+                closing = blk_lines[-1]
+                inner = "\n".join(blk_lines[1:-1])
+            else:
+                closing = "```"
+                inner = "\n".join(blk_lines[1:])
+
+            # If inner is empty (empty fence), just slice the block
+            if not inner:
+                for i in range(0, len(block), max(1, limit - 8)):
+                    all_units.append(block[i:i+limit])
+                continue
+
+            # Slice inner into slices that fit when wrapped
+            def _avail(is_first: bool) -> int:
+                op = opening if is_first else "```"
+                # op + "\n" + slice + "\n" + closing <= limit
+                return limit - len(op) - 1 - 1 - len(closing)
+
+            # Use a simple boundary-preferring splitter for inner
+            def _split_inner(s: str, avail: int) -> List[str]:
+                if len(s) <= avail:
+                    return [s]
+                parts: List[str] = []
+                rem = s
+                while rem:
+                    if len(rem) <= avail:
+                        parts.append(rem)
+                        break
+                    window = rem[:avail]
+                    # prefer \n\n then \n
+                    cut = -1
+                    idx = window.rfind("\n\n")
+                    if idx > avail // 3:
+                        cut = idx
+                    else:
+                        idx2 = window.rfind("\n")
+                        if idx2 > avail // 3:
+                            cut = idx2
+                    if cut == -1:
+                        cut = avail
+                    # avoid empty slice due to leading newlines
+                    slice_text = rem[:cut].rstrip("\n")
+                    if not slice_text.strip():
+                        cut = avail
+                        slice_text = rem[:cut]
+                    parts.append(slice_text)
+                    rem = rem[cut:].lstrip("\n")
+                    # avail may differ for subsequent slices (use avail_rest)
+                    # caller handles avail change; for inner helper we keep same avail
+                return parts
+
+            # Iteratively carve inner so first slice uses opening-sized avail
+            remaining = inner
+            is_first = True
+            slices: List[str] = []
+            while remaining:
+                avail = _avail(is_first)
+                if avail < 10:
+                    avail = 10
+                if len(remaining) <= avail:
+                    slices.append(remaining)
+                    break
+                # Find preferred cut within avail
+                window = remaining[:avail]
+                cut = -1
+                idx = window.rfind("\n\n")
+                if idx > avail // 3:
+                    cut = idx
+                else:
+                    idx2 = window.rfind("\n")
+                    if idx2 > avail // 3:
+                        cut = idx2
+                if cut == -1:
+                    cut = avail
+                slice_text = remaining[:cut].rstrip("\n")
+                if not slice_text.strip():
+                    cut = avail
+                    slice_text = remaining[:cut]
+                slices.append(slice_text)
+                remaining = remaining[cut:].lstrip("\n")
+                is_first = False
+
+            for idx, sl in enumerate(slices):
+                op = opening if idx == 0 else "```"
+                all_units.append(f"{op}\n{sl}\n{closing}")
+
+    # Pack units into final chunks, never exceeding limit. A unit is
+    # already <= limit (fence slices were wrapped to fit), so packing
+    # just needs candidate length check. We avoid joining with \n\n
+    # across fence boundaries that would break balance — but since each
+    # fence unit already has balanced fences, concatenation stays balanced.
     chunks: List[str] = []
     current = ""
-    for unit in units:
+    for unit in all_units:
+        if not unit.strip():
+            continue
         candidate = f"{current}\n\n{unit}" if current else unit
         if len(candidate) <= limit:
             current = candidate
             continue
         if current:
             chunks.append(current)
-        current = unit
+        # unit already <= limit by construction; if still > limit (defensive)
+        if len(unit) > limit:
+            for i in range(0, len(unit), limit):
+                chunks.append(unit[i:i+limit])
+            current = ""
+        else:
+            current = unit
     if current:
         chunks.append(current)
-    return [c for c in (chunk.strip() for chunk in chunks) if c]
+
+    # Defensive: ensure each chunk is balanced (even fence count); if
+    # somehow we still produced an odd trailing fence (e.g. unclosed
+    # input), close it. This is the co-occurrence guard for code block
+    # + long text where an earlier heuristic might leave a chunk open.
+    balanced: List[str] = []
+    for chunk in chunks:
+        fence_lines = sum(1 for l in chunk.split("\n") if l.lstrip().startswith("```"))
+        if fence_lines % 2 == 1:
+            # unbalanced — close at end of chunk
+            if len(chunk) + 4 <= limit:
+                chunk = chunk.rstrip() + "\n```"
+            else:
+                # need to make room; trim a little then close
+                chunk = chunk[: limit - 4].rstrip() + "\n```"
+        balanced.append(chunk)
+
+    # If still balanced but original ended inside fence and we sliced
+    # without reopening (should not happen after block logic), fix by
+    # ensuring fence count parity across the sequence: if a chunk was
+    # closed artificially, next chunk should already have been reopened
+    # via the forced-split path. No further fix needed.
+
+    return [c for c in (chunk.strip() for chunk in balanced) if c]
+
 
 
 def emoji_to_str(emoji) -> str:

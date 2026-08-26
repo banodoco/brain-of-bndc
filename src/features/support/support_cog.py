@@ -10,6 +10,7 @@ answers; defaults to the BNDC support forum 1163250319107555388; set empty
 to disable). Documented here rather than .env.example, which is untracked.
 """
 
+import asyncio
 import hashlib
 import logging
 import os
@@ -170,6 +171,9 @@ class SupportCog(commands.Cog):
         self.agent: AdminChatAgent = None
 
         # In-memory guard against concurrent processing of the same thread.
+        # _processing_threads check/add is single-tick atomic: no await between
+        # `if id in set` and `add(id)` (same as grants_cog), so no lock needed
+        # under single-threaded asyncio; adding an await between them would break dedup.
         self._processing_threads: set = set()
 
         # on_ready can fire more than once per process (reconnects); run
@@ -361,7 +365,7 @@ class SupportCog(commands.Cog):
                 "error": error,
                 "duration_ms": duration_ms,
             }
-            (sb("support_agent_turns").insert(row).execute())
+            await asyncio.to_thread(lambda: sb("support_agent_turns").insert(row).execute())
         except Exception:
             logger.warning(
                 "[Support] Could not persist turn for thread %s "
@@ -463,9 +467,7 @@ class SupportCog(commands.Cog):
                     "member_id": member.id,
                     "outcome": choice,
                 }
-                (sb("support_thread_outcomes")
-                 .upsert(row, on_conflict="thread_id")
-                 .execute())
+                await asyncio.to_thread(lambda: sb("support_thread_outcomes").upsert(row, on_conflict="thread_id").execute())
                 stored = True
             except Exception:
                 logger.warning(

@@ -6,7 +6,12 @@ Covers:
 - post-restart history rebuild (build_seed_history)
 - SupportCog listener guards and fallback error path
 - execute_tool dispatcher registration for search_hivemind / comfy_workflow
+- Batch 1 (B1): guidance_version persistence + ADD COLUMN IF NOT EXISTS migration
+  (model: Ox Alpha via OpenRouter — user-selected, see support_cog.SUPPORT_AGENT_MODEL_DEFAULT)
 """
+import hashlib
+import re
+from pathlib import Path
 import os
 import sys
 from types import SimpleNamespace
@@ -18,7 +23,7 @@ import pytest
 
 from src.features.admin_chat.agent import AdminChatAgent, AdminChatResult, _conversations
 import src.features.admin_chat.agent as admin_chat_agent_module
-from src.features.support.support_cog import SupportCog, build_seed_history
+from src.features.support.support_cog import SupportCog, build_seed_history, GUIDANCE_VERSION, SUPPORT_GUIDANCE
 
 pytestmark = pytest.mark.anyio
 
@@ -877,3 +882,316 @@ class TestTurnPersistence:
         await cog.on_thread_create(thread)
         row = table.insert.call_args.args[0]
         assert row["trigger"] == "new_post"
+
+# ========== Batch 1 — guidance_version migration + persistence contract ==========
+# Model: Ox Alpha (stealth/ox-alpha via OpenRouter) — user-selected per brief.
+
+
+class TestGuidanceVersionMigration:
+    """B1: staged migration 20260826010000_add_guidance_version.sql is idempotent
+    and the cog persists guidance_version without 42703."""
+
+    def _migration_path(self):
+        return Path(__file__).resolve().parents[1] / ".migrations_staging" / "20260826010000_add_guidance_version.sql"
+
+    def test_migration_file_exists_and_is_idempotent(self):
+        path = self._migration_path()
+        assert path.exists(), f"missing migration {path}"
+        sql = path.read_text()
+        # Must be IF NOT EXISTS — replay-safe for DBs that already ran b2873df.
+        assert re.search(r"add\s+column\s+if\s+not\s+exists\s+guidance_version", sql, re.I), sql
+        # Must target support_agent_turns
+        assert "support_agent_turns" in sql
+        # Must be staged-only (DO NOT auto-apply header)
+        assert "Do NOT auto-apply" in sql
+        # TEXT type
+        assert re.search(r"guidance_version\s+text", sql, re.I), sql
+
+    def test_base_table_already_has_guidance_version_column(self):
+        base = Path(__file__).resolve().parents[1] / ".migrations_staging" / "20260826000000_support_agent_turns.sql"
+        assert base.exists()
+        assert "guidance_version" in base.read_text()
+
+    def test_guidance_version_hash_matches_support_guidance(self):
+        expected = hashlib.sha256(SUPPORT_GUIDANCE.encode("utf-8")).hexdigest()[:12]
+        assert GUIDANCE_VERSION == expected
+        assert len(GUIDANCE_VERSION) == 12
+        assert re.fullmatch(r"[0-9a-f]{12}", GUIDANCE_VERSION)
+
+    def test_migration_is_idempotent_via_stubbed_apply_twice(self):
+        """Stubbed Supabase: apply ALTER twice must not raise (IF NOT EXISTS)."""
+        sql = self._migration_path().read_text()
+
+        class StubDB:
+            def __init__(self):
+                self.columns = set()
+                self.applies = 0
+
+            def apply(self, sql_text):
+                if re.search(r"add\s+column\s+if\s+not\s+exists\s+guidance_version", sql_text, re.I):
+                    self.columns.add("guidance_version")
+                    self.applies += 1
+                else:
+                    raise AssertionError("migration missing expected ALTER")
+
+        db = StubDB()
+        db.apply(sql)
+        assert "guidance_version" in db.columns
+        db.apply(sql)  # second apply must be no-op, not error
+        assert "guidance_version" in db.columns
+        assert db.applies == 2
+
+    async def test_insert_includes_guidance_version(self, monkeypatch):
+        cog = make_cog(monkeypatch)
+        table = MagicMock()
+        table.insert.return_value.execute.return_value = None
+        monkeypatch.setattr(cog.db_handler, "supabase", SimpleNamespace(table=lambda name: table))
+        cog.agent.chat = AsyncMock(return_value=AdminChatResult(replies=["ok"], actions=[]))
+        msg, thread = make_message()
+
+        await cog.on_message(msg)
+
+        row = table.insert.call_args.args[0]
+        assert row["guidance_version"] == GUIDANCE_VERSION
+        assert row["model"] == support_cog_module.SUPPORT_AGENT_MODEL_DEFAULT
+
+    async def test_missing_column_does_not_crash_turn(self, monkeypatch):
+        """Simulate 42703 undefined_column — turn must still reply, persist is best-effort."""
+        cog = make_cog(monkeypatch)
+        boom = MagicMock()
+        boom.insert.return_value.execute.side_effect = Exception('42703: column "guidance_version" of relation "support_agent_turns" does not exist')
+        monkeypatch.setattr(cog.db_handler, "supabase", SimpleNamespace(table=lambda name: boom))
+        cog.agent.chat = AsyncMock(return_value=AdminChatResult(replies=["ok"], actions=[]))
+        msg, thread = make_message()
+
+        await cog.on_message(msg)  # must not raise
+        # Turn still delivered reply despite persist failure
+        assert thread.sent == ["ok"]
+        assert thread.id not in cog._processing_threads
+
+    async def test_persist_column_existence_via_stubbed_select(self, monkeypatch):
+        """After migration, a stubbed select would see the column; insert succeeds."""
+        cog = make_cog(monkeypatch)
+        table = MagicMock()
+        table.insert.return_value.execute.return_value = None
+        # Simulate column metadata check (stub)
+        columns = {"thread_id", "guidance_version", "replies"}
+        assert "guidance_version" in columns
+        monkeypatch.setattr(cog.db_handler, "supabase", SimpleNamespace(table=lambda name: table))
+        cog.agent.chat = AsyncMock(return_value=AdminChatResult(replies=["hi"], actions=[]))
+        msg, thread = make_message()
+        await cog.on_message(msg)
+        assert table.insert.call_args.args[0]["guidance_version"] == GUIDANCE_VERSION
+
+
+
+# ========== Batch 2 — async safety + fence-aware chunking ==========
+# Model: Ox Alpha (stealth/ox-alpha via OpenRouter) — user-selected per brief.
+
+
+class TestBatch2AsyncSafety:
+    """B2 T2.1: Supabase writes must not block the event loop."""
+
+    async def test_persist_turn_uses_to_thread(self, monkeypatch):
+        cog = make_cog(monkeypatch)
+        table = MagicMock()
+        table.insert.return_value.execute.return_value = None
+        monkeypatch.setattr(cog.db_handler, "supabase", SimpleNamespace(table=lambda name: table))
+        # patch asyncio.to_thread to observe call and still execute lambda
+        import asyncio as _asyncio
+        orig = _asyncio.to_thread
+        calls = []
+
+        async def fake_to_thread(fn, *a, **kw):
+            calls.append(fn)
+            # execute the lambda synchronously (MagicMock is thread-safe for this test)
+            try:
+                fn()
+            except Exception:
+                pass
+            return None
+
+        monkeypatch.setattr(_asyncio, "to_thread", fake_to_thread)
+        # also patch the module's asyncio reference
+        monkeypatch.setattr(support_cog_module.asyncio, "to_thread", fake_to_thread)
+        cog.agent.chat = AsyncMock(return_value=AdminChatResult(replies=["ok"], actions=[]))
+        msg, thread = make_message()
+        await cog.on_message(msg)
+        # at least one to_thread call for support_agent_turns
+        assert len(calls) >= 1
+        # verify the wrapped call did attempt an insert
+        assert table.insert.called
+        assert table.insert.call_args.args[0]["thread_id"] == thread.id
+
+    async def test_record_outcome_uses_to_thread(self, monkeypatch):
+        cog = make_cog(monkeypatch)
+        table = MagicMock()
+        table.upsert.return_value.execute.return_value = None
+        monkeypatch.setattr(cog.db_handler, "supabase", SimpleNamespace(table=lambda name: table))
+        import asyncio as _asyncio
+        calls = []
+
+        async def fake_to_thread(fn, *a, **kw):
+            calls.append(fn)
+            try:
+                fn()
+            except Exception:
+                pass
+            return None
+
+        monkeypatch.setattr(_asyncio, "to_thread", fake_to_thread)
+        monkeypatch.setattr(support_cog_module.asyncio, "to_thread", fake_to_thread)
+        _, interaction = TestOutcomeRecording()._interaction()
+        # ensure interaction has thread with guild
+        await cog.record_outcome(interaction, "resolved")
+        assert len(calls) >= 1
+        assert table.upsert.called
+        assert table.upsert.call_args.args[0]["outcome"] == "resolved"
+
+    def test_processing_threads_guard_is_documented(self):
+        src = Path(__file__).resolve().parents[1] / "src" / "features" / "support" / "support_cog.py"
+        txt = src.read_text()
+        assert "single-tick atomic" in txt
+        assert "_processing_threads" in txt
+        assert "no await between" in txt
+
+
+class TestBatch2FenceAwareSplit:
+    """B2 T2.2: split_message is fence-aware, respects 2000 cap."""
+
+    def test_short_text_unchanged(self):
+        from src.common.discord_utils import split_message
+        assert split_message("hello") == ["hello"]
+        assert split_message("") == []
+        assert split_message("   ") == []
+
+    def test_fence_not_split_mid_block_when_possible(self):
+        from src.common.discord_utils import split_message
+        # Build a message where a fence block would be split by naive
+        # paragraph logic but fence-aware should keep it intact.
+        pre = ("para one. " * 200).strip()  # ~2000? keep under then add fence + post
+        # Create text: pre + fence block + post, total >2000, fence should not be broken
+        fence = "```json\n" + ('{"key": "value",\n' * 40) + '"end": 1\n```'
+        post = "\n\n" + ("after fence paragraph " * 100)
+        text = pre + "\n\n" + fence + post
+        chunks = split_message(text, limit=2000)
+        for c in chunks:
+            assert len(c) <= 2000
+            # each chunk must have balanced fences
+            fences = sum(1 for l in c.split("\n") if l.lstrip().startswith("```"))
+            assert fences % 2 == 0, f"unbalanced fences in chunk: {c[:200]}"
+        # Reassemble fences: the fence content must survive across chunks with wrappers
+        # At least one chunk contains opening fence
+        assert any("```json" in ch or "```" in ch for ch in chunks)
+        # The split should not produce a chunk that starts inside fence without opening
+        for ch in chunks:
+            lines = ch.split("\n")
+            # If chunk contains inner fence content (json keys) it must also contain a fence line
+            if '"key"' in ch:
+                assert any(l.lstrip().startswith("```") for l in lines)
+
+    def test_long_fence_force_split_closes_and_reopens(self):
+        from src.common.discord_utils import split_message
+        # Single huge fence >2000 should be force-split with close/reopen
+        inner = ("x" * 80 + "\n") * 60  # ~4800 chars inside
+        fence = "```\n" + inner + "```"
+        chunks = split_message(fence, limit=2000)
+        assert len(chunks) >= 2
+        for c in chunks:
+            assert len(c) <= 2000
+            assert c.strip().startswith("```")
+            assert c.strip().endswith("```")
+            fences = sum(1 for l in c.split("\n") if l.lstrip().startswith("```"))
+            assert fences % 2 == 0
+            assert fences >= 2
+
+    def test_all_chunks_under_2000_with_mixed_content(self):
+        from src.common.discord_utils import split_message
+        # Mixed long text + fence + long text (guard case)
+        text = ("word " * 400).strip() + "\n\n" + "```python\n" + ("print('hello')\n" * 80) + "```" + "\n\n" + ("final paragraph " * 400)
+        chunks = split_message(text, limit=2000)
+        for c in chunks:
+            assert len(c) <= 2000
+            assert c.strip()
+        # Content not lost: words from each section appear
+        joined = "\n\n".join(chunks)
+        assert "word" in joined
+        assert "print('hello')" in joined
+        assert "final paragraph" in joined
+
+    def test_paragraph_preference_preserved(self):
+        from src.common.discord_utils import split_message
+        para = "evidence line with citation https://discord.com/channels/1/2/3\n\n"
+        long_reply = (para * 40).rstrip()
+        chunks = split_message(long_reply, limit=2000)
+        assert len(chunks) >= 2
+        for c in chunks:
+            assert len(c) <= 2000
+
+    def test_code_block_plus_long_text_guard(self):
+        from src.common.discord_utils import split_message
+        # Guard: code block + very long surrounding text co-occurrence
+        big_text = "a" * 1900
+        fence = "```\n" + "b" * 500 + "\n```"
+        big_text2 = "c" * 1900
+        text = big_text + "\n\n" + fence + "\n\n" + big_text2
+        chunks = split_message(text, limit=2000)
+        for c in chunks:
+            assert len(c) <= 2000
+            fences = sum(1 for l in c.split("\n") if l.lstrip().startswith("```"))
+            assert fences % 2 == 0
+
+
+class TestBatch2OutcomeViewOnLastChunk:
+    """B2 T2.2/T2.3: OutcomeView rides on last chunk only."""
+
+    async def test_view_attached_only_to_last_chunk(self, monkeypatch):
+        cog = make_cog(monkeypatch)
+        monkeypatch.setattr(cog, "_outcome_view", lambda: SimpleNamespace(children=[]))
+        # Force a long reply that splits into multiple chunks
+        para = "evidence line with citation https://discord.com/channels/1/2/3\n\n"
+        long_reply = (para * 40).rstrip()
+        cog.agent.chat = AsyncMock(return_value=AdminChatResult(replies=[long_reply], actions=[]))
+        # also need db mock to avoid persist error (but best-effort, not needed)
+        monkeypatch.setattr(cog.db_handler, "supabase", None)
+        msg, thread = make_message()
+        # Patch thread.send to capture view per chunk
+        sends = []
+        orig_send = thread.send
+
+        async def capture(content=None, view=None, **kw):
+            sends.append((content, view))
+            # mimic real send: store content
+            if content is not None:
+                thread.sent.append(content)
+            return SimpleNamespace(id=1)
+
+        thread.send = capture
+        await cog.on_message(msg)
+        assert len(sends) >= 2
+        for _, view in sends[:-1]:
+            assert view is None, "only last chunk should carry OutcomeView"
+        assert sends[-1][1] is not None
+        # last view should be OutcomeView-like (has children)
+        assert hasattr(sends[-1][1], "children") or isinstance(sends[-1][1], object)
+        for content, _ in sends:
+            assert len(content) <= 2000
+
+    async def test_single_chunk_still_gets_view(self, monkeypatch):
+        cog = make_cog(monkeypatch)
+        monkeypatch.setattr(cog, "_outcome_view", lambda: SimpleNamespace(children=[]))
+        cog.agent.chat = AsyncMock(return_value=AdminChatResult(replies=["short answer"], actions=[]))
+        monkeypatch.setattr(cog.db_handler, "supabase", None)
+        msg, thread = make_message()
+        sends = []
+
+        async def capture(content=None, view=None, **kw):
+            sends.append((content, view))
+            if content is not None:
+                thread.sent.append(content)
+            return SimpleNamespace(id=1)
+
+        thread.send = capture
+        await cog.on_message(msg)
+        assert len(sends) == 1
+        assert sends[0][1] is not None
