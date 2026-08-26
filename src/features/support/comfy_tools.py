@@ -9,6 +9,7 @@ import copy
 import io
 import json
 import logging
+import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -119,7 +120,7 @@ async def _fetch_workflow_json(url: str) -> Dict[str, Any]:
             f"{MAX_WORKFLOW_BYTES // (1024 * 1024)}MB size limit"
         )
     try:
-        return json.loads(payload.decode('utf-8'))
+        return _lenient_json_loads(payload.decode('utf-8'))
     except (UnicodeDecodeError, ValueError) as exc:
         raise ValueError(f"Workflow document at {url} is not valid JSON: {exc}") from exc
 
@@ -134,13 +135,47 @@ def _coerce_thread_id(value: Any) -> Optional[int]:
         return None
 
 
+def _lenient_json_loads(text: str) -> Dict[str, Any]:
+    """Parse workflow JSON, tolerating common hand-edit mistakes.
+
+    Fixes:
+    - trailing commas before } or ] (e.g. {"a": 1,})
+    - unquoted `id` values like \"id\": 105_rope  → \"id\": \"105_rope\"
+    - bare node ids in arrays like [4, 105, 0, 105_rope, 0, "MODEL"]
+      (same fix, quoted to \"105_rope\")
+    Falls back to strict json.loads on success; re-raises the original
+    error if lenient fixes do not help.
+    """
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as orig:
+        fixed = text
+        # Quote bare id tokens that are not pure integers (e.g. 105_rope).
+        def _quote_id(m):
+            token = m.group(1)
+            if token.isdigit():
+                return m.group(0)
+            return f'"id": "{token}"{m.group(2)}'
+        fixed = re.sub(r'"id"\s*:\s*([A-Za-z0-9_]+)\s*([,}])', _quote_id, fixed)
+        # Quote bare node ids that appear as values in arrays/links (e.g. 105_rope)
+        # Only tokens containing underscore (to avoid quoting pure numbers) and
+        # not already quoted (lookarounds ensure that).
+        fixed = re.sub(r'(?<![\w"])([0-9]+_[A-Za-z0-9_]+)(?![\w"])', r'"\1"', fixed)
+        # Remove trailing commas before } or ].
+        fixed = re.sub(r',\s*([}\]])', r'\1', fixed)
+        try:
+            return json.loads(fixed)
+        except json.JSONDecodeError:
+            raise orig
+
+
 def _load_raw_source(source: str):
     """Parse the source parameter into a raw workflow dict."""
     stripped = str(source).strip()
     lowered = stripped.lower()
     if lowered.startswith('http://') or lowered.startswith('https://'):
         return None, stripped  # caller fetches asynchronously
-    raw = json.loads(stripped)
+    raw = _lenient_json_loads(stripped)
     if not isinstance(raw, dict):
         raise ValueError("Workflow JSON must decode to an object")
     return raw, None

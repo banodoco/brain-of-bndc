@@ -118,13 +118,17 @@ post; if they want more changes later, they can attach the file again in a \
 new message and you start a fresh staging round.
 - If a tool fails (e.g. vibecomfy unavailable), say so plainly, answer from \
 evidence you do have, and note the member can re-post to retry later.
+- If no response is needed (e.g. thread already answered, duplicate, or \
+nothing actionable), call end_turn — this exits the turn without posting \
+anything. Use reply for everything else.
+- Your messages are sent as threaded replies to the message that triggered \
+the turn by default, so the member is notified.
 - When relevant, onboard members to VibeComfy: \
 `pip install vibecomfy --extra-index-url https://nodes.appmana.com/simple/`
 - Admit unknowns plainly instead of guessing.
 - Hand off to {ADMIN_MENTION} when asked about billing, grants, or payments, \
 or whenever you are stuck.
 - Tone: concise, warm, no lecturing."""
-
 # Hash of the guidance text, persisted with every turn so rows can always be
 # tied to the exact prompt version that produced them.
 GUIDANCE_VERSION = hashlib.sha256(SUPPORT_GUIDANCE.encode("utf-8")).hexdigest()[:12]
@@ -310,13 +314,8 @@ class SupportCog(commands.Cog):
             len(seeded), thread.id,
         )
         return True
-    async def _starter_content(self, thread: discord.Thread) -> tuple:
-        """Best-effort text and author of the post that started this thread.
-
-        Returns (content, requester_id); requester_id is None when the
-        starter's author cannot be resolved. Attachment URLs are appended
-        so the agent sees workflow files.
-        """
+    async def _get_starter_message(self, thread: discord.Thread):
+        """Fetch the Message that started this forum thread, if any."""
         starter = getattr(thread, 'starter_message', None)
         if starter is None:
             try:
@@ -328,6 +327,16 @@ class SupportCog(commands.Cog):
                         break
                 except Exception:
                     starter = None
+        return starter
+
+    async def _starter_content(self, thread: discord.Thread) -> tuple:
+        """Best-effort text and author of the post that started this thread.
+
+        Returns (content, requester_id); requester_id is None when the
+        starter's author cannot be resolved. Attachment URLs are appended
+        so the agent sees workflow files.
+        """
+        starter = await self._get_starter_message(thread)
         if starter is None:
             return thread.name, None
         content = _content_with_attachments(starter).strip()
@@ -343,7 +352,8 @@ class SupportCog(commands.Cog):
             logger.exception("[Support] Fallback message failed for thread %s", thread.id)
 
     async def _run_turn_guarded(self, thread: discord.Thread, user_message: str,
-                                requester_id=None, trigger: str = "follow_up"):
+                                requester_id=None, trigger: str = "follow_up",
+                                trigger_msg: discord.Message | None = None):
         """Run one agent turn and persist it structurally.
 
         Every turn — including tool-call traces and failures — lands in the
@@ -396,11 +406,21 @@ class SupportCog(commands.Cog):
                                 self._buttons_shown.add(thread.id)
                 except Exception:
                     pass
+            reference = None
+            if trigger_msg is not None:
+                try:
+                    reference = trigger_msg.to_reference(fail_if_not_exists=False)
+                except Exception:
+                    reference = None
             for i, chunk in enumerate(chunks):
                 view = self._outcome_view() if should_attach and i == len(chunks) - 1 else None
                 if view is not None:
                     self._buttons_shown.add(thread.id)
-                await thread.send(chunk, view=view)
+                # First chunk replies to the triggering message so the member is notified.
+                kwargs = {"view": view} if view is not None else {}
+                if reference is not None and i == 0:
+                    kwargs["reference"] = reference
+                await thread.send(chunk, **kwargs)
         except Exception as e:
             error_text = f"{type(e).__name__}: {e}"
             logger.error(
@@ -464,9 +484,13 @@ class SupportCog(commands.Cog):
                 await thread.join()
             except Exception:
                 logger.warning("[Support] Could not join thread %s", thread.id)
+            starter_msg = await self._get_starter_message(thread)
             user_message, requester_id = await self._starter_content(thread)
+            # Preserve the starter Message object for reply threading when possible.
+            if starter_msg is None and user_message == thread.name:
+                starter_msg = None
             await self._run_turn_guarded(thread, user_message, requester_id,
-                                         trigger="new_post")
+                                         trigger="new_post", trigger_msg=starter_msg)
         finally:
             self._processing_threads.discard(thread.id)
 
@@ -487,14 +511,10 @@ class SupportCog(commands.Cog):
         # the initial turn; the on_ready catch-up covers any misses.
         if message.id == channel.id:
             return
-        if channel.id in self._processing_threads:
-            self._pending_messages.setdefault(channel.id, []).append(message)
-            return
-        self._processing_threads.add(channel.id)
         try:
             await self._run_turn_guarded(channel, _content_with_attachments(message),
                                          requester_id=message.author.id,
-                                         trigger="follow_up")
+                                         trigger="follow_up", trigger_msg=message)
             # Drain any follow-ups that arrived while the turn was in-flight.
             # Loop (not recursion) so a burst of messages is processed in order.
             while self._pending_messages.get(channel.id):
@@ -508,7 +528,7 @@ class SupportCog(commands.Cog):
                 p_author_id = getattr(getattr(pending, 'author', None), 'id', None)
                 await self._run_turn_guarded(p_channel, p_content,
                                              requester_id=p_author_id,
-                                             trigger="follow_up")
+                                             trigger="follow_up", trigger_msg=pending)
         finally:
             self._processing_threads.discard(channel.id)
     @commands.Cog.listener()
@@ -706,19 +726,23 @@ class SupportCog(commands.Cog):
                 # this picks up follow-ups that arrived while the bot was down.
                 user_message = None
                 requester_id = None
+                trigger_msg = None
                 try:
                     async for m in thread.history(limit=HISTORY_SEED_LIMIT, oldest_first=False):
                         if not getattr(getattr(m, 'author', None), 'bot', False):
-                            user_message = _content_with_attachments(m).strip()
-                            requester_id = getattr(getattr(m, 'author', None), 'id', None)
-                            if user_message:
+                            msg_text = _content_with_attachments(m).strip()
+                            if msg_text:
+                                user_message = msg_text
+                                requester_id = getattr(getattr(m, 'author', None), 'id', None)
+                                trigger_msg = m
                                 break
                 except Exception:
                     user_message = None
                 if not user_message:
                     user_message, requester_id = await self._starter_content(thread)
+                    trigger_msg = await self._get_starter_message(thread)
                 await self._run_turn_guarded(thread, user_message, requester_id,
-                                             trigger="catch_up")
+                                             trigger="catch_up", trigger_msg=trigger_msg)
                 answered += 1
                 if answered >= CATCHUP_MAX_THREADS:
                     break
