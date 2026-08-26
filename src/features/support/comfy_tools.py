@@ -569,3 +569,132 @@ async def _post_workflow_file(bot: Any, thread_id: Any, workflow_json: str) -> b
     except Exception:
         logger.exception("comfy_workflow: failed to post edited workflow file")
         return False
+
+
+# ========== send_file_to_thread: general-purpose attachment tool ==========
+
+SEND_FILE_TOOL = {
+    "name": "send_file_to_thread",
+    "description": (
+        "Attach a file to the current support thread so the member can "
+        "download it. Use this whenever you have finished content the member "
+        "should keep — an edited workflow, a reference workflow fetched from "
+        "the community, a text walkthrough, a patch file — anything worth a "
+        "downloadable artifact rather than an inline code block. Pass raw "
+        "text/JSON as content (it becomes the file body), or pass source_url "
+        "to stream a remote file straight through. Call it once per artifact; "
+        "the file posts to the thread and you get a confirmation summary to "
+        "reference in your reply."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "content": {
+                "type": "string",
+                "description": "The file body as text (workflow JSON, notes, a patch script). Required unless source_url is given.",
+            },
+            "filename": {
+                "type": "string",
+                "description": "Name for the attached file. Defaults to a timestamped name based on kind.",
+            },
+            "kind": {
+                "type": "string",
+                "enum": ["workflow", "notes", "patch", "other"],
+                "description": "What the file is — controls default filename and how the confirmation reads.",
+            },
+            "source_url": {
+                "type": "string",
+                "description": "Optional https URL to fetch instead of using `content` (e.g. attach a community workflow you found). Same host allowlist as comfy_workflow sources.",
+            },
+            "note_for_member": {
+                "type": "string",
+                "description": "One line to show next to the confirmation telling the member what this file is.",
+            },
+        },
+        "required": ["filename"],
+    },
+}
+
+
+async def execute_send_file_to_thread(tool_input, bot=None):
+    """Post arbitrary text (or a fetched URL) as a downloadable Discord file.
+
+    Never raises. Returns {success, filename, ...} on completion or
+    {success: False, error} on failure.
+    """
+    import io
+    import time as _time
+
+    filename = str(tool_input.get("filename") or "").strip()
+    content = tool_input.get("content")
+    source_url = tool_input.get("source_url")
+    note = tool_input.get("note_for_member") or ""
+    kind = tool_input.get("kind") or "other"
+    thread_id = _coerce_thread_id(tool_input.get("thread_id"))
+
+    if not filename:
+        base = {"workflow": "edited_workflow", "notes": "support_notes",
+                "patch": "patch"}.get(kind, "attachment")
+        stamp = int(_time.time())
+        ext = ".json" if kind in ("workflow",) else ".txt"
+        filename = f"{base}_{stamp}{ext}"
+
+    # Fetch from URL when no inline content.
+    if content is None and source_url:
+        try:
+            import aiohttp
+            parsed = urlparse(source_url)
+            if parsed.scheme != 'https' or parsed.hostname not in ALLOWED_WORKFLOW_HOSTS:
+                return {"success": False,
+                        "error": f"source_url host must be one of: {', '.join(sorted(ALLOWED_WORKFLOW_HOSTS))}"}
+            timeout = aiohttp.ClientTimeout(total=URL_FETCH_TIMEOUT_SECONDS)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(source_url, allow_redirects=False) as response:
+                    if response.status != 200:
+                        return {"success": False,
+                                "error": f"Fetched {url_summary(source_url)} -> HTTP {response.status}"}
+                    payload = await response.content.read(MAX_WORKFLOW_BYTES + 1)
+            if len(payload) > MAX_WORKFLOW_BYTES:
+                return {"success": False, "error": "Fetched file exceeds size limit"}
+            content = payload.decode('utf-8')
+        except aiohttp.ClientError as exc:
+            return {"success": False, "error": f"Fetch failed: {exc}"}
+        except UnicodeDecodeError:
+            return {"success": False, "error": "Fetched file is not UTF-8 text"}
+
+    if not isinstance(content, str) or not content.strip():
+        return {"success": False,
+                "error": "Nothing to attach: provide `content` text or a fetchable `source_url`"}
+
+    # Post the file
+    posted = False
+    if bot is not None and thread_id is not None:
+        try:
+            channel = bot.get_channel(int(thread_id)) or await bot.fetch_channel(int(thread_id))
+            if channel is None:
+                return {"success": False, "error": f"No channel for thread {thread_id}"}
+            fp = io.BytesIO(content.encode('utf-8'))
+            file = discord.File(fp, filename=filename)
+            await channel.send(file=file)
+            posted = True
+        except Exception as exc:
+            logger.exception("[Support] send_file_to_thread post failed for %s", filename)
+            return {"success": False, "error": f"Failed to post file: {exc}"}
+
+    preview = content[:800]
+    result = {
+        "success": True,
+        "posted_as_file": posted,
+        "filename": filename,
+        "summary": (
+            f"Attached `{filename}` ({len(content)} chars)"
+            + (f" with note: {note}" if note else "")
+            + ("" if posted else " — could not post (missing bot/thread context); shown inline below")
+        ),
+        "preview": preview,
+    }
+    return result
+
+
+def url_summary(url):
+    return url[:60] + ('...' if len(url) > 60 else '')

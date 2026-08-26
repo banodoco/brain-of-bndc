@@ -617,7 +617,7 @@ class AdminChatAgent:
                 # read/research
                 "find_messages", "inspect_message",
                 # support-specific
-                "search_hivemind", "comfy_workflow",
+                "search_hivemind", "comfy_workflow", "send_file_to_thread",
             }
             from src.features.support.tools_support import TOOLS as TOOLS_SUPPORT
             from src.features.support.comfy_tools import TOOLS as COMFY_TOOLS
@@ -625,8 +625,10 @@ class AdminChatAgent:
                 t for t in TOOLS
                 if t.get("name") in support_allowed
             ] + list(TOOLS_SUPPORT) + list(COMFY_TOOLS)
+
+        # Server-side enforcement: every tool call is checked against this
+        # set regardless of what the LLM requested.
         allowed_tool_names = {tool["name"] for tool in available_tools}
-        
         max_iterations = 100
         self._abort_requested[user_id] = False
 
@@ -811,7 +813,7 @@ class AdminChatAgent:
                     # as a file attachment. ALWAYS overwrite: the LLM must
                     # never pick the destination (confused-deputy / cross-thread
                     # posting via prompt injection).
-                    if tool_name == "comfy_workflow":
+                    if tool_name in ("comfy_workflow", "send_file_to_thread"):
                         if channel_context and channel_context.get('channel_id'):
                             if tool_input is tool_use.input:
                                 tool_input = dict(tool_input)
