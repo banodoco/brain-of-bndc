@@ -519,7 +519,7 @@ async def execute_comfy_workflow(tool_input: Dict[str, Any], bot: Optional[Any] 
                 "summary": (
                     f"{len(applied)} total edit(s) staged (latest: {applied[-1]})"
                     + '. ' + '\n'.join(_validation_lines(report))
-                    + " Nothing sent to the member yet — call mode='deliver' when done."
+                    + " Nothing sent to the member yet. When you're done and satisfied with all changes, call mode='deliver' to attach the finished workflow as a downloadable .json — or use send_file_to_thread for any other artifact you want to share alongside it."
                 ),
                 "preview": preview_json[:PREVIEW_CHARS],
             }
