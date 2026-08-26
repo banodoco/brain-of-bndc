@@ -428,7 +428,18 @@ async def execute_comfy_workflow(tool_input: Dict[str, Any], bot: Optional[Any] 
 async def _post_workflow_file(bot: Any, thread_id: Any, workflow_json: str) -> bool:
     """Post the edited workflow as a .json attachment. Returns True on success."""
     try:
-        channel = bot.get_channel(int(thread_id))
+        channel = None
+        try:
+            channel = bot.get_channel(int(thread_id))
+        except Exception:
+            channel = None
+        if channel is None:
+            fetch = getattr(bot, "fetch_channel", None)
+            if fetch is not None:
+                try:
+                    channel = await fetch(int(thread_id))
+                except Exception:
+                    channel = None
         if channel is None:
             logger.warning("comfy_workflow: no channel for thread_id %s", thread_id)
             return False

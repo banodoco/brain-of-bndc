@@ -1,17 +1,18 @@
 # Nixpacks configuration for Railway
 # This file optimizes the build process on Railway
+# VibeComfy vendoring mirrors Dockerfile: find_repo_root() needs pyproject.toml ancestor
 
 [phases.setup]
-nixPkgs = ["python311", "ffmpeg"]
+nixPkgs = ["python311", "ffmpeg", "curl"]
 
 [phases.install]
-cmds = ["pip install -r requirements.txt", "pip install --no-deps \"vibecomfy @ git+https://github.com/peteromallet/VibeComfy.git@ddac29416ed6b08828cd75cb3f36b6b5a592d224\""]
+cmds = ["pip install -r requirements.txt", "mkdir -p /opt && curl -L https://github.com/peteromallet/VibeComfy/archive/ddac29416ed6b08828cd75cb3f36b6b5a592d224.tar.gz -o /tmp/vibecomfy.tar.gz && tar -xzf /tmp/vibecomfy.tar.gz -C /opt && mv /opt/VibeComfy-ddac29416ed6b08828cd75cb3f36b6b5a592d224 /opt/vibecomfy_repo && rm /tmp/vibecomfy.tar.gz", "touch /usr/local/lib/python3.11/site-packages/pyproject.toml || true # marker for find_repo_root fallback (pyproject.toml)"]
+
+[variables]
+PYTHONPATH = "/opt/vibecomfy_repo"
 
 [phases.build]
 cmds = ["mkdir -p /app/data"]
 
 [start]
 cmd = "python main.py"
-
-
-

@@ -77,7 +77,8 @@ class FakeDiscordShim:
 
     class ui:
         class Button:
-            _is_v2 = True
+            def _is_v2(self):
+                return False
 
             def __init__(self, *, label=None, style=None, custom_id=None, disabled=False):
                 self.label = label
@@ -752,8 +753,8 @@ class TestOutcomeRecording:
         kwargs = interaction.message.edit.call_args.kwargs
         assert "**Resolved**" in kwargs["content"] and "<@42>" in kwargs["content"]
         labels = [(b.label, b.disabled) for b in kwargs["view"].children]
-        assert ("Resolved ✓", True) in labels
-        assert all(disabled for _, disabled in labels)
+        assert ("Resolved ✓", False) in labels
+        assert all(not disabled for _, disabled in labels)
 
     async def test_missing_table_degrades_to_message_edit(self, monkeypatch):
         cog = make_cog(monkeypatch)
@@ -877,3 +878,75 @@ class TestTurnPersistence:
         await cog.on_thread_create(thread)
         row = table.insert.call_args.args[0]
         assert row["trigger"] == "new_post"
+
+
+async def test_outcome_tag_applied_and_updatable(monkeypatch):
+    cog = make_cog(monkeypatch)
+    table = MagicMock()
+    table.upsert.return_value.execute.return_value = None
+    monkeypatch.setattr(cog.db_handler, "supabase", SimpleNamespace(table=lambda n: table))
+    # Fake forum with no tags initially.
+    forum_tags = []
+    async def fake_create_tag(name, moderated=False):
+        tag = SimpleNamespace(name=name, id=len(forum_tags)+1)
+        forum_tags.append(tag)
+        return tag
+    forum = SimpleNamespace(
+        available_tags=forum_tags,
+        create_tag=fake_create_tag,
+    )
+    thread = FakeSupportThread(tid=777)
+    thread.parent = forum
+    thread.applied_tags = []
+    async def fake_edit(**kwargs):
+        if "applied_tags" in kwargs:
+            thread.applied_tags = kwargs["applied_tags"]
+    thread.edit = fake_edit
+    thread.guild = SimpleNamespace(id=789)
+    msg = SimpleNamespace(id=1, content="answer", edit=AsyncMock())
+    interaction = SimpleNamespace(
+        channel=thread,
+        user=SimpleNamespace(id=42, bot=False, mention="<@42>"),
+        message=msg,
+        response=SimpleNamespace(defer=AsyncMock(), send_message=AsyncMock()),
+        followup=AsyncMock(),
+    )
+    await cog.record_outcome(interaction, "resolved")
+    assert any(t.name == "Resolved" for t in thread.applied_tags)
+    # Update to a different outcome — tag should be replaced, not duplicated.
+    await cog.record_outcome(interaction, "not_resolved")
+    names = [t.name for t in thread.applied_tags]
+    assert "Not Resolved" in names and "Resolved" not in names
+    assert len([n for n in names if n in ("Resolved","Probably Resolved","Not Resolved")]) == 1
+
+
+async def test_buttons_shown_only_once(monkeypatch):
+    cog = make_cog(monkeypatch)
+    # DB check should report no outcome yet so buttons attach.
+    empty_table = SimpleNamespace(
+        select=lambda *a, **k: SimpleNamespace(
+            eq=lambda *a, **k: SimpleNamespace(execute=lambda: SimpleNamespace(data=[]))
+        )
+    )
+    monkeypatch.setattr(cog.db_handler, "supabase", SimpleNamespace(table=lambda n: empty_table))
+    cog.agent.chat = AsyncMock(return_value=SimpleNamespace(replies=["first"], actions=[]))
+    views = []
+    def fake_view():
+        v = SimpleNamespace(children=[])
+        views.append(v)
+        return v
+    monkeypatch.setattr(cog, "_outcome_view", fake_view)
+    msg, thread = make_message()
+    # First turn — should attach.
+    await cog.on_message(msg)
+    assert len(views) == 1
+    # Second turn in same thread — should NOT attach again.
+    msg2 = SimpleNamespace(
+        author=SimpleNamespace(bot=False, id=42),
+        content="follow up",
+        guild=SimpleNamespace(id=789),
+        channel=thread,
+        id=thread.id + 5,
+    )
+    await cog.on_message(msg2)
+    assert len(views) == 1

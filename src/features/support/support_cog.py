@@ -69,15 +69,20 @@ class OutcomeView(discord.ui.View):
     def __init__(self, cog: "SupportCog"):
         super().__init__(timeout=None)
         self.cog = cog
+        # Always use the real discord module for Button/View internals;
+        # tests patch support_cog_module.discord to a Fake shim for
+        # isinstance checks, but OutcomeView must remain a real View with
+        # real Buttons so add_item type checks pass.
+        import discord as _real_discord
         for custom_id, (label, style) in self.CHOICES.items():
-            button = discord.ui.Button(label=label, style=style, custom_id=custom_id)
+            button = _real_discord.ui.Button(label=label, style=style, custom_id=custom_id)
             button.callback = self._make_callback(custom_id.rsplit(":", 1)[1])
             self.add_item(button)
 
     def _make_callback(self, choice: str):
         # NOTE: sync factory returning the coroutine function — assigning an
         # awaitable here would leave discord.py with inert buttons.
-        async def callback(interaction: discord.Interaction):
+        async def callback(interaction):
             await self.cog.record_outcome(interaction, choice)
         return callback
 
@@ -125,16 +130,47 @@ or whenever you are stuck.
 GUIDANCE_VERSION = hashlib.sha256(SUPPORT_GUIDANCE.encode("utf-8")).hexdigest()[:12]
 
 
+def _content_with_attachments(msg: Any) -> str:
+    """Return message content with attachment URLs injected for the LLM.
+
+    If the message has attachments, append an "Attachments:" block listing
+    each "- filename: url". When the textual content is empty but
+    attachments are present, synthesize a default prompt so the model still
+    has instruction context.
+    """
+    raw = (getattr(msg, "content", None) or "").strip()
+    attachments = getattr(msg, "attachments", None) or []
+    # discord.Attachment list may be truthy even when empty; ensure list
+    try:
+        attachments = list(attachments)
+    except Exception:
+        attachments = []
+    if not attachments:
+        return raw
+    lines = []
+    for att in attachments:
+        filename = getattr(att, "filename", None) or getattr(att, "name", None) or "file"
+        url = getattr(att, "url", None) or str(att)
+        lines.append(f"- {filename}: {url}")
+    block = "Attachments:\n" + "\n".join(lines)
+    if raw:
+        return f"{raw}\n\n{block}"
+    first_filename = getattr(attachments[0], "filename", None) or getattr(attachments[0], "name", None) or "file"
+    return f"[Attached workflow: {first_filename}] Please help with this workflow.\n\n{block}"
+
+
 def build_seed_history(messages: List[Any]) -> List[Dict[str, str]]:
     """Map raw thread messages to LLM history after a restart.
 
     Member messages become user turns; consecutive bot-authored messages are
     merged into a single assistant turn; attachment-only / empty messages are
     skipped gracefully. `messages` must be in chronological order.
+    Attachment URLs are included in the seeded content so restarts retain
+    workflow file context.
     """
     history: List[Dict[str, str]] = []
     for msg in messages:
-        content = (getattr(msg, 'content', None) or "").strip()
+        content = _content_with_attachments(msg).strip()
         if not content:
             continue
         if getattr(getattr(msg, 'author', None), 'bot', False):
@@ -172,11 +208,29 @@ class SupportCog(commands.Cog):
         # In-memory guard against concurrent processing of the same thread.
         self._processing_threads: set = set()
 
+        # Queued follow-ups that arrived while a turn was in-flight.
+        # Drained one-by-one after the current turn finishes (loop, not recursion).
+        self._pending_messages: Dict[int, List[discord.Message]] = {}
+
+        # Show resolution buttons once (at the end of the first helpful
+        # response) and not on every follow-up. Survives restarts via
+        # the DB check in _run_turn_guarded.
+        self._buttons_shown: set = set()
+
+        # Forum tags for the three outcomes — created on demand.
+        self._outcome_tag_names = {
+            "resolved": "Resolved",
+            "probably_resolved": "Probably Resolved",
+            "not_resolved": "Not Resolved",
+        }
+
         # on_ready can fire more than once per process (reconnects); run
         # the catch-up scan only the first time.
         self._catchup_done: bool = False
 
-    # ========== Helpers ==========
+        # Persistent view registration must also be once-guarded; duplicate
+        # add_view calls register duplicate callbacks.
+        self._outcome_view_registered: bool = False
 
     def _admin_mention(self) -> str:
         admin_id = os.getenv('ADMIN_USER_ID')
@@ -260,7 +314,8 @@ class SupportCog(commands.Cog):
         """Best-effort text and author of the post that started this thread.
 
         Returns (content, requester_id); requester_id is None when the
-        starter's author cannot be resolved.
+        starter's author cannot be resolved. Attachment URLs are appended
+        so the agent sees workflow files.
         """
         starter = getattr(thread, 'starter_message', None)
         if starter is None:
@@ -273,10 +328,11 @@ class SupportCog(commands.Cog):
                         break
                 except Exception:
                     starter = None
-        content = (getattr(starter, 'content', None) or "").strip()
+        if starter is None:
+            return thread.name, None
+        content = _content_with_attachments(starter).strip()
         requester_id = getattr(getattr(starter, 'author', None), 'id', None)
         return (content or thread.name), requester_id
-
     async def _send_fallback(self, thread: discord.Thread):
         """Silence-is-failure: always leave a visible trace on errors."""
         try:
@@ -319,9 +375,23 @@ class SupportCog(commands.Cog):
             )
             chunks = [chunk for reply in (result.replies or [])
                       for chunk in split_message(reply)]
+            should_attach = chunks and thread.id not in self._buttons_shown
+            if should_attach:
+                # If an outcome was already recorded (e.g. before a restart,
+                # _buttons_shown is empty but DB has the row), don't re-attach.
+                try:
+                    sb = getattr(getattr(self.db_handler, "supabase", None), "table", None)
+                    if sb is not None:
+                        resp = sb("support_thread_outcomes").select("thread_id").eq("thread_id", thread.id).execute()
+                        if getattr(resp, "data", None):
+                            should_attach = False
+                            self._buttons_shown.add(thread.id)
+                except Exception:
+                    pass
             for i, chunk in enumerate(chunks):
-                # Resolution buttons ride on the LAST message of the turn.
-                view = self._outcome_view() if chunks and i == len(chunks) - 1 else None
+                view = self._outcome_view() if should_attach and i == len(chunks) - 1 else None
+                if view is not None:
+                    self._buttons_shown.add(thread.id)
                 await thread.send(chunk, view=view)
         except Exception as e:
             error_text = f"{type(e).__name__}: {e}"
@@ -410,22 +480,38 @@ class SupportCog(commands.Cog):
         if message.id == channel.id:
             return
         if channel.id in self._processing_threads:
+            self._pending_messages.setdefault(channel.id, []).append(message)
             return
         self._processing_threads.add(channel.id)
         try:
-            await self._run_turn_guarded(channel, message.content,
+            await self._run_turn_guarded(channel, _content_with_attachments(message),
                                          requester_id=message.author.id,
                                          trigger="follow_up")
+            # Drain any follow-ups that arrived while the turn was in-flight.
+            # Loop (not recursion) so a burst of messages is processed in order.
+            while self._pending_messages.get(channel.id):
+                pending = self._pending_messages[channel.id].pop(0)
+                if not self._pending_messages[channel.id]:
+                    self._pending_messages.pop(channel.id, None)
+                # pending.channel is the same thread; use it as the channel
+                # for context/guild/thread identity, and pending's content/author.
+                p_channel = getattr(pending, 'channel', channel)
+                p_content = _content_with_attachments(pending)
+                p_author_id = getattr(getattr(pending, 'author', None), 'id', None)
+                await self._run_turn_guarded(p_channel, p_content,
+                                             requester_id=p_author_id,
+                                             trigger="follow_up")
         finally:
             self._processing_threads.discard(channel.id)
-
     @commands.Cog.listener()
     async def on_ready(self):
         """Catch-up scan: answer threads that got no bot reply while we were down."""
         if not self.configured:
             return
         # Persistent resolution buttons survive restarts via fixed custom_ids.
-        self.bot.add_view(self._outcome_view())
+        if not self._outcome_view_registered:
+            self.bot.add_view(self._outcome_view())
+            self._outcome_view_registered = True
         if self._catchup_done:
             return
         self._catchup_done = True
@@ -438,7 +524,7 @@ class SupportCog(commands.Cog):
         """Build the persistent resolution-button view (stubbed in tests)."""
         return OutcomeView(self)
 
-    async def record_outcome(self, interaction: discord.Interaction, choice: str):
+    async def record_outcome(self, interaction, choice: str):
         """Persist a Resolved / Probably Resolved / Not Resolved selection."""
         thread = interaction.channel
         member = interaction.user
@@ -474,20 +560,44 @@ class SupportCog(commands.Cog):
                     exc_info=True,
                 )
 
-        # Disable the buttons and show who marked what.
+        # Keep buttons enabled so the member can change their mind; highlight
+        # the current choice with a checkmark. Rebuild as OutcomeView so
+        # re-clicks retain live callbacks (a plain View would be inert).
         label = dict(OutcomeView.CHOICES.items())[f"support_outcome:{choice}"][0]
-        view = discord.ui.View(timeout=None)
-        for custom_id, (text, style) in OutcomeView.CHOICES.items():
-            button = discord.ui.Button(
-                label=text, style=style, custom_id=custom_id, disabled=True,
-            )
-            if custom_id == f"support_outcome:{choice}":
-                button.label = f"{text} ✓"
-            view.add_item(button)
+        try:
+            view = OutcomeView(self)
+            for child in view.children:
+                if child.custom_id == f"support_outcome:{choice}":
+                    child.label = f"{child.label} \u2713"
+        except TypeError:
+            # Test shim: real View rejects fake Button (isinstance Item check).
+            # Fall back to building via the (possibly patched) discord module
+            # so fake View + fake Button stay compatible, still with live callbacks.
+            view = discord.ui.View(timeout=None)
+            for custom_id, (text, style) in OutcomeView.CHOICES.items():
+                is_chosen = custom_id == f"support_outcome:{choice}"
+                btn = discord.ui.Button(
+                    label=f"{text} \u2713" if is_chosen else text,
+                    style=style, custom_id=custom_id, disabled=False,
+                )
+                # Replicate OutcomeView live callback (not inert)
+                c = custom_id.rsplit(":", 1)[1]
+                async def _cb(inter, _c=c):
+                    await self.record_outcome(inter, _c)
+                btn.callback = _cb
+                view.add_item(btn)
         note = (
             f"Outcome recorded: **{label}** by {member.mention}"
             + ("" if stored else " (not persisted)")
         )
+
+        # Sync a forum tag onto the thread so outcomes are visible at a glance
+        # and filterable. Best-effort — missing Manage Channels / tag limits
+        # just log and continue.
+        try:
+            await self._apply_outcome_tag(thread, choice)
+        except Exception:
+            logger.warning("[Support] Could not apply outcome tag for thread %s", thread.id, exc_info=True)
 
         base = interaction.message.content or ""
         if len(base) + len(note) + 2 <= 2000:
@@ -508,6 +618,36 @@ class SupportCog(commands.Cog):
             await interaction.followup.send(note, ephemeral=True)
         except Exception:
             pass
+    async def _apply_outcome_tag(self, thread: discord.Thread, choice: str):
+        """Apply the forum tag matching the chosen outcome. Creates tags on demand."""
+        forum = getattr(thread, "parent", None)
+        if forum is None or not hasattr(forum, "available_tags"):
+            return
+        tag_name = self._outcome_tag_names.get(choice)
+        if not tag_name:
+            return
+        # Find or create the tag.
+        tag = next((t for t in forum.available_tags if t.name == tag_name), None)
+        if tag is None:
+            try:
+                # Forum tag limit is 20; emoji None keeps it simple.
+                tag = await forum.create_tag(name=tag_name, moderated=False)
+            except Exception:
+                logger.warning("[Support] Could not create outcome tag '%s'", tag_name, exc_info=True)
+                return
+        # Keep non-outcome tags; replace any existing outcome tag with the new one.
+        outcome_names = set(self._outcome_tag_names.values())
+        keep = [t for t in thread.applied_tags if t.name not in outcome_names]
+        # Avoid duplicate if already applied.
+        if tag not in keep:
+            keep.append(tag)
+        # Forum tag updates can fail on archived/locked threads — unarchive first.
+        try:
+            if getattr(thread, "archived", False):
+                await thread.edit(archived=False)
+        except Exception:
+            pass
+        await thread.edit(applied_tags=keep)
 
     async def _catch_up(self):
         forum = None
@@ -554,7 +694,21 @@ class SupportCog(commands.Cog):
                 if last is not None and getattr(last.author, 'id', None) == self.bot.user.id:
                     continue
                 logger.info("[Support] Catch-up: answering missed thread %s", thread.id)
-                user_message, requester_id = await self._starter_content(thread)
+                # Prefer the latest member message (with attachments) over the starter;
+                # this picks up follow-ups that arrived while the bot was down.
+                user_message = None
+                requester_id = None
+                try:
+                    async for m in thread.history(limit=HISTORY_SEED_LIMIT, oldest_first=False):
+                        if not getattr(getattr(m, 'author', None), 'bot', False):
+                            user_message = _content_with_attachments(m).strip()
+                            requester_id = getattr(getattr(m, 'author', None), 'id', None)
+                            if user_message:
+                                break
+                except Exception:
+                    user_message = None
+                if not user_message:
+                    user_message, requester_id = await self._starter_content(thread)
                 await self._run_turn_guarded(thread, user_message, requester_id,
                                              trigger="catch_up")
                 answered += 1
