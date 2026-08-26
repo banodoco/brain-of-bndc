@@ -10,15 +10,20 @@ import io
 import json
 import logging
 import re
+import asyncio
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import discord
 
 logger = logging.getLogger('DiscordBot')
-
-PREVIEW_CHARS = 800
 URL_FETCH_TIMEOUT_SECONDS = 20
+FETCH_MAX_ATTEMPTS = 3
+LARGE_OUTPUT_CHARS = 1800
+TRUNCATED_PREVIEW_CHARS = 1500
+PREVIEW_CHARS = 800
+
+import asyncio
 
 # SSRF guard for remote workflow sources: https only, fixed host allowlist,
 # no redirects followed, hard size cap.
@@ -66,7 +71,7 @@ COMFY_WORKFLOW_TOOL = {
             "edit_ops": {
                 "type": "array",
                 "items": {"type": "object"},
-                "description": "Required for mode=edit. Supported ops: set_widget {node, widget, value}, remove_node {node}.",
+                "description": "Required for mode=edit. Supported ops: set_widget {node, widget, value}; remove_node {node}; add_node {class_type, node_id?, inputs?} — scalar inputs become widgets, link pairs like [\"21\", 0] become edges; connect {from: \"<node>.<output>\", to: \"<node>.<input>\"}; disconnect {on: \"<node>.<input>\"}.",
             },
             "thread_id": {
                 "type": "integer",
@@ -94,6 +99,7 @@ def _load_vibecompy():
 
 async def _fetch_workflow_json(url: str) -> Dict[str, Any]:
     """Fetch a workflow JSON document over https from an allowlisted host."""
+
     import aiohttp
     from urllib.parse import urlparse
 
@@ -107,22 +113,45 @@ async def _fetch_workflow_json(url: str) -> Dict[str, Any]:
         )
 
     timeout = aiohttp.ClientTimeout(total=URL_FETCH_TIMEOUT_SECONDS)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        # allow_redirects=False so a benign-looking URL cannot bounce to an
-        # internal or non-allowlisted host.
-        async with session.get(url, allow_redirects=False) as response:
-            if response.status != 200:
-                raise ValueError(f"Fetching {url} returned HTTP {response.status}")
-            payload = await response.content.read(MAX_WORKFLOW_BYTES + 1)
-    if len(payload) > MAX_WORKFLOW_BYTES:
-        raise ValueError(
-            f"Workflow document at {url} exceeds the "
-            f"{MAX_WORKFLOW_BYTES // (1024 * 1024)}MB size limit"
-        )
-    try:
-        return _lenient_json_loads(payload.decode('utf-8'))
-    except (UnicodeDecodeError, ValueError) as exc:
-        raise ValueError(f"Workflow document at {url} is not valid JSON: {exc}") from exc
+    last_err: Optional[str] = None
+    # Transient CDN failures (rate-limit pages, partial bodies) have hit this
+    # path before; retry a few times with backoff before giving up.
+    for attempt in range(1, FETCH_MAX_ATTEMPTS + 1):
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                # allow_redirects=False so a benign-looking URL cannot bounce
+                # to an internal or non-allowlisted host.
+                async with session.get(url, allow_redirects=False) as response:
+                    if response.status != 200:
+                        raise ValueError(f"Fetching {url} returned HTTP {response.status}")
+                    payload = await response.content.read(MAX_WORKFLOW_BYTES + 1)
+            if len(payload) > MAX_WORKFLOW_BYTES:
+                raise ValueError(
+                    f"Workflow document at {url} exceeds the "
+                    f"{MAX_WORKFLOW_BYTES // (1024 * 1024)}MB size limit"
+                )
+            text = payload.decode('utf-8')
+            # Sanity check: CDN hiccup pages (HTML/plain-text error bodies)
+            # arrive as HTTP 200. A workflow always starts with '{' or '['.
+            stripped = text.lstrip()
+            if not stripped or stripped[0] not in ('{', '['):
+                last_err = "response was not JSON (CDN/transient error page?)"
+                logger.warning(
+                    "[Support] fetch attempt %d/%d returned non-JSON body "
+                    "(%d bytes) — retrying", attempt, FETCH_MAX_ATTEMPTS,
+                    len(payload),
+                )
+                continue
+            return _lenient_json_loads(stripped)
+        except ValueError as exc:
+            last_err = str(exc)
+            logger.warning(
+                "[Support] fetch attempt %d/%d failed: %s",
+                attempt, FETCH_MAX_ATTEMPTS, exc,
+            )
+            await asyncio.sleep(0.5 * attempt)
+    raise ValueError(f"Workflow document at {url} could not be fetched after "
+                     f"{FETCH_MAX_ATTEMPTS} attempts: {last_err}")
 
 
 def _coerce_thread_id(value: Any) -> Optional[int]:
@@ -304,8 +333,63 @@ def _apply_edit_op(workflow: Any, op: Dict[str, Any]) -> str:
         node_id, node = _resolve_node(workflow, op['node'])
         workflow.remove_node(node_id)
         return f"removed {node.class_type} (id={node_id})"
+    if kind == 'add_node':
+        class_type = op.get('class_type')
+        if not class_type:
+            raise ValueError(f"add_node requires 'class_type', got: {op!r}")
+        inputs = dict(op.get('inputs') or {})
+        # API-format link pairs like ["21", 0] are illegal as literal widget
+        # values (VibeEdge is the sole connectivity authority). Split them
+        # out: scalars become node inputs at creation; link pairs become
+        # connect calls on the live IR.
+        links, scalar = {}, {}
+        try:
+            # Prefer VibeComfy's own authority on what counts as an API link.
+            from vibecomfy._compile._graph import is_canonical_api_link
+        except ImportError:
+            is_canonical_api_link = None
+
+        def _is_link_pair(value):
+            if is_canonical_api_link is not None:
+                return is_canonical_api_link(value)
+            # Fallback shape check (fake-module tests / very old builds).
+            return (isinstance(value, (list, tuple)) and len(value) == 2
+                    and isinstance(value[0], (str, int))
+                    and not isinstance(value[0], bool)
+                    and isinstance(value[1], int)
+                    and not isinstance(value[1], bool))
+
+        for name, value in inputs.items():
+            if _is_link_pair(value):
+                links[name] = [str(value[0]), value[1]]
+            else:
+                scalar[name] = value
+        new_node = workflow.add_node(class_type, _id=op.get('node_id'), **scalar)
+        for input_name, (src, out_idx) in links.items():
+            workflow.connect(f"{src}.{out_idx}", f"{new_node.id}.{input_name}")
+        refs = ", ".join(f"{k} <- {v[0]}.{v[1]}" for k, v in sorted(links.items()))
+        return (f"added {class_type} (id={new_node.id})"
+                + (f" wired {refs}" if refs else ""))
+    if kind == 'connect':
+        from_ref, to_ref = op.get('from'), op.get('to')
+        if not from_ref or not to_ref:
+            raise ValueError(
+                "connect requires 'from' (<node>.<output>) and "
+                "'to' (<node>.<input>), e.g. from='108.0' to='900.latent'"
+            )
+        workflow.connect(str(from_ref), str(to_ref))
+        return f"connected {from_ref} -> {to_ref}"
+    if kind == 'disconnect':
+        target = op.get('on')
+        if not target:
+            raise ValueError("disconnect requires 'on': '<node>.<input>'")
+        removed = workflow.disconnect(str(target))
+        if not removed:
+            raise ValueError(f"no existing edge into {target!r}")
+        return f"disconnected edge into {target}"
     raise ValueError(
-        f"Unsupported edit op {kind!r}. Supported ops: set_widget, remove_node"
+        f"Unsupported edit op {kind!r}. Supported ops: set_widget, remove_node, "
+        + "add_node, connect, disconnect"
     )
 
 
