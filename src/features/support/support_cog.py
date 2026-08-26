@@ -10,6 +10,7 @@ answers; defaults to the BNDC support forum 1163250319107555388; set empty
 to disable). Documented here rather than .env.example, which is untracked.
 """
 
+import hashlib
 import logging
 import os
 import time
@@ -118,6 +119,10 @@ evidence you do have, and note the member can re-post to retry later.
 - Hand off to {ADMIN_MENTION} when asked about billing, grants, or payments, \
 or whenever you are stuck.
 - Tone: concise, warm, no lecturing."""
+
+# Hash of the guidance text, persisted with every turn so rows can always be
+# tied to the exact prompt version that produced them.
+GUIDANCE_VERSION = hashlib.sha256(SUPPORT_GUIDANCE.encode("utf-8")).hexdigest()[:12]
 
 
 def build_seed_history(messages: List[Any]) -> List[Dict[str, str]]:
@@ -351,6 +356,7 @@ class SupportCog(commands.Cog):
                 "tool_calls": (result.actions if result else None),
                 "model": os.getenv("SUPPORT_AGENT_MODEL",
                                    SUPPORT_AGENT_MODEL_DEFAULT),
+                "guidance_version": GUIDANCE_VERSION,
                 "error": error,
                 "duration_ms": duration_ms,
             }

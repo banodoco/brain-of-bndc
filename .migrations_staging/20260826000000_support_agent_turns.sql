@@ -17,6 +17,7 @@ create table if not exists public.support_agent_turns (
     replies jsonb,
     tool_calls jsonb,
     model text,
+    guidance_version text,
     error text,
     duration_ms integer,
     created_at timestamptz not null default now()
