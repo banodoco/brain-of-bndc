@@ -72,7 +72,9 @@ class OutcomeView(discord.ui.View):
             button.callback = self._make_callback(custom_id.rsplit(":", 1)[1])
             self.add_item(button)
 
-    async def _make_callback(self, choice: str):
+    def _make_callback(self, choice: str):
+        # NOTE: sync factory returning the coroutine function — assigning an
+        # awaitable here would leave discord.py with inert buttons.
         async def callback(interaction: discord.Interaction):
             await self.cog.record_outcome(interaction, choice)
         return callback
@@ -425,9 +427,12 @@ class SupportCog(commands.Cog):
             + ("" if stored else " (not persisted)")
         )
         try:
-            await interaction.response.edit_message(view=view, content=(
-                (interaction.message.content or "") + f"\n\n{note}"
-            ))
+            base = interaction.message.content or ""
+            new_content = f"{base}\n\n{note}" if base else note
+            if len(new_content) > 2000:
+                # Never blow Discord's cap appending the outcome note.
+                new_content = note
+            await interaction.response.edit_message(view=view, content=new_content)
         except Exception:
             logger.exception(
                 "[Support] Failed to edit outcome message in thread %s", thread.id,

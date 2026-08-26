@@ -778,3 +778,26 @@ class TestOutcomeRecording:
 
         interaction.response.send_message.assert_awaited_once()
         assert sent == {}
+
+
+def test_outcome_view_callbacks_are_coroutine_functions():
+    """Grok deploy-blocker: an async factory would bind coroutine OBJECTS,
+    leaving inert buttons. Callbacks must be callable coroutine functions."""
+    import inspect
+    import discord as real_discord
+
+    class _Cog:
+        async def record_outcome(self, interaction, choice):
+            pass
+
+    view = support_cog_module.OutcomeView(_Cog())
+    assert len(view.children) == 3
+    for child in view.children:
+        assert isinstance(child, real_discord.ui.Button)
+        assert inspect.iscoroutinefunction(child.callback)
+    ids = [b.custom_id for b in view.children]
+    assert ids == [
+        "support_outcome:resolved",
+        "support_outcome:probably_resolved",
+        "support_outcome:not_resolved",
+    ]
