@@ -4740,16 +4740,36 @@ async def execute_grant_speaker(
 
     # Idempotent: already Speaker and not Moderated
     if is_speaker and not is_moderated:
+        # Heal stray Newbie if present (Speaker+Newbie is valid transiently but
+        # should be cleaned; reconcile loop also fixes it, but fix eagerly).
+        is_stray_newbie = newbie_role in member.roles
+        try:
+            if is_stray_newbie:
+                await member.remove_roles(newbie_role, reason=f"Granted Speaker by {actor_label}: clean stray Newbie"[:512])
+        except Exception as e:
+            logger.warning(f"[AdminChat] grant_speaker: failed to clean stray Newbie for {member_id}: {e}")
         if db_handler:
             try:
                 if db_handler.get_member_status(member_id, guild_id) != 'speaker':
-                    db_handler.set_member_status(member_id, guild_id, 'speaker')
+                    ok = db_handler.set_member_status(member_id, guild_id, 'speaker')
+                    if not ok:
+                        logger.warning(f"[AdminChat] grant_speaker: set_member_status failed for {member_id}")
+                db_handler.set_member_can_message_bot(member_id, True, username=member.name)
                 db_handler.delete_timed_mute(member_id, guild_id)
                 pending = db_handler.get_pending_intro_by_member(member_id, guild_id=guild_id)
                 if pending:
                     db_handler.approve_pending_intro(pending['message_id'], guild_id=guild_id)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"[AdminChat] grant_speaker: already_speaker DB repair failed for {member_id}: {e}", exc_info=True)
+            _invalidate_dm_cache(bot, member_id)
+        if is_stray_newbie:
+            return {
+                "success": True,
+                "already_speaker": True,
+                "user_id": str(member_id),
+                "username": member.name,
+                "message": f"<@{member_id}> already has Speaker — cleaned stray Newbie.",
+            }
         return {
             "success": True,
             "already_speaker": True,
@@ -4763,7 +4783,9 @@ async def execute_grant_speaker(
     try:
         # Write DB status first so on_member_update sees 'speaker' (mirrors GatingCog)
         if db_handler:
-            db_handler.set_member_status(member_id, guild_id, 'speaker')
+            ok = db_handler.set_member_status(member_id, guild_id, 'speaker')
+            if not ok:
+                logger.warning(f"[AdminChat] grant_speaker: set_member_status speaker failed for {member_id} — continuing to role swap (reconcile will heal)")
 
         roles_to_remove = []
         if is_moderated:
@@ -4783,8 +4805,8 @@ async def execute_grant_speaker(
                 pending = db_handler.get_pending_intro_by_member(member_id, guild_id=guild_id)
                 if pending:
                     db_handler.approve_pending_intro(pending['message_id'], guild_id=guild_id)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"[AdminChat] grant_speaker: pending intro approve failed for {member_id}: {e}", exc_info=True)
         _invalidate_dm_cache(bot, member_id)
         logger.info(f"[AdminChat] grant_speaker: {member_id} ({member.name}) granted Speaker by {actor_label} — {reason_text}")
 
