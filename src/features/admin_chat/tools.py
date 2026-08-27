@@ -977,6 +977,31 @@ TOOLS = [
         }
     },
     {
+        "name": "grant_speaker",
+        "description": (
+            "Grant the Speaker role to a member directly, bypassing the intro flow. "
+            "Use when the admin says 'make X a speaker', 'grant speaker to X', "
+            "'approve X without intro', or wants to fix a missed intro. Works for "
+            "Newbie -> Speaker, Moderated -> Speaker (clears timed mute and restores DM access), "
+            "or any user without a tier role. If the user already has Speaker, returns "
+            "already_speaker. Also marks any pending intro as approved so gating stops tracking them."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "user_id": {
+                    "type": "string",
+                    "description": "Discord user ID to grant Speaker to"
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Optional free-text reason recorded in the audit log. Defaults to 'Granted Speaker via admin chat'."
+                }
+            },
+            "required": ["user_id"]
+        }
+    },
+    {
         "name": "get_bot_status",
         "description": "Get the bot's current status including uptime and connections.",
         "input_schema": {
@@ -4651,6 +4676,140 @@ async def execute_unmute_speaker(
         return {"success": False, "error": str(e)}
 
 
+async def execute_grant_speaker(
+    bot: discord.Client,
+    db_handler,
+    params: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Grant Speaker directly, bypassing the intro/approval flow.
+
+    Mirrors GatingCog._approve_member but works without a pending intro:
+    - Newbie -> Speaker
+    - Moderated -> Speaker (clears timed mute, restores DM access)
+    - No-role/unknown -> Speaker
+    - Already Speaker -> idempotent success with already_speaker=True
+    """
+    user_id_raw = params.get('user_id')
+    if not user_id_raw:
+        return {"success": False, "error": "user_id is required"}
+    try:
+        member_id = int(user_id_raw)
+    except (TypeError, ValueError):
+        return {"success": False, "error": f"Invalid user_id: {user_id_raw!r}"}
+
+    guild_id = _resolve_guild_id(params)
+    if not guild_id:
+        return {"success": False, "error": "Could not resolve guild_id"}
+
+    if not _is_speaker_management_enabled(guild_id):
+        return {"success": False, "error": "Speaker management is not enabled in this server."}
+
+    speaker_role_id = _resolve_speaker_role_id(guild_id)
+    if not speaker_role_id:
+        return {"success": False, "error": "SPEAKER_ROLE_ID is not configured."}
+    newbie_role_id = _resolve_newbie_role_id(guild_id)
+    moderated_role_id = _resolve_moderated_role_id(guild_id)
+    if not newbie_role_id or not moderated_role_id:
+        return {"success": False, "error": "NEWBIE_ROLE_ID / MODERATED_ROLE_ID are not configured."}
+
+    guild = bot.get_guild(guild_id)
+    if not guild:
+        return {"success": False, "error": f"Guild {guild_id} not in cache"}
+
+    speaker_role = guild.get_role(speaker_role_id)
+    newbie_role = guild.get_role(newbie_role_id)
+    moderated_role = guild.get_role(moderated_role_id)
+    if not speaker_role or not newbie_role or not moderated_role:
+        return {"success": False, "error": "Speaker/Newbie/Moderated roles not all found in this server."}
+
+    member = guild.get_member(member_id)
+    if not member:
+        try:
+            member = await guild.fetch_member(member_id)
+        except discord.NotFound:
+            return {"success": False, "error": f"Member {member_id} not in guild"}
+        except discord.HTTPException as e:
+            return {"success": False, "error": f"Failed to fetch member: {e}"}
+
+    admin_user_id = params.get('admin_user_id')
+    actor_label = f"admin {admin_user_id}" if admin_user_id else "admin chat"
+    reason_text = (params.get('reason') or "").strip() or f"Granted Speaker by {actor_label}"
+
+    is_speaker = speaker_role in member.roles
+    is_moderated = moderated_role in member.roles
+
+    # Idempotent: already Speaker and not Moderated
+    if is_speaker and not is_moderated:
+        if db_handler:
+            try:
+                if db_handler.get_member_status(member_id, guild_id) != 'speaker':
+                    db_handler.set_member_status(member_id, guild_id, 'speaker')
+                db_handler.delete_timed_mute(member_id, guild_id)
+                pending = db_handler.get_pending_intro_by_member(member_id, guild_id=guild_id)
+                if pending:
+                    db_handler.approve_pending_intro(pending['message_id'], guild_id=guild_id)
+            except Exception:
+                pass
+        return {
+            "success": True,
+            "already_speaker": True,
+            "user_id": str(member_id),
+            "username": member.name,
+            "message": f"<@{member_id}> already has Speaker.",
+        }
+
+    is_newbie = newbie_role in member.roles
+
+    try:
+        # Write DB status first so on_member_update sees 'speaker' (mirrors GatingCog)
+        if db_handler:
+            db_handler.set_member_status(member_id, guild_id, 'speaker')
+
+        roles_to_remove = []
+        if is_moderated:
+            roles_to_remove.append(moderated_role)
+        if is_newbie:
+            roles_to_remove.append(newbie_role)
+        if roles_to_remove:
+            await member.remove_roles(*roles_to_remove, reason=f"Granted Speaker by {actor_label}: {reason_text}"[:512])
+        if speaker_role not in member.roles:
+            await member.add_roles(speaker_role, reason=f"Granted Speaker by {actor_label}: {reason_text}"[:512])
+
+        if db_handler:
+            # Granting Speaker should re-enable DM access; timed mutes should not survive a grant
+            db_handler.set_member_can_message_bot(member_id, True, username=member.name)
+            db_handler.delete_timed_mute(member_id, guild_id)
+            try:
+                pending = db_handler.get_pending_intro_by_member(member_id, guild_id=guild_id)
+                if pending:
+                    db_handler.approve_pending_intro(pending['message_id'], guild_id=guild_id)
+            except Exception:
+                pass
+        _invalidate_dm_cache(bot, member_id)
+        logger.info(f"[AdminChat] grant_speaker: {member_id} ({member.name}) granted Speaker by {actor_label} — {reason_text}")
+
+        if is_moderated:
+            msg = f"Granted Speaker to <@{member_id}> — removed Moderated and cleared any timed mute."
+        elif is_newbie:
+            msg = f"Granted Speaker to <@{member_id}> — promoted from Newbie."
+        else:
+            msg = f"Granted Speaker to <@{member_id}>."
+        return {
+            "success": True,
+            "user_id": str(member_id),
+            "username": member.name,
+            "prior_moderated": is_moderated,
+            "prior_newbie": is_newbie,
+            "reason": reason_text,
+            "message": msg,
+        }
+    except discord.Forbidden:
+        return {"success": False, "error": "I don't have permission to change that user's roles."}
+    except Exception as e:
+        logger.error(f"[AdminChat] Error in grant_speaker for {member_id}: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
 async def execute_get_bot_status(bot: discord.Client) -> Dict[str, Any]:
     """Get bot status information."""
     import time
@@ -5865,7 +6024,7 @@ async def execute_tool(
                     visible_channels = {dm_channel_id}
                 else:
                     visible_channels = set(visible_channels) | {dm_channel_id}
-    if requester_id is not None and tool_name in {"upsert_wallet_for_user", "resolve_admin_intent"}:
+    if requester_id is not None and tool_name in {"upsert_wallet_for_user", "resolve_admin_intent", "mute_speaker", "unmute_speaker", "grant_speaker"}:
         trusted_tool_input['admin_user_id'] = requester_id
 
     if tool_name == "reply":
@@ -5965,6 +6124,8 @@ async def execute_tool(
         return await execute_mute_speaker(bot, db_handler, trusted_tool_input)
     elif tool_name == "unmute_speaker":
         return await execute_unmute_speaker(bot, db_handler, trusted_tool_input)
+    elif tool_name == "grant_speaker":
+        return await execute_grant_speaker(bot, db_handler, trusted_tool_input)
     elif tool_name == "get_bot_status":
         return await execute_get_bot_status(bot)
     elif tool_name == "search_logs":
