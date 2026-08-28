@@ -29,10 +29,17 @@ def _env_int(name: str, default: int) -> int:
 
 
 def _build_topic_editor_llm_client():
-    # Default reflects production usage; override via env if needed.
-    provider = os.getenv("TOPIC_EDITOR_LLM_CLIENT", "deepseek").strip().lower()
+    # Default routes the live updates and the daily digest through OpenRouter's
+    # official DeepSeek provider; override via env if needed. "deepseek" keeps
+    # the direct api.deepseek.com endpoint as a fallback.
+    provider = os.getenv("TOPIC_EDITOR_LLM_CLIENT", "openrouter").strip().lower()
     if provider in {"", "claude"}:
         return None
+    if provider == "openrouter":
+        from src.common.llm.openrouter_client import OpenRouterClient
+
+        os.environ.setdefault("TOPIC_EDITOR_MODEL", "deepseek/deepseek-v4-flash-0731")
+        return OpenRouterClient()
     if provider == "deepseek":
         from src.common.llm.deepseek_client import DeepSeekClient
 

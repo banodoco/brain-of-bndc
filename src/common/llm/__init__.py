@@ -10,6 +10,7 @@ from typing import List, Dict, Any, Type, Union
 from .claude_client import ClaudeClient
 from .openai_client import OpenAIClient
 from .deepseek_client import DeepSeekClient
+from .openrouter_client import OpenRouterClient
 # Import BaseLLMClient from its own file for type hinting if needed
 from .base_client import BaseLLMClient
 from .gemini_client import GeminiClient  # Import the new client
@@ -21,6 +22,7 @@ SUPPORTED_CLIENTS: Dict[str, Type[BaseLLMClient]] = {
     "claude": ClaudeClient,
     "openai": OpenAIClient,
     "deepseek": DeepSeekClient,
+    "openrouter": OpenRouterClient,
     "gemini": GeminiClient,
 }
 
@@ -29,6 +31,7 @@ __all__ = [
     "OpenAIClient",
     "ClaudeClient",
     "DeepSeekClient",
+    "OpenRouterClient",
     "GeminiClient",  # Add the new client to __all__
 ]
 

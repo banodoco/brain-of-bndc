@@ -64,27 +64,38 @@ class DeepSeekClient(BaseLLMClient):
                 params[name] = kwargs[name]
 
         reasoning_effort = kwargs.get("reasoning_effort") or os.getenv("DEEPSEEK_REASONING_EFFORT")
-        if reasoning_effort:
-            params["reasoning_effort"] = reasoning_effort
-        # Per-request `thinking_enabled` kwarg wins; otherwise fall back to the
-        # env flag. Callers disable thinking for small classifications where
-        # DeepSeek reasoning would burn the entire output budget and return no
-        # final text. Reasoning is ON by default on this endpoint, so disabling
-        # requires an explicit {"type": "disabled"} extra_body — omitting the
-        # param leaves it enabled.
         thinking_enabled = kwargs.get("thinking_enabled")
         if thinking_enabled is None:
             thinking_enabled = _env_flag("DEEPSEEK_THINKING_ENABLED", True)
-        params["extra_body"] = (
-            {"thinking": {"type": "enabled"}} if thinking_enabled
-            else {"thinking": {"type": "disabled"}}
-        )
+        self._apply_reasoning(params, reasoning_effort, thinking_enabled)
 
         response = await self.client.chat.completions.create(**params)
         if tools:
             return self._to_anthropic_like_response(response)
         message = response.choices[0].message if response.choices else None
         return (getattr(message, "content", None) or "").strip()
+
+    def _apply_reasoning(
+        self,
+        params: Dict[str, Any],
+        reasoning_effort: Any,
+        thinking_enabled: bool,
+    ) -> None:
+        """Route reasoning controls into the request params.
+
+        Base behavior targets the DeepSeek endpoint: reasoning is ON by
+        default and disabling requires an explicit {"type": "disabled"}
+        extra_body — omitting the param leaves it enabled. Subclasses pointed
+        at other gateways (e.g. OpenRouter) override this to translate the
+        same controls into that gateway's native params.
+        """
+        if reasoning_effort:
+            params["reasoning_effort"] = reasoning_effort
+        params["extra_body"] = (
+            {"thinking": {"type": "enabled"}} if thinking_enabled
+            else {"thinking": {"type": "disabled"}}
+        )
+
 
     def _to_openai_messages(
         self,

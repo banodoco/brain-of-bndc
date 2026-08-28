@@ -374,13 +374,55 @@ def test_graceful_finalize_nudge_appears_near_cap_after_compaction(monkeypatch):
 # 5. summariser_cog default model
 # --------------------------------------------------------------------------
 
-def test_summariser_cog_default_model_is_deepseek_v4_flash(monkeypatch):
+def test_summariser_cog_default_client_is_openrouter_deepseek(monkeypatch):
     monkeypatch.delenv("TOPIC_EDITOR_MODEL", raising=False)
     monkeypatch.delenv("TOPIC_EDITOR_LLM_CLIENT", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+
+    created = {}
+
+    class FakeOpenRouterClient:
+        def __init__(self):
+            created["built"] = True
+
+    # The conftest stubs src.common.llm as a bare module, so the real
+    # openrouter_client submodule is not importable here; stub the import
+    # surface and assert only the wiring (client choice + model default).
+    import sys
+    import types
+
+    fake_module = types.ModuleType("src.common.llm.openrouter_client")
+    fake_module.OpenRouterClient = FakeOpenRouterClient
+    monkeypatch.setitem(sys.modules, "src.common.llm.openrouter_client", fake_module)
+
+    client = summariser_cog_module._build_topic_editor_llm_client()
+
+    assert isinstance(client, FakeOpenRouterClient)
+    assert created.get("built") is True
+    assert os.environ.get("TOPIC_EDITOR_MODEL") == "deepseek/deepseek-v4-flash-0731"
+
+
+def test_summariser_cog_deepseek_client_keeps_direct_model(monkeypatch):
+    monkeypatch.delenv("TOPIC_EDITOR_MODEL", raising=False)
+    monkeypatch.setenv("TOPIC_EDITOR_LLM_CLIENT", "deepseek")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
 
-    summariser_cog_module._build_topic_editor_llm_client()
+    created = {}
 
+    class FakeDeepSeekClient:
+        def __init__(self):
+            created["built"] = True
+
+    import sys
+    import types
+
+    fake_module = types.ModuleType("src.common.llm.deepseek_client")
+    fake_module.DeepSeekClient = FakeDeepSeekClient
+    monkeypatch.setitem(sys.modules, "src.common.llm.deepseek_client", fake_module)
+
+    client = summariser_cog_module._build_topic_editor_llm_client()
+
+    assert isinstance(client, FakeDeepSeekClient)
     assert os.environ.get("TOPIC_EDITOR_MODEL") == "deepseek-v4-flash"
 
 
