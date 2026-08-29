@@ -50,13 +50,26 @@ class OpenRouterClient(DeepSeekClient):
 
         ``thinking_enabled`` (DEEPSEEK_THINKING_ENABLED / per-request kwarg)
         maps to ``reasoning.enabled``; ``reasoning_effort`` stays a top-level
-        param (OpenRouter accepts the OpenAI-style name). Provider pinning
-        rides along in the same body.
+        param (OpenRouter accepts the OpenAI-style name).
+
+        Provider pinning: only when the target model is actually a DeepSeek
+        model (muse-spark / meta models are NOT deepseek). Pinning
+        muse-spark to ``deepseek`` with ``allow_fallbacks:false`` would
+        hard-fail and also defeat automatic prefix caching on the correct
+        Meta-served endpoint. Fall back to unpinned (OpenRouter auto-routes)
+        for non-DeepSeek models.
         """
         reasoning: Dict[str, Any] = {"enabled": bool(thinking_enabled)}
-        params["extra_body"] = {
-            "reasoning": reasoning,
-            "provider": {"order": [self.PROVIDER_SLUG], "allow_fallbacks": False},
-        }
+        model = str(params.get("model") or "")
+        is_deepseek = "deepseek" in model.lower()
+        # Pin is opt-out via env for cache tests; default is provider-agnostic
+        # for non-DeepSeek models so prefix caching works on the right host.
+        if is_deepseek:
+            params["extra_body"] = {
+                "reasoning": reasoning,
+                "provider": {"order": [self.PROVIDER_SLUG], "allow_fallbacks": False},
+            }
+        else:
+            params["extra_body"] = {"reasoning": reasoning}
         if reasoning_effort:
             params["reasoning_effort"] = reasoning_effort

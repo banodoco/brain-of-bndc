@@ -299,6 +299,11 @@ class SupportCog(commands.Cog):
     async def _seed_conversation_if_needed(self, thread: discord.Thread) -> bool:
         """Rebuild conversation history after a bot restart.
 
+        Prefers a durable hydrate from ``support_agent_turns`` (full tool
+        trace + replies) so the in-memory ``_conversations`` cache is truly
+        restorable across deploys / cold starts. Falls back to the
+        Discord-text seed (lossy but always available).
+
         Returns True when history was seeded (thread unknown to the agent).
         """
         agent = self._ensure_agent()
@@ -306,17 +311,91 @@ class SupportCog(commands.Cog):
             return False
         if agent.get_conversation(thread.id):
             return False
+        # — durable path: replay support_agent_turns rows in order —
+        # Best-effort: table is staged (may be missing), so any failure
+        # silently falls through to the Discord-text path. Rows already
+        # contain the exact user_message + replies + tool trace that was
+        # persisted via _persist_turn, so reconstruction preserves literal
+        # continuation (tool_use/tool_result alignment) instead of the
+        # lossy Discord-text-only seed.
+        # Guard against unbounded key growth: cap distinct cached
+        # threads (the per-turn trim already caps *size* per thread).
+        try:
+            from src.features.admin_chat.agent import _conversations as _global_conv
+            if len(_global_conv) > 600:
+                excess = len(_global_conv) - 500
+                for k in list(_global_conv.keys())[:excess]:
+                    _global_conv.pop(k, None)
+                logger.info("[Support] Evicted %d stale conversations (cap 500)", excess)
+        except Exception:
+            pass
+        try:
+            sb = getattr(getattr(self.db_handler, "supabase", None), "table", None)
+            if sb is not None:
+                resp = sb("support_agent_turns").select(
+                    "user_message,replies,tool_calls"
+                ).eq("thread_id", thread.id).order("created_at").execute()
+                rows = getattr(resp, "data", None) or []
+                if rows:
+                    hydrated: list[dict] = []
+                    for idx, row in enumerate(rows):
+                        um = (row.get("user_message") or "").strip()
+                        if um:
+                            hydrated.append({"role": "user", "content": um})
+                        # Replay tool traces as the real chat loop stored them:
+                        # assistant tool_use + user tool_result pairs. This keeps
+                        # the cache aligned so the next LLM call sees the same
+                        # shape it would have had without a restart.
+                        tcs = row.get("tool_calls") or []
+                        replies = row.get("replies") or []
+                        if tcs:
+                            for ti, act in enumerate(tcs):
+                                tool = act.get("tool") if isinstance(act, dict) else None
+                                tinput = act.get("input") if isinstance(act, dict) else {}
+                                result = act.get("result") if isinstance(act, dict) else act
+                                tid = f"seed_{thread.id}_{idx}_{ti}"
+                                if tool in ("reply", "end_turn"):
+                                    continue  # replies already carry the text
+                                hydrated.append({
+                                    "role": "assistant",
+                                    "content": [{"type": "tool_use", "id": tid, "name": tool or "unknown", "input": tinput or {}}],
+                                })
+                                hydrated.append({
+                                    "role": "user",
+                                    "content": [{"type": "tool_result", "tool_use_id": tid, "content": __import__("json").dumps(result) if result is not None else "{}", "is_error": not bool((result or {}).get("success", True)) if isinstance(result, dict) else False}],
+                                })
+                        if replies:
+                            # Replies were the final assistant text blocks
+                            for r in replies:
+                                if isinstance(r, str) and r.strip():
+                                    hydrated.append({"role": "assistant", "content": [{"type": "text", "text": r}]})
+                    if hydrated:
+                        agent.get_conversation(thread.id).extend(hydrated)
+                        # Apply the same 20-turn / 80k trim the live path uses
+                        try:
+                            agent._trim_conversation(thread.id)
+                        except Exception:
+                            pass
+                        logger.info("[Support] Hydrated %d seeded message(s) from DB for thread %s", len(hydrated), thread.id)
+                        return True
+        except Exception:
+            logger.warning("[Support] DB hydrate failed for thread %s — falling back to Discord history", thread.id, exc_info=True)
         ordered = []
         async for msg in thread.history(limit=HISTORY_SEED_LIMIT, oldest_first=False):
             ordered.append(msg)
         ordered.reverse()
         seeded = build_seed_history(ordered)
         agent.get_conversation(thread.id).extend(seeded)
+        try:
+            agent._trim_conversation(thread.id)
+        except Exception:
+            pass
         logger.info(
-            "[Support] Seeded %d history message(s) for thread %s",
+            "[Support] Seeded %d history message(s) for thread %s (discord-text fallback)",
             len(seeded), thread.id,
         )
         return True
+
     async def _get_starter_message(self, thread: discord.Thread):
         """Fetch the Message that started this forum thread, if any."""
         starter = getattr(thread, 'starter_message', None)
@@ -372,13 +451,29 @@ class SupportCog(commands.Cog):
                 error_text = "agent_unavailable: failed to initialize AdminChatAgent"
                 await self._send_fallback(thread)
                 return
+            seeded = False
             try:
-                await self._seed_conversation_if_needed(thread)
+                seeded = await self._seed_conversation_if_needed(thread)
             except Exception:
                 logger.exception(
                     "[Support] History seeding failed for thread %s — continuing",
                     thread.id,
                 )
+            # If we just seeded, the history already contains the triggering
+            # message as the last user turn (thread.history includes it).
+            # Remove that duplicate so chat() appends it exactly once — otherwise
+            # the LLM sees two consecutive identical user messages and wastes
+            # context / confuses continuation.
+            if seeded and user_message and user_message.strip():
+                try:
+                    conv = agent.get_conversation(thread.id) if agent else None
+                    if conv and conv[-1].get("role") == "user":
+                        last_content = conv[-1].get("content") or ""
+                        if isinstance(last_content, str) and last_content.strip() == user_message.strip():
+                            conv.pop()
+                            logger.info("[Support] Dropped seeded duplicate for thread %s", thread.id)
+                except Exception:
+                    pass
             result = await agent.chat(
                 user_id=thread.id,
                 user_message=user_message,
@@ -514,6 +609,15 @@ class SupportCog(commands.Cog):
         # the initial turn; the on_ready catch-up covers any misses.
         if message.id == channel.id:
             return
+        # Serialize per-thread: if a turn is already in-flight, queue this
+        # follow-up instead of running concurrently (TOCTOU on _conversations
+        # would otherwise drop or interleave history).
+        if channel.id in self._processing_threads:
+            self._pending_messages.setdefault(channel.id, []).append(message)
+            logger.info("[Support] Queued follow-up for busy thread %s (queue=%d)",
+                        channel.id, len(self._pending_messages[channel.id]))
+            return
+        self._processing_threads.add(channel.id)
         try:
             await self._run_turn_guarded(channel, _content_with_attachments(message),
                                          requester_id=message.author.id,

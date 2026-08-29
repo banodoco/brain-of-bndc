@@ -550,7 +550,15 @@ class AdminChatAgent:
                 )
 
             full_message = "".join(ctx_parts) + "\n\n" + user_message
-        persisted_user_msg: Dict[str, Any] = {"role": "user", "content": user_message}
+        # Store the EXACT string that was sent to the LLM (full_message)
+        # in _conversations, not the raw user_message. This keeps the
+        # in-memory history prefix-stable so DeepSeek/OpenRouter automatic
+        # prefix caching (prompt_cache_hit_tokens) actually fires: the second
+        # turn's messages start with the exact token sequence the provider
+        # cached from the first turn. The old behaviour stored raw without the
+        # [Sent in #...] wrapper, so turn 2's history=[raw] never matched turn
+        # 1's sent=[prefixed] — every follow-up was a full cache miss.
+        persisted_user_msg: Dict[str, Any] = {"role": "user", "content": full_message}
         request_user_msg: Dict[str, Any] = {"role": "user", "content": full_message}
         messages: List[Dict[str, Any]] = list(conversation)
         messages.append(request_user_msg)
