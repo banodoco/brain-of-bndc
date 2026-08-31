@@ -11,6 +11,11 @@ from src.common.llm import get_llm_response
 
 logger = logging.getLogger('DiscordBot')
 
+DEFAULT_GRANTS_LLM_CLIENT = 'openrouter'
+DEFAULT_GRANTS_LLM_MODEL = 'meta/muse-spark-1.2-contributor'
+DEFAULT_GRANTS_LLM_MAX_TOKENS = 1024
+MIN_GRANTS_LLM_MAX_TOKENS = 512
+
 
 def _render_prompt_template(template: str, community_name: str) -> str:
     return template.replace("our server", f"the {community_name} server")
@@ -41,22 +46,27 @@ def _fill_prompt_template(prompt: str, gpu_info: str) -> str:
 def _grants_llm_config() -> tuple[str, str]:
     """Resolve the LLM provider used for grant reviews.
 
-    GRANTS_LLM_CLIENT: one of claude | deepseek | openai | gemini (default claude).
+    GRANTS_LLM_CLIENT: one of openrouter | claude | deepseek | openai | gemini
+    (default openrouter).
     GRANTS_LLM_MODEL: model name; defaults per client when unset.
 
     Routing through the central dispatcher (src.common.llm.get_llm_response)
     means grants keep working if a provider's key lapses — flip the env vars
     instead of editing code.
     """
-    client = os.getenv('GRANTS_LLM_CLIENT', 'claude').strip().lower()
-    model = os.getenv('GRANTS_LLM_MODEL', '').strip()
+    # Deployment templates commonly define optional variables as blank. Treat
+    # blank/whitespace-only values as absent rather than producing an invalid
+    # dispatcher client or pairing OpenRouter with Claude's default model.
+    client = (os.getenv('GRANTS_LLM_CLIENT') or '').strip().lower() or DEFAULT_GRANTS_LLM_CLIENT
+    model = (os.getenv('GRANTS_LLM_MODEL') or '').strip()
     if not model:
         model = {
+            'openrouter': DEFAULT_GRANTS_LLM_MODEL,
             'claude': 'claude-sonnet-4-5-20250929',
             'deepseek': 'deepseek-v4-flash',
             'openai': 'gpt-4o-mini',
             'gemini': 'gemini-2.0-flash',
-        }.get(client, 'claude-sonnet-4-5-20250929')
+        }.get(client, DEFAULT_GRANTS_LLM_MODEL)
     return client, model
 
 
@@ -66,6 +76,16 @@ def first_timer_max_hours() -> int:
         return max(int(os.getenv('GRANTS_FIRST_TIMER_MAX_HOURS', '10')), 1)
     except ValueError:
         return 10
+
+
+def grants_llm_max_tokens() -> int:
+    """Completion budget for grant-review calls, with a safe practical floor."""
+    try:
+        configured = (os.getenv('GRANTS_LLM_MAX_TOKENS') or '').strip()
+        value = int(configured or DEFAULT_GRANTS_LLM_MAX_TOKENS)
+        return value if value >= MIN_GRANTS_LLM_MAX_TOKENS else DEFAULT_GRANTS_LLM_MAX_TOKENS
+    except ValueError:
+        return DEFAULT_GRANTS_LLM_MAX_TOKENS
 
 
 def min_application_chars() -> int:
@@ -278,21 +298,36 @@ async def interpret_admin_decision(thread_content: str, admin_message: str,
     last_error = None
 
     for attempt in range(max_attempts):
-        call_kwargs = {'max_tokens': 1024, 'temperature': 0.2}
+        call_kwargs = {'max_tokens': grants_llm_max_tokens(), 'temperature': 0.2}
         if client_name == 'deepseek':
             # Structured output: DeepSeek reasoning can burn the whole token
             # budget and return no final text. Disable it and request JSON mode
             # so the response is deterministic.
             call_kwargs['thinking_enabled'] = False
             call_kwargs['response_format'] = {'type': 'json_object'}
-        response_text = await get_llm_response(
-            client_name,
-            model,
-            system_prompt=system_prompt,
-            messages=messages,
-            **call_kwargs,
-        )
-
+        elif client_name == 'openrouter':
+            # Muse Spark requires reasoning to remain enabled on OpenRouter.
+            # JSON mode constrains the final answer without disabling it.
+            call_kwargs['thinking_enabled'] = True
+            call_kwargs['response_format'] = {'type': 'json_object'}
+        response_text = None
+        try:
+            response_text = await get_llm_response(
+                client_name,
+                model,
+                system_prompt=system_prompt,
+                messages=messages,
+                **call_kwargs,
+            )
+        except Exception as e:
+            msg = str(e)
+            if "402" in msg or "Insufficient Balance" in msg or "insufficient" in msg.lower():
+                # Billing is out — retrying 3x just spams channel with raw JSON
+                # and burns rate limits. Fail fast with a clean, user-facing
+                # error the cog can turn into a single admin DM + cooldown.
+                logger.error(f"Grants LLM billing exhausted (402) — failing fast, no retry: {e}")
+                raise RuntimeError("LLM billing exhausted (402 Insufficient Balance) — grants reviews paused until credits are refilled") from e
+            raise
         try:
             result = _parse_json(response_text)
         except json.JSONDecodeError as e:
@@ -368,21 +403,32 @@ async def assess_application(thread_content: str, grant_history: list | None = N
     first_grant = not any(g.get('status') == 'paid' for g in (grant_history or []))
 
     for attempt in range(max_attempts):
-        call_kwargs = {'max_tokens': 1024, 'temperature': 0.3}
+        call_kwargs = {'max_tokens': grants_llm_max_tokens(), 'temperature': 0.3}
         if client_name == 'deepseek':
             # Structured output: DeepSeek reasoning can burn the whole token
             # budget and return no final text. Disable it and request JSON mode
             # so the response is deterministic.
             call_kwargs['thinking_enabled'] = False
             call_kwargs['response_format'] = {'type': 'json_object'}
-        response_text = await get_llm_response(
-            client_name,
-            model,
-            system_prompt=system_prompt,
-            messages=messages,
-            **call_kwargs,
-        )
-
+        elif client_name == 'openrouter':
+            # Muse Spark requires reasoning to remain enabled on OpenRouter.
+            # JSON mode constrains the final answer without disabling it.
+            call_kwargs['thinking_enabled'] = True
+            call_kwargs['response_format'] = {'type': 'json_object'}
+        try:
+            response_text = await get_llm_response(
+                client_name,
+                model,
+                system_prompt=system_prompt,
+                messages=messages,
+                **call_kwargs,
+            )
+        except Exception as e:
+            msg = str(e)
+            if "402" in msg or "Insufficient Balance" in msg or "insufficient" in msg.lower():
+                logger.error(f"Grants LLM billing exhausted (402) — failing fast, no retry: {e}")
+                raise RuntimeError("LLM billing exhausted (402 Insufficient Balance) — grants reviews paused until credits are refilled") from e
+            raise
         # Try to parse
         try:
             result = _parse_json(response_text)

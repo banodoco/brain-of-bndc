@@ -21,14 +21,62 @@ from src.features.payments.payment_service import PaymentActor, PaymentActorKind
 
 logger = logging.getLogger('DiscordBot')
 
+# Bot-authored public verdicts. Startup recovery must never reassess a row when
+# Discord already shows one of these outcomes, even if the DB write was lost.
+_POSTED_VERDICT_MARKERS = (
+    '**This is not an approval yet**',
+    '**Application not approved**',
+    '**Grant Approved!**',
+)
+_ADMIN_REVIEW_FAILURE_MESSAGE = (
+    "I couldn't process that moderator decision right now. "
+    "The application remains queued for manual review; please try again shortly."
+)
+
+# Billing circuit-breaker: once we hit a 402, stop hammering the provider
+# and stop spamming the grants channel. A single admin DM is sent; all
+# subsequent review attempts until _BILLING_COOLDOWN_S has elapsed just
+# post the friendly _BILLING_PAUSED_MESSAGE without touching the LLM.
+_BILLING_PAUSED_MESSAGE = (
+    "Grants reviews are temporarily paused — LLM credits are exhausted "
+    "(402 Insufficient Balance). Your application is saved and will be "
+    "reviewed automatically once credits are refilled. No need to repost."
+)
+_BILLING_COOLDOWN_S = 3600  # 1 hour after a 402 before we retry the provider
+_billing_paused_until: float = 0  # monotonic-ish via time.time()
+
+def _is_billing_error(exc: Exception) -> bool:
+    msg = str(exc)
+    return "402" in msg or "Insufficient Balance" in msg or "insufficient" in msg.lower() or "billing exhausted" in msg.lower()
+
+def _billing_paused() -> bool:
+    import time
+    return time.time() < _billing_paused_until
+
+def _note_billing_paused():
+    global _billing_paused_until
+    import time
+    _billing_paused_until = time.time() + _BILLING_COOLDOWN_S
+
+
+async def _find_posted_verdict(thread: discord.Thread) -> str | None:
+    """Return a stable marker for a recent bot-authored grant verdict, if any."""
+    async for message in thread.history(limit=25):
+        if not getattr(message.author, 'bot', False):
+            continue
+        content = message.content or ''
+        for marker in _POSTED_VERDICT_MARKERS:
+            if marker in content:
+                return marker
+    return None
+
 
 class GrantsCog(commands.Cog):
-    """Micro-grants: applicants post in forum → Claude reviews → SOL payment."""
+    """Micro-grants: applicants post in forum → LLM review → SOL payment."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.db = getattr(bot, 'db_handler', None)
-        self.claude_client = getattr(bot, 'claude_client', None)
         self.payment_service = getattr(bot, 'payment_service', None)
         self.storage = getattr(self.db, 'storage_handler', None) if self.db else None
 
@@ -44,7 +92,7 @@ class GrantsCog(commands.Cog):
         admin_id = os.getenv('ADMIN_USER_ID')
         self.admin_id = int(admin_id) if admin_id else None
 
-        self.configured = all([self.grants_channel_id, self.db, self.claude_client])
+        self.configured = all([self.grants_channel_id, self.db])
         if not self.configured:
             logger.warning("GrantsCog: missing config, handlers will no-op")
 
@@ -147,6 +195,33 @@ class GrantsCog(commands.Cog):
             existing = self.db.get_grant_by_thread(thread.id, guild_id=guild.id)
             if existing:
                 await self._backfill_media(thread, existing)
+                # A provider outage may have stranded the row after creation but
+                # before a verdict was persisted. Re-run it on startup now that
+                # the LLM route is available again.
+                if existing.get('status') == 'reviewing' and not thread.locked:
+                    if thread.id in self._processing_threads:
+                        continue
+                    self._processing_threads.add(thread.id)
+                    try:
+                        posted_verdict = await _find_posted_verdict(thread)
+                        if posted_verdict:
+                            logger.warning(
+                                f"GrantsCog: reviewing row {thread.id} already has posted "
+                                f"verdict {posted_verdict!r}; skipping startup reassessment"
+                            )
+                        else:
+                            logger.info(
+                                f"GrantsCog: recovering reviewing thread {thread.id} "
+                                f"({thread.name})"
+                            )
+                            await self._reassess_application(thread, existing)
+                    except Exception:
+                        logger.error(
+                            f"GrantsCog: failed to recover reviewing thread {thread.id}",
+                            exc_info=True,
+                        )
+                    finally:
+                        self._processing_threads.discard(thread.id)
                 continue
 
             # Skip locked threads (already handled manually)
@@ -189,12 +264,45 @@ class GrantsCog(commands.Cog):
             except (json.JSONDecodeError, TypeError):
                 pass
 
-        assessment = await interpret_admin_decision(
-            thread_content, admin_message,
-            llm_recommendation=llm_recommendation,
-            guild_id=getattr(thread.guild, 'id', None),
-            server_config=getattr(self.db, 'server_config', None),
-        )
+        try:
+            assessment = await interpret_admin_decision(
+                thread_content, admin_message,
+                llm_recommendation=llm_recommendation,
+                guild_id=getattr(thread.guild, 'id', None),
+                server_config=getattr(self.db, 'server_config', None),
+            )
+        except Exception as e:
+            if _is_billing_error(e):
+                logger.error(f"GrantsCog: billing exhausted during admin review for thread {thread_id}: {e}")
+                _note_billing_paused()
+                # Update status but stay in needs_review — do not spin
+                self.db.update_grant_status(
+                    thread_id,
+                    guild_id=getattr(thread.guild, 'id', None),
+                    status='needs_review',
+                )
+                await thread.send(_BILLING_PAUSED_MESSAGE + f" {self._admin_mention} will refill shortly.")
+                # One DM to admin, throttled by the same cooldown
+                try:
+                    # _admin_mention is "<@id>" — try DM if we can resolve the user
+                    if getattr(self, 'admin_id', None):
+                        user = self.bot.get_user(self.admin_id) or await self.bot.fetch_user(self.admin_id)
+                        if user:
+                            await user.send(f"Grants LLM billing exhausted (402) — paused reviews for {_BILLING_COOLDOWN_S//60} min. Please refill OpenRouter credits at https://openrouter.ai/credits. Thread {thread_id} triggered it.")
+                except Exception:
+                    pass
+                return
+            logger.error(
+                f"GrantsCog: admin review provider failed for thread {thread_id}",
+                exc_info=True,
+            )
+            self.db.update_grant_status(
+                thread_id,
+                guild_id=getattr(thread.guild, 'id', None),
+                status='needs_review',
+            )
+            await thread.send(_ADMIN_REVIEW_FAILURE_MESSAGE)
+            return
 
         # interpret_admin_decision returns needs_review if admin intent was unclear —
         # in that case just post the response as a message and keep the thread open
@@ -262,9 +370,17 @@ class GrantsCog(commands.Cog):
                 self._processing_threads.add(thread_id)
                 try:
                     await self._handle_admin_review(channel, grant, message.content)
-                except Exception as e:
-                    logger.error(f"GrantsCog: admin review error for thread {thread_id}: {e}", exc_info=True)
-                    await channel.send(f"Error processing review: {e}")
+                except Exception:
+                    logger.error(
+                        f"GrantsCog: admin review error for thread {thread_id}",
+                        exc_info=True,
+                    )
+                    self.db.update_grant_status(
+                        thread_id,
+                        guild_id=message.guild.id,
+                        status='needs_review',
+                    )
+                    await channel.send(_ADMIN_REVIEW_FAILURE_MESSAGE)
                 finally:
                     self._processing_threads.discard(thread_id)
             return
@@ -395,6 +511,13 @@ class GrantsCog(commands.Cog):
         grant_history = [g for g in grant_history if g.get('status') != 'reviewing' or g.get('thread_id') != thread_id]
         engagement = self.db.get_member_engagement(applicant_id, guild_id=thread.guild.id)
 
+        # Fast-path: billing is paused — don't even call the LLM (saves the
+        # 3 retries and the spam). This also protects cold-start catch-up.
+        if _billing_paused():
+            logger.warning(f"GrantsCog: skipping assessment for thread {thread_id} — billing paused")
+            self.db.update_grant_status(thread_id, guild_id=thread.guild.id, status='needs_review')
+            await thread.send(_BILLING_PAUSED_MESSAGE + f" {self._admin_mention} will refill shortly.")
+            return
         # Assess with LLM
         try:
             assessment = await assess_application(
@@ -404,12 +527,28 @@ class GrantsCog(commands.Cog):
                 guild_id=getattr(thread.guild, 'id', None),
                 server_config=getattr(self.db, 'server_config', None),
             )
-        except RuntimeError as e:
-            logger.error(f"GrantsCog: assessment failed for thread {thread_id}: {e}")
-            await thread.send(f"Unable to process this application right now. {self._admin_mention} will review it manually.")
+        except Exception as e:
+            if _is_billing_error(e):
+                logger.error(f"GrantsCog: billing exhausted for thread {thread_id}: {e}")
+                _note_billing_paused()
+                self.db.update_grant_status(thread_id, guild_id=thread.guild.id, status='needs_review')
+                await thread.send(_BILLING_PAUSED_MESSAGE + f" {self._admin_mention} will refill shortly.")
+                try:
+                    if getattr(self, 'admin_id', None):
+                        user = self.bot.get_user(self.admin_id) or await self.bot.fetch_user(self.admin_id)
+                        if user:
+                            await user.send(f"Grants LLM billing exhausted (402) — paused reviews for {_BILLING_COOLDOWN_S//60} min. Please refill OpenRouter credits at https://openrouter.ai/credits. Thread {thread_id} triggered it.")
+                except Exception:
+                    pass
+                return
+            logger.error(
+                f"GrantsCog: assessment failed for thread {thread_id}",
+                exc_info=True,
+            )
             # Don't strand the thread in 'reviewing': flag it needs_review so an
             # admin reply can drive the decision once the LLM path recovers.
             self.db.update_grant_status(thread_id, guild_id=thread.guild.id, status='needs_review')
+            await thread.send(f"Unable to process this application right now. {self._admin_mention} will review it manually.")
             return
 
         await self._handle_assessment(thread, assessment)
@@ -464,10 +603,13 @@ class GrantsCog(commands.Cog):
                 guild_id=getattr(thread.guild, 'id', None),
                 server_config=getattr(self.db, 'server_config', None),
             )
-        except RuntimeError as e:
-            logger.error(f"GrantsCog: re-assessment failed for thread {thread_id}: {e}")
+        except Exception:
+            logger.error(
+                f"GrantsCog: re-assessment failed for thread {thread_id}",
+                exc_info=True,
+            )
+            self.db.update_grant_status(thread_id, guild_id=thread.guild.id, status='needs_review')
             await thread.send(f"Unable to re-review right now. {self._admin_mention} will follow up.")
-            self.db.update_grant_status(thread_id, guild_id=thread.guild.id, status='needs_info')
             return
 
         await self._handle_assessment(thread, assessment)
@@ -588,8 +730,9 @@ class GrantsCog(commands.Cog):
         decision = assessment['decision']
         response = assessment['response']
         reasoning = assessment['reasoning']
-        # Store both reasoning and response in llm_assessment
-        llm_assessment = json.dumps({'reasoning': reasoning, 'response': response})
+        # Persist the full validated verdict. Admin review needs the original
+        # decision, GPU, and hours as well as its private/public prose.
+        llm_assessment = json.dumps(assessment)
 
         if decision == 'spam':
             self.db.update_grant_status(thread_id, guild_id=guild_id, status='rejected', llm_assessment=llm_assessment,
@@ -602,6 +745,12 @@ class GrantsCog(commands.Cog):
             return
 
         if decision == 'needs_info':
+            self.db.update_grant_status(
+                thread_id,
+                guild_id=guild_id,
+                status='needs_info',
+                llm_assessment=llm_assessment,
+            )
             await thread.send(
                 f"**More information needed**\n\n{response}\n\n"
                 f"Please reply here with the requested details and I'll re-review your application."
