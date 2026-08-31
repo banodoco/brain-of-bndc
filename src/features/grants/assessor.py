@@ -349,8 +349,22 @@ async def interpret_admin_decision(thread_content: str, admin_message: str,
         logger.info(f"Admin review interpretation succeeded on attempt {attempt + 1}: decision={result['decision']}")
         return result
 
+    # After 3 attempts we still have invalid JSON — the admin message was
+    # likely vague like "can you try again" with no decision. Instead of
+    # raising and showing "I couldn't process that moderator decision" (which
+    # looks like a system error), return a graceful needs_review that asks
+    # for a clear approved/rejected + hours. This prevents the 15:47→15:48
+    # spam loop when pom retries with a non-decision.
+    if last_error and "Invalid JSON" in str(last_error):
+        logger.warning(f"Admin review fallback to needs_review after 3 Invalid JSON attempts: {last_error}")
+        return {
+            "reasoning": f"Admin message {admin_message!r} was vague/empty and the model returned invalid JSON after 3 attempts ({last_error}). Ask for a clear decision.",
+            "decision": "needs_review",
+            "response": "I didn't catch a clear decision in that message. Please reply with something like `Approved 30 hours on H100` or `Rejected because …` and I'll process it.",
+            "gpu_type": None,
+            "recommended_hours": None,
+        }
     raise RuntimeError(f"Admin review interpretation failed after {max_attempts} attempts. Last error: {last_error}")
-
 
 async def assess_application(thread_content: str, grant_history: list | None = None,
                              engagement: dict | None = None,
