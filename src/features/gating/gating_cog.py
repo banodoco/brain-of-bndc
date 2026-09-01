@@ -212,7 +212,7 @@ class GatingCog(commands.Cog):
     Cleanup:
       - on_raw_message_delete  → remove from tracking, expire DB if no messages left
       - cleanup_expired_intros → expire pending intros older than 7 days
-      - scan_intro_channels    → backfill _pending_messages from channel history on startup
+      - scan_intro_channels    → periodically reconcile missed intro/reaction events
     """
 
     def __init__(self, bot: commands.Bot):
@@ -228,6 +228,12 @@ class GatingCog(commands.Cog):
         # AutoShardedBot and migrate _pending_messages to a shared cache.
         # That deployment constraint is why MP2 does not use a DB-side lease.
         self._poll_lock = asyncio.Lock()
+
+        # Serializes approval attempts from the live raw-reaction listener and
+        # the history reconciler. A gateway reconnect can deliver a late event
+        # while reconciliation is replaying the same reaction; re-reading the
+        # pending row under this lock keeps that race idempotent.
+        self._intro_approval_lock = asyncio.Lock()
 
         # Temp gate-channel welcome pings awaiting deletion: {message_id: (channel_id, sent_at)}
         self._temp_welcomes: dict[int, tuple[int, datetime]] = {}
@@ -664,14 +670,64 @@ class GatingCog(commands.Cog):
             logger.info(f"GatingCog: reactor {reactor} lacks approver role, ignoring")
             return
 
-        intro = self.db.get_pending_intro_by_member(member_id, guild_id=payload.guild_id)
-        if not intro:
-            self._remove_member_messages(member_id)
-            return
+        await self._approve_pending_intro_from_reactor(
+            guild,
+            cfg,
+            member_id=member_id,
+            reacted_message_id=payload.message_id,
+            reactor=reactor,
+            is_super=is_super,
+        )
 
-        voter_role = 'super_approver' if is_super else 'approver'
-        self.db.record_intro_vote(intro['id'], payload.message_id, payload.user_id, voter_role, guild_id=payload.guild_id)
-        await self._approve_member(guild, intro, cfg, reacted_message_id=payload.message_id)
+    async def _approve_pending_intro_from_reactor(
+        self,
+        guild: discord.Guild,
+        cfg: dict,
+        *,
+        member_id: int,
+        reacted_message_id: int,
+        reactor: discord.abc.User,
+        is_super: bool | None = None,
+    ) -> bool:
+        """Approve the still-pending intro represented by an approver reaction.
+
+        Both the live gateway listener and periodic history reconciliation use
+        this method. The pending row is deliberately re-read while holding the
+        lock so a late gateway event and a replayed reaction cannot approve the
+        same intro twice.
+        """
+        reactor_role_ids = {role.id for role in getattr(reactor, 'roles', ())}
+        if is_super is None:
+            super_role_id = cfg.get('super_approver_role_id')
+            is_super = bool(super_role_id and super_role_id in reactor_role_ids)
+        is_approver = bool(
+            cfg.get('approver_role_id')
+            and cfg['approver_role_id'] in reactor_role_ids
+        )
+        if not is_approver and not is_super:
+            return False
+
+        async with self._intro_approval_lock:
+            intro = self.db.get_pending_intro_by_member(member_id, guild_id=guild.id)
+            if not intro:
+                self._remove_member_messages(member_id)
+                return False
+
+            voter_role = 'super_approver' if is_super else 'approver'
+            self.db.record_intro_vote(
+                intro['id'],
+                reacted_message_id,
+                reactor.id,
+                voter_role,
+                guild_id=guild.id,
+            )
+            await self._approve_member(
+                guild,
+                intro,
+                cfg,
+                reacted_message_id=reacted_message_id,
+            )
+            return True
 
     # ═══════════════════════════════════════════════════════════════
     #  4. Approve: grant role, ✅, DM
@@ -1134,37 +1190,144 @@ class GatingCog(commands.Cog):
     async def before_poll_approval_requests(self):
         await self.bot.wait_until_ready()
 
-    @tasks.loop(count=1)
+    @tasks.loop(minutes=1)
     async def scan_intro_channels(self):
-        """Backfill _pending_messages from channel history on startup."""
-        if not self.db or not self._pending_messages:
+        """Reconcile intro messages and approver reactions missed by the gateway.
+
+        This is intentionally recurring. The bot's other loops can remain
+        healthy while Discord message/reaction events are temporarily missed;
+        channel history is therefore the durable recovery source, not merely a
+        startup cache warmer.
+        """
+        if not self.db:
             return
-        pending_member_ids = set(self._pending_messages.values())
         for guild in self.bot.guilds:
-            cfg = self._get_guild_config(guild.id)
-            intro_channel_id = cfg.get('intro_channel_id')
-            speaker_role_id = cfg.get('speaker_role_id')
-            if not intro_channel_id or not speaker_role_id:
+            cfg = self._get_gating_config(guild.id)
+            if not cfg:
                 continue
+            intro_channel_id = cfg['intro_channel_id']
             channel = guild.get_channel(intro_channel_id)
             if not channel:
                 continue
-            speaker_role = guild.get_role(speaker_role_id)
             found = 0
+            approved = 0
             try:
                 async for msg in channel.history(limit=200):
-                    if msg.author.bot or msg.author.id not in pending_member_ids:
+                    was_tracked = msg.id in self._pending_messages
+                    intro = await self._ensure_reconciled_pending_intro(guild, msg, cfg)
+                    if not intro:
                         continue
-                    if speaker_role and speaker_role in getattr(msg.author, 'roles', ()):
-                        continue
-                    if msg.id not in self._pending_messages:
-                        self._pending_messages[msg.id] = msg.author.id
+                    if not was_tracked and msg.id in self._pending_messages:
                         found += 1
+                    if await self._replay_approver_reaction(guild, msg, intro, cfg):
+                        approved += 1
             except Exception as e:
                 logger.error(f"GatingCog: failed to scan intro channel {intro_channel_id}: {e}")
             if found:
                 logger.info(f"GatingCog: found {found} additional messages from pending members in {guild.name}")
+            if approved:
+                logger.info(f"GatingCog: replayed {approved} missed intro approval(s) in {guild.name}")
         logger.info(f"GatingCog: intro channel scan complete, tracking {len(self._pending_messages)} total messages")
+
+    async def _ensure_reconciled_pending_intro(
+        self,
+        guild: discord.Guild,
+        message: discord.Message,
+        cfg: dict,
+    ) -> dict | None:
+        """Return/create the pending row represented by a history message."""
+        if message.author.bot:
+            member_id = self._pending_messages.get(message.id)
+            if member_id is None:
+                existing = self.db.get_pending_intro_by_message(message.id)
+                if not existing:
+                    return None
+                member_id = int(existing['member_id'])
+                self._pending_messages[message.id] = member_id
+                return existing
+            return self.db.get_pending_intro_by_member(member_id, guild_id=guild.id)
+
+        member = guild.get_member(message.author.id)
+        if not member:
+            try:
+                member = await guild.fetch_member(message.author.id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                return None
+
+        speaker_role = guild.get_role(cfg['speaker_role_id'])
+        if speaker_role and speaker_role in member.roles:
+            return None
+        moderated_role = guild.get_role(cfg['moderated_role_id']) if cfg.get('moderated_role_id') else None
+        if moderated_role and moderated_role in member.roles:
+            return None
+
+        # _approve_member writes this status before changing Discord roles. It
+        # is the durable idempotency guard while the member-role cache catches up.
+        guild_member = self.db.get_guild_member(member.id, guild.id)
+        status = guild_member.get('member_status') if isinstance(guild_member, dict) else None
+        if status in {'speaker', 'moderated'}:
+            return None
+
+        intro = self.db.get_pending_intro_by_member(member.id, guild_id=guild.id)
+        if not intro:
+            intro = self.db.create_pending_intro(
+                member.id,
+                message.id,
+                message.channel.id,
+                guild_id=guild.id,
+            )
+            if not intro:
+                # A concurrent gateway handler may have won the insert.
+                intro = self.db.get_pending_intro_by_member(member.id, guild_id=guild.id)
+            if not intro:
+                return None
+            logger.info(
+                f"GatingCog: reconciled missed intro message {message.id} from "
+                f"{message.author} ({member.id})"
+            )
+
+        self._pending_messages[message.id] = member.id
+        return intro
+
+    async def _replay_approver_reaction(
+        self,
+        guild: discord.Guild,
+        message: discord.Message,
+        intro: dict,
+        cfg: dict,
+    ) -> bool:
+        """Replay one existing human approver reaction, if present."""
+        for reaction in getattr(message, 'reactions', ()):
+            try:
+                async for user in reaction.users():
+                    if user.bot:
+                        continue
+                    reactor = guild.get_member(user.id)
+                    if not reactor:
+                        try:
+                            reactor = await guild.fetch_member(user.id)
+                        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                            continue
+                    role_ids = {role.id for role in reactor.roles}
+                    is_super = bool(
+                        cfg.get('super_approver_role_id')
+                        and cfg['super_approver_role_id'] in role_ids
+                    )
+                    if cfg['approver_role_id'] not in role_ids and not is_super:
+                        continue
+                    return await self._approve_pending_intro_from_reactor(
+                        guild,
+                        cfg,
+                        member_id=int(intro['member_id']),
+                        reacted_message_id=message.id,
+                        reactor=reactor,
+                        is_super=is_super,
+                    )
+            except (discord.Forbidden, discord.HTTPException) as e:
+                logger.warning(
+                    f"GatingCog: couldn't inspect reactions on intro {message.id}: {e}"
+                )
+        return False
 
     @scan_intro_channels.before_loop
     async def before_scan_intro_channels(self):

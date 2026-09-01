@@ -705,6 +705,168 @@ def test_recovery_skips_bot_message(fresh_event_loop):
     cog.db.get_pending_intro_by_member.assert_not_called()
 
 
+# =============================================================================
+# Periodic intro reconciliation — recover missed gateway events
+# =============================================================================
+
+
+class _HistoryChannel:
+    def __init__(self, channel_id, messages):
+        self.id = channel_id
+        self._messages = messages
+
+    async def history(self, *, limit):
+        assert limit == 200
+        for message in self._messages:
+            yield message
+
+
+class _HistoryReaction:
+    def __init__(self, users):
+        self._users = users
+
+    async def users(self):
+        for user in self._users:
+            yield user
+
+
+def _make_reconcile_cog(messages, *, target_roles=None, reactor_members=None):
+    from src.features.gating.gating_cog import GatingCog
+
+    newbie_role = SimpleNamespace(id=1534854919562072115)
+    speaker_role = SimpleNamespace(id=_SPEAKER_ROLE_ID)
+    moderated_role = SimpleNamespace(id=1534854920732151838)
+    channel = _HistoryChannel(_INTRO_CHANNEL_ID, messages)
+    for message in messages:
+        message.channel = channel
+
+    target_member = SimpleNamespace(
+        id=_MEMBER_ID,
+        roles=list(target_roles if target_roles is not None else [newbie_role]),
+    )
+    member_map = {_MEMBER_ID: target_member, **(reactor_members or {})}
+    role_map = {
+        newbie_role.id: newbie_role,
+        speaker_role.id: speaker_role,
+        moderated_role.id: moderated_role,
+    }
+    guild = SimpleNamespace(
+        id=_GUILD_ID,
+        name='BNDC',
+        get_channel=MagicMock(return_value=channel),
+        get_member=MagicMock(side_effect=lambda member_id: member_map.get(member_id)),
+        fetch_member=AsyncMock(side_effect=lambda member_id: member_map[member_id]),
+        get_role=MagicMock(side_effect=lambda role_id: role_map.get(role_id)),
+    )
+    bot = SimpleNamespace(db_handler=None, user=SimpleNamespace(id=42), guilds=[guild])
+    cog = GatingCog(bot)
+    cog.db = MagicMock()
+    cfg = {
+        'gate_channel_id': 100,
+        'intro_channel_id': _INTRO_CHANNEL_ID,
+        'speaker_role_id': _SPEAKER_ROLE_ID,
+        'approver_role_id': 1328101710488408207,
+        'super_approver_role_id': 1138851070311931946,
+        'moderated_role_id': moderated_role.id,
+    }
+    cog._get_gating_config = MagicMock(return_value=cfg)
+    return cog, guild, target_member
+
+
+def test_reconcile_discovers_intro_with_empty_pending_map_and_is_repeatable(fresh_event_loop):
+    message = _top_level_message(7001, _MEMBER_ID)
+    message.reactions = []
+    cog, _guild, _target = _make_reconcile_cog([message])
+
+    pending = {'row': None}
+    cog.db.get_guild_member = MagicMock(return_value={'member_status': 'newbie'})
+    cog.db.get_pending_intro_by_member = MagicMock(side_effect=lambda *_args, **_kwargs: pending['row'])
+
+    def create_pending(member_id, message_id, channel_id, guild_id=None):
+        pending['row'] = {
+            'id': 81,
+            'member_id': member_id,
+            'message_id': message_id,
+            'channel_id': channel_id,
+            'guild_id': guild_id,
+        }
+        return pending['row']
+
+    cog.db.create_pending_intro = MagicMock(side_effect=create_pending)
+
+    fresh_event_loop.run_until_complete(cog.scan_intro_channels())
+    fresh_event_loop.run_until_complete(cog.scan_intro_channels())
+
+    cog.db.create_pending_intro.assert_called_once_with(
+        _MEMBER_ID, 7001, _INTRO_CHANNEL_ID, guild_id=_GUILD_ID,
+    )
+    assert cog._pending_messages == {7001: _MEMBER_ID}
+
+
+def test_reconcile_replays_human_approver_reaction_once(fresh_event_loop):
+    approver_role = SimpleNamespace(id=1328101710488408207)
+    approver = SimpleNamespace(id=_APPROVER_ID, bot=False, roles=[approver_role])
+    bot_reactor = SimpleNamespace(id=42, bot=True, roles=[approver_role])
+    ordinary_reactor = SimpleNamespace(id=99, bot=False, roles=[])
+    message = _top_level_message(7002, _MEMBER_ID)
+    message.reactions = [_HistoryReaction([bot_reactor, ordinary_reactor, approver])]
+    cog, _guild, target = _make_reconcile_cog(
+        [message], reactor_members={_APPROVER_ID: approver, 99: ordinary_reactor},
+    )
+
+    pending = {'row': None}
+    status = {'value': 'newbie'}
+    cog.db.get_guild_member = MagicMock(
+        side_effect=lambda *_args, **_kwargs: {'member_status': status['value']}
+    )
+    cog.db.get_pending_intro_by_member = MagicMock(side_effect=lambda *_args, **_kwargs: pending['row'])
+
+    def create_pending(member_id, message_id, channel_id, guild_id=None):
+        pending['row'] = {
+            'id': 82,
+            'member_id': member_id,
+            'message_id': message_id,
+            'channel_id': channel_id,
+            'guild_id': guild_id,
+        }
+        return pending['row']
+
+    cog.db.create_pending_intro = MagicMock(side_effect=create_pending)
+    cog.db.record_intro_vote = MagicMock(return_value=True)
+
+    async def approve(_guild, _intro, _cfg, reacted_message_id=None):
+        assert reacted_message_id == 7002
+        status['value'] = 'speaker'
+        pending['row'] = None
+        target.roles.append(SimpleNamespace(id=_SPEAKER_ROLE_ID))
+
+    cog._approve_member = AsyncMock(side_effect=approve)
+
+    fresh_event_loop.run_until_complete(cog.scan_intro_channels())
+    fresh_event_loop.run_until_complete(cog.scan_intro_channels())
+
+    cog.db.record_intro_vote.assert_called_once_with(
+        82, 7002, _APPROVER_ID, 'approver', guild_id=_GUILD_ID,
+    )
+    cog._approve_member.assert_awaited_once()
+    # The bot reaction and ordinary user's reaction were not recorded.
+    assert cog.db.record_intro_vote.call_count == 1
+
+
+@pytest.mark.parametrize('blocked_role_id', [_SPEAKER_ROLE_ID, 1534854920732151838])
+def test_reconcile_skips_speaker_and_moderated_members(fresh_event_loop, blocked_role_id):
+    blocked_role = SimpleNamespace(id=blocked_role_id)
+    message = _top_level_message(7003, _MEMBER_ID)
+    message.reactions = []
+    cog, _guild, _target = _make_reconcile_cog([message], target_roles=[blocked_role])
+    cog.db.get_guild_member = MagicMock(return_value={'member_status': 'newbie'})
+
+    fresh_event_loop.run_until_complete(cog.scan_intro_channels())
+
+    cog.db.create_pending_intro.assert_not_called()
+    assert cog._pending_messages == {}
+
+
 # Suppress unused-import warning for shared scaffolding.
 _ = AsyncMock
 
