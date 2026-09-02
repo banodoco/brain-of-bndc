@@ -649,7 +649,7 @@ class TestDispatcherRegistration:
 
 
 class TestOpenRouterWiring:
-    """Support turns run on Ox Alpha via OpenRouter when the key is present."""
+    """Support turns run on Muse Spark 1.3 via OpenRouter when configured."""
 
     def _fresh_cog(self, monkeypatch, support_channel="123"):
         monkeypatch.setenv("SUPPORT_CHANNEL_ID", support_channel)
@@ -664,7 +664,7 @@ class TestOpenRouterWiring:
         cog.configured = True
         return cog
 
-    def test_openrouter_key_wires_ox_alpha(self, monkeypatch):
+    def test_openrouter_key_wires_muse_spark_1_3(self, monkeypatch):
         monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
         monkeypatch.delenv("SUPPORT_AGENT_MODEL", raising=False)
         cog = self._fresh_cog(monkeypatch)
@@ -672,6 +672,7 @@ class TestOpenRouterWiring:
         assert isinstance(agent, AdminChatAgent)
         assert isinstance(agent.client, support_cog_module.OpenRouterClient)
         assert agent.client.client.base_url.host == "openrouter.ai"
+        assert agent.model == "meta/muse-spark-1.3-contributor"
         assert agent.model == support_cog_module.SUPPORT_AGENT_MODEL_DEFAULT
 
     def test_support_agent_model_env_overrides_slug(self, monkeypatch):

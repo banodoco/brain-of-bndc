@@ -27,9 +27,9 @@ logger = logging.getLogger('DiscordBot')
 
 SUPPORT_CHANNEL_ID_DEFAULT = "1163250319107555388"
 
-# Support turns run on Muse Spark 1.2 Contributor via OpenRouter
+# Support turns run on Muse Spark 1.3 Contributor via OpenRouter
 # (OpenAI-compatible endpoint). Override with SUPPORT_AGENT_MODEL if needed.
-SUPPORT_AGENT_MODEL_DEFAULT = "meta/muse-spark-1.2-contributor"
+SUPPORT_AGENT_MODEL_DEFAULT = "meta/muse-spark-1.3-contributor"
 
 
 class OpenRouterClient(DeepSeekClient):

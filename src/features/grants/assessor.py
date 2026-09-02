@@ -12,7 +12,7 @@ from src.common.llm import get_llm_response
 logger = logging.getLogger('DiscordBot')
 
 DEFAULT_GRANTS_LLM_CLIENT = 'openrouter'
-DEFAULT_GRANTS_LLM_MODEL = 'meta/muse-spark-1.2-contributor'
+DEFAULT_GRANTS_LLM_MODEL = 'meta/muse-spark-1.3-contributor'
 DEFAULT_GRANTS_LLM_MAX_TOKENS = 1024
 MIN_GRANTS_LLM_MAX_TOKENS = 512
 
