@@ -36,7 +36,7 @@
 These aren't hard rules — just how we keep this place useful. Nothing here gets you timed out.
 
 > ### 1. Post in the right place:
-> • Whatever you're doing, put it where it belongs: stuck right now → chatter for that topic, finished work → `resources` / `gens`, long builds → a thread, anything else → `off-topic`.
+> • Whatever you're doing, put it where it belongs: stuck right now → chatter for that topic, finished work → `resources` / `gens`, long builds → a thread, anything else → `off-topic`. For example, Minimax gens go in <#1533677158067736777>, not chatter.
 
 > ### 2. Share your progress freely:
 > • Dumping lots of excited progress updates is understandable and okay to a reasonable degree — this is a community for open experimentation and sharing, and raw work-in-progress is welcome here.
@@ -54,3 +54,6 @@ These aren't hard rules — just how we keep this place useful. Nothing here get
 > ### 6. Disagree politely:
 > • Critique the work, not the person. Say what's wrong specifically and what would fix it.
 > • No sarcasm, mocking, or pile-ons. Steaming → step out and flag a mod instead of replying, per Rule 2.
+
+> ### 7. Ask the bot before the humans:
+> • Respect people's time: if a generic AI chatbot can answer it, try that first. For domain-specific knowledge, ask in <#1163250319107555388> — the bot there answers from everything the community has figured out before, and it's typically good.
