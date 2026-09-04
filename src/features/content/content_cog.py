@@ -40,6 +40,7 @@ ATTACHMENT_RE = re.compile(r'^\{\{file:(.+?)\}\}$', re.MULTILINE)
 class ContentSegment:
     """A single Discord message with optional file attachment."""
     text: str
+    attachment: Optional[str] = None  # filename in content-assets bucket
 # content_key -> (channel field, split pattern, forum thread name)
 # Split patterns break on blank line + quote block or markdown header,
 # so plain `## ...` headers (e.g. Norms) post as their own message.
