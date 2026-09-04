@@ -240,9 +240,18 @@ class ContentCog(commands.Cog):
         sent_ids = []
         for seg in new_messages:
             file = await self._download_attachment(sb, guild_id, seg) if seg.attachment else None
-            sent = await channel.send(content=seg.text, file=file or discord.utils.MISSING)
+            sent = None
+            for attempt in range(4):
+                try:
+                    sent = await channel.send(content=seg.text, file=file or discord.utils.MISSING)
+                    break
+                except discord.HTTPException as e:
+                    if getattr(e, 'status', None) == 429 and attempt < 3:
+                        await asyncio.sleep(5 * (attempt + 1))
+                        continue
+                    raise
             sent_ids.append(sent.id)
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1.0)
         return sent_ids
 
     # ------------------------------------------------------------------
