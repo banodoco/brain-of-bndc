@@ -38,22 +38,19 @@ These aren't hard rules — just how we keep this place useful. Nothing here get
 > ### 1. Post in the right place:
 > • Whatever you're doing, put it where it belongs: stuck right now → chatter for that topic, finished work → `resources` / `gens`, long builds → a thread, anything else → `off-topic`. For example, Minimax gens go in <#1533677158067736777>, not chatter.
 
-> ### 2. Share your progress freely:
-> • Dumping lots of excited progress updates is understandable and okay to a reasonable degree — this is a community for open experimentation and sharing, and raw work-in-progress is welcome here.
+> ### 2. Share your progress, then present it well:
+> • Dumping lots of excited progress updates is understandable and okay to a reasonable degree — this is a community for open experimentation and sharing, and raw work-in-progress is welcome here. Then take a step back and present what you're doing well: a short video or a write-up that helps people understand it beats ten scattered messages.
 
-> ### 3. Present it with intentionality:
-> • Take a step back and present what you're doing well: a short video or a write-up that helps people understand it beats ten scattered messages.
-
-> ### 4. Show receipts:
+> ### 3. Share how you did it:
 > • Say what you ran, what you compared it to, and link it. Bigger the claim, bigger the proof. Standing never substitutes: not tenure, not speed, not certainty, not being first.
 
-> ### 5. Assume good faith:
+> ### 4. Assume good faith:
 > • Read it straight before you read it shady — terse replies, dumb questions, and parallel work included.
 > • Link what you built on. Credit disputes go private with proof — side-by-side, diff, commit — or not at all, per Rule 3.
 
-> ### 6. Disagree politely:
+> ### 5. Disagree politely:
 > • Critique the work, not the person. Say what's wrong specifically and what would fix it.
 > • No sarcasm, mocking, or pile-ons. Steaming → step out and flag a mod instead of replying, per Rule 2.
 
-> ### 7. Ask the bot before the humans:
+> ### 6. Ask bots for help before humans:
 > • Respect people's time: if a generic AI chatbot can answer it, try that first. For domain-specific knowledge, ask in <#1163250319107555388> — the bot there answers from everything the community has figured out before, and it's typically good.
