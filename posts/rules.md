@@ -31,3 +31,22 @@
 
 > ### 6. This Channel is a Honeypot for Spammers:
 > • Don't post in this channel. Any post here gets a 1-hour timeout — this channel is a honeypot for spammers.
+
+## Norms:
+
+> ### 1. Post in the right place:
+> • Whatever you're doing, put it where it belongs: stuck right now → chatter for that topic, finished work → `resources` / `gens`, long builds → a thread, anything else → `off-topic`.
+> • One link in chatter pointing at it, discussion where it lands.
+
+> ### 2. Share your work with intentionality:
+> • Dumping lots of excited progress updates is understandable — but take a step back and present what you're doing well: a short video or a write-up that helps people understand it beats ten scattered messages.
+> • Say what you ran, what you compared it to, and link it. Bigger the claim, bigger the proof. Standing never substitutes: not tenure, not speed, not certainty, not being first.
+> • This is a community for open experimentation and sharing — showing your work well is how we all learn faster.
+
+> ### 3. Assume good faith:
+> • Read it straight before you read it shady — terse replies, dumb questions, and parallel work included.
+> • Link what you built on. Credit disputes go private with proof — side-by-side, diff, commit — or not at all, per Rule 3.
+
+> ### 4. Disagree politely:
+> • Critique the work, not the person. Say what's wrong specifically and what would fix it.
+> • No sarcasm, mocking, or pile-ons. Steaming → step out and flag a mod instead of replying, per Rule 2.

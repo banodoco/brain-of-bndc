@@ -10,6 +10,13 @@ strategy for breaking content into multiple Discord messages.
 
 Supports file attachments via {{file:filename}} directives in content.
 Files are stored in the 'content-assets' Supabase Storage bucket.
+
+Adding a section (e.g. norms to rules):
+1. Append a new quote block (or plain `## ` header) to posts/rules.md.
+2. Sync posts/rules.md into server_content (rerun backfill or update the row;
+   the updated_at trigger marks it dirty for the next cycle).
+3. Next 5-min cycle edits in place when the message count is unchanged,
+   else delete+reposts the full set and upserts posted_content.
 """
 
 import asyncio
@@ -33,15 +40,11 @@ ATTACHMENT_RE = re.compile(r'^\{\{file:(.+?)\}\}$', re.MULTILINE)
 class ContentSegment:
     """A single Discord message with optional file attachment."""
     text: str
-    attachment: Optional[str] = None  # filename in content-assets bucket
-
-    def make_discord_file(self, file_bytes: bytes) -> discord.File:
-        """Create a discord.File from downloaded bytes."""
-        return discord.File(io.BytesIO(file_bytes), filename=self.attachment)
-
 # content_key -> (channel field, split pattern, forum thread name)
+# Split patterns break on blank line + quote block or markdown header,
+# so plain `## ...` headers (e.g. Norms) post as their own message.
 CONTENT_REGISTRY: Dict[str, Tuple[str, Optional[str], Optional[str]]] = {
-    'post_rules':           ('rules_channel_id',   r'\n\n(?=>)',     None),
+    'post_rules':           ('rules_channel_id',   r'\n\n(?=>|## )',   None),
     'post_welcome':         ('gate_channel_id',    None,             None),
     'post_getting_started': ('welcome_channel_id', r'\n---\n',       None),
     'post_grants':          ('grants_channel_id',  r'\n\n(?=###\s)', 'How Micro-Grants Work'),
@@ -154,12 +157,33 @@ class ContentCog(commands.Cog):
             thread_id = None
 
         if message_ids:
-            self._upsert_posted(sb, guild_id, content_key, channel_id, message_ids, thread_id)
+            try:
+                self._upsert_posted(sb, guild_id, content_key, channel_id, message_ids, thread_id)
+            except Exception:
+                # Messages already posted but IDs not persisted: log them so a
+                # failed upsert never silently orphans messages. Next cycle
+                # re-syncs from stale IDs and self-heals via delete+repost.
+                logger.error(f"[ContentCog] Upsert failed for {content_key} guild {guild_id}, posted IDs lost: {message_ids}", exc_info=True)
+                raise
             logger.info(f"[ContentCog] Synced {content_key} for guild {guild_id} ({len(message_ids)} messages)")
 
     # ------------------------------------------------------------------
     # Text channel sync (rules, welcome)
     # ------------------------------------------------------------------
+
+    async def _fetch_message_retry(self, channel: discord.TextChannel, msg_id: int):
+        """Fetch one tracked message. Message, None if confirmed deleted, False if transient."""
+        for attempt in range(3):
+            try:
+                return await channel.fetch_message(msg_id)
+            except discord.NotFound:
+                return None
+            except discord.HTTPException:
+                if attempt < 2:
+                    await asyncio.sleep(1 * (attempt + 1))
+                    continue
+                return False
+        return False
 
     async def _sync_text_channel(self, channel: discord.TextChannel, new_messages: List[ContentSegment],
                                   posted: Optional[dict], sb=None, guild_id: int = 0) -> List[int]:
@@ -169,11 +193,17 @@ class ContentCog(commands.Cog):
 
         existing = []
         for msg_id in old_ids:
-            try:
-                existing.append(await channel.fetch_message(msg_id))
-            except (discord.NotFound, discord.HTTPException):
+            msg = await self._fetch_message_retry(channel, msg_id)
+            if msg is False:
+                # Transient failure: abort cycle. [] skips the upsert in
+                # _sync_one, so stored IDs stay untouched for next cycle.
+                logger.warning(f"[ContentCog] Transient fetch failure for {msg_id}, aborting sync this cycle")
+                return []
+            if msg is None:
+                # Confirmed deleted: repost path below deletes survivors.
                 existing = []
                 break
+            existing.append(msg)
 
         if len(existing) == len(new_messages):
             if has_any_attachments:
@@ -420,13 +450,13 @@ class ContentCog(commands.Cog):
 
     @staticmethod
     def _get_posted_row(sb, guild_id: int, content_key: str) -> Optional[dict]:
-        try:
-            result = sb.table('posted_content').select('*').eq(
-                'guild_id', guild_id
-            ).eq('content_key', content_key).limit(1).execute()
-            return result.data[0] if result.data else None
-        except Exception:
-            return None
+        # No try/except: a DB failure must propagate to _sync_all's handler
+        # and skip this cycle. Swallowing it as None forces a re-sync and
+        # reposts content that is already live.
+        result = sb.table('posted_content').select('*').eq(
+            'guild_id', guild_id
+        ).eq('content_key', content_key).limit(1).execute()
+        return result.data[0] if result.data else None
 
     @staticmethod
     def _upsert_posted(sb, guild_id: int, content_key: str, channel_id: int,
