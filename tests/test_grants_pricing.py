@@ -103,9 +103,21 @@ def test_apply_gpu_rates_ignores_unknown_keys():
 # ---------------------------------------------------------------------------
 
 def test_max_grant_usd_follows_h100_rate():
-    assert pricing.max_grant_usd() == pytest.approx(50 * 2.50 * 1.1, abs=0.01)
+    assert pricing.max_grant_usd() == pytest.approx(80 * 2.50 * 1.1, abs=0.01)
     pricing.apply_gpu_rates({'H100_80GB': 2.69})
-    assert pricing.max_grant_usd() == pytest.approx(50 * 2.69 * 1.1, abs=0.01)
+    assert pricing.max_grant_usd() == pytest.approx(80 * 2.69 * 1.1, abs=0.01)
+
+
+def test_max_grant_hours_default_and_environment_override(monkeypatch):
+    monkeypatch.delenv('GRANTS_MAX_HOURS', raising=False)
+    assert pricing.max_grant_hours() == 80
+    monkeypatch.setenv('GRANTS_MAX_HOURS', '64')
+    assert pricing.max_grant_hours() == 64
+
+
+def test_invalid_max_grant_hours_uses_default(monkeypatch):
+    monkeypatch.setenv('GRANTS_MAX_HOURS', 'not-a-number')
+    assert pricing.max_grant_hours() == 80
 
 
 def test_calculate_grant_cost_uses_refreshed_rate():
@@ -171,5 +183,5 @@ def test_assessor_prompt_reflects_refreshed_rates():
     assert '- H100_80GB: $2.69/hr' in prompt
     assert '- H200: $3.59/hr' in prompt
     assert '- B200: $5.98/hr' in prompt
-    # cap = 50 * 2.69 * 1.1 = 147.95 -> shown as $148
-    assert '$148' in prompt
+    # cap = 80 * 2.69 * 1.1 = 236.72 -> shown as $237
+    assert '$237' in prompt

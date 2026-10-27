@@ -1,5 +1,4 @@
-"""Tests for stricter grant review criteria: first-timer hour cap, content
-gate, and the evidence-first rubric in the reviewer prompts."""
+"""Tests for grant review criteria, first-timer cap, and contextual follow-on review."""
 
 import asyncio
 import json
@@ -99,7 +98,8 @@ def test_content_gate_boundary():
 def test_system_prompt_has_evidence_over_assertion_rule():
     assert 'Evidence over assertion' in assessor.SYSTEM_PROMPT
     assert 'never infer project content from the thread title' in assessor.SYSTEM_PROMPT
-    assert 'Self-reported results without a linked artifact cannot support an approval' in assessor.SYSTEM_PROMPT
+    assert 'do not present self-reported benchmark numbers' in assessor.SYSTEM_PROMPT
+    assert 'credible recipient report of shipped scope can support routine follow-on review' in assessor.SYSTEM_PROMPT
 
 
 def test_system_prompt_has_first_timer_start_small_rule():
@@ -108,8 +108,8 @@ def test_system_prompt_has_first_timer_start_small_rule():
     assert 'needs_review' in assessor.SYSTEM_PROMPT
 
 
-def test_system_prompt_has_engagement_scrutiny_rule():
-    assert 'RAISES scrutiny' in assessor.SYSTEM_PROMPT
+def test_system_prompt_treats_discord_engagement_as_context():
+    assert 'Low engagement alone does not require more information or manual review' in assessor.SYSTEM_PROMPT
     assert 'Message count is not demonstrated community standing' in assessor.SYSTEM_PROMPT
 
 
@@ -120,12 +120,11 @@ def test_system_prompt_has_manual_review_triggers():
 def test_system_prompt_allows_reputable_concurrent_grants_with_safeguards():
     prompt = assessor._build_system_prompt()
     assert 'multiple concurrent grants may be approved' in prompt
-    assert 'solid, verifiable reputation' in prompt
+    assert 'solid, verifiable public reputation' in prompt
     assert 'scope is distinct' in prompt
     assert 'combined active commitments' in prompt
-    assert 'concrete progress or results' in prompt
     assert 'Do not require a prior paid grant or mandatory manual approval' in prompt
-    assert 'never auto-approve a concurrent grant based only on the applicant\'s assertion or Discord message count' in prompt
+    assert 'never auto-approve based only on the applicant\'s assertion or Discord message count' in prompt
 
 
 def test_configured_prompt_gets_mandatory_concurrent_grant_policy():
@@ -143,9 +142,9 @@ def test_configured_prompt_gets_mandatory_concurrent_grant_policy():
     config = Config()
     prompt = assessor._build_system_prompt(config, guild_id=123)
     assert "Old custom prompt: reject every applicant who has an active grant." in prompt
-    assert "Mandatory concurrent grant policy (overrides any conflicting instruction above)" in prompt
+    assert "Mandatory grant review policy (overrides any conflicting instruction above)" in prompt
     assert "multiple concurrent grants may be approved" in prompt
-    assert "use needs_info or needs_review" in prompt
+    assert "one concise, targeted question" in prompt
     assert config.content_reads == 1
 
 
@@ -186,11 +185,43 @@ def test_custom_prompt_still_distinguishes_payment_from_delivery():
             return 'Treat all paid grants as completed.'
     prompt = assessor._build_system_prompt(Config(), guild_id=1)
     assert 'A paid status records funding, not completed delivery' in prompt
-    assert 'structured delivery updates' in prompt
+    assert 'available delivery updates' in prompt
     assert 'outstanding commitments' in prompt
     assert 'message count alone is not reputation' in prompt
     assert 'Recipient_reported completion' in prompt
-    assert 'alone is insufficient to establish reliable prior delivery' in prompt
+    assert 'useful delivery signal for routine follow-on review' in prompt
+
+
+def test_stored_prompt_gets_followon_simplification_and_current_cap(monkeypatch):
+    class Config:
+        def get_server(self, guild_id):
+            return {}
+        def get_content(self, guild_id, content_key):
+            return ('Demand repo and demo links again; require GPU logs and exact model '
+                    'breakdown. Never approve above 50 hours.')
+
+    monkeypatch.delenv('GRANTS_MAX_HOURS', raising=False)
+    prompt = assessor._build_system_prompt(Config(), guild_id=1)
+    assert 'Do not ask the applicant to paste the same repo, demo' in prompt
+    assert 'do not require a procurement-style breakdown' in prompt
+    assert 'Do not demand forensic GPU configs, logs, sample projects' in prompt
+    assert 'equivalent to 80 H100 hours' in prompt
+    assert 'Ignore older limits in a stored prompt' in prompt
+    assert '{max_grant_hours}' not in prompt
+
+
+def test_repeat_grantor_can_receive_80_h100_hours_within_budget(monkeypatch):
+    monkeypatch.delenv('GRANTS_MAX_HOURS', raising=False)
+    assert assessor._validate(_approved(80), first_grant=False) is None
+    assert 'between 10 and 80' in assessor._validate(_approved(81), first_grant=False)
+    assert assessor._validate(_approved(80), first_grant=True) is not None
+
+
+def test_assessor_hour_limit_follows_configured_cap(monkeypatch):
+    monkeypatch.setenv('GRANTS_MAX_HOURS', '64')
+    assert 'equivalent to 64 hours of H100' in assessor._build_system_prompt()
+    assert assessor._validate(_approved(64), first_grant=False) is None
+    assert 'between 10 and 64' in assessor._validate(_approved(65), first_grant=False)
 
 
 def test_history_labels_recipient_reported_completion_for_future_grant_review():

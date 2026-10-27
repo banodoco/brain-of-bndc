@@ -1,6 +1,6 @@
 ## Art Compute Micro-Grants
 
-We offer micro-grants of **10-50 GPU hours** (H100, H200, or B200) to support open-source AI art projects. Grants are paid in **SOL** to your Solana wallet — no paperwork, no waiting.
+We offer micro-grants of **10-80 GPU hours** (H100, H200, or B200) to support open-source AI art projects. Grants are paid in **SOL** to your Solana wallet — no paperwork, no waiting.
 
 ### How it works
 
@@ -8,6 +8,8 @@ We offer micro-grants of **10-50 GPU hours** (H100, H200, or B200) to support op
 **2.** Our bot reviews your application using AI and responds within minutes
 **3.** If approved, you'll see the grant details (GPU type, hours, cost) and be asked for your Solana wallet address
 **4.** Reply with your wallet and the SOL is sent automatically — you'll get a transaction link to verify
+
+The bot reviews prior grant history and links already shared with your application. Add new details only when something has materially changed or the thread does not already provide what the reviewer needs.
 
 If more information is needed, the bot will tell you what's missing — just reply in the same thread and it will re-review.
 
@@ -31,13 +33,13 @@ Have questions? Ask in the [Questions & Discussion](https://discord.com/channels
 ### Approval criteria
 
 - Project must be **open-source** (or commit to open-sourcing results)
-- **Reasonable scope** — 10-50 GPU hours should meaningfully advance the project
+- **Reasonable scope** — 10-80 GPU hours should meaningfully advance the project
 - **Merit and reputation** — public contributions, previous work, and clearly articulated training goals. If you're new, start small.
 - **Community benefit** — the project serves the broader AI/ML community
 
 ### Grant limits
 
-- Maximum grant: **50 hours of H100** (~$137 USD paid in SOL)
+- Maximum grant: **80 hours of H100** (~$220 USD at the listed rate, paid in SOL)
 - One active grant is the default limit. Applicants with a strong, verifiable reputation and reliable delivery may be considered for multiple grants at once when each has a distinct scope and combined commitments are manageable.
 - Applicants with previous grants should demonstrate concrete progress or results. If an active grant's status, scope, or progress is unclear, provide those details in the application; concurrent requests are not approved on assertion alone.
 

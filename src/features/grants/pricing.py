@@ -21,6 +21,7 @@ GPU_RATES = {
 
 # 10% buffer for platform fees
 FEE_MULTIPLIER = 1.1
+DEFAULT_MAX_GRANT_HOURS = 80
 
 # Supported grant GPU types. The refresh agent updates exactly these keys —
 # keeping the set stable means the assessor, cost calc, and payment flow never
@@ -52,11 +53,25 @@ SOL_CACHE_TTL = 60
 
 
 def max_grant_usd() -> float:
-    """Current grant cap: 50hrs of H100 at today's rate, incl. fee buffer.
+    """Current grant cap: configured H100 hours at today's rate, incl. fee buffer.
 
     Follows the live H100 rate so the cap stays aligned with the market.
+    ``GRANTS_MAX_HOURS`` can override the default 80-hour limit.
     """
-    return round(50 * GPU_RATES['H100_80GB'] * FEE_MULTIPLIER, 2)
+    return round(max_grant_hours() * GPU_RATES['H100_80GB'] * FEE_MULTIPLIER, 2)
+
+
+def max_grant_hours() -> int:
+    """Return the configured H100-equivalent grant limit (default 80 hours)."""
+    try:
+        configured = int(os.getenv('GRANTS_MAX_HOURS', str(DEFAULT_MAX_GRANT_HOURS)))
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid GRANTS_MAX_HOURS=%r; using default %s",
+            os.getenv('GRANTS_MAX_HOURS'), DEFAULT_MAX_GRANT_HOURS,
+        )
+        return DEFAULT_MAX_GRANT_HOURS
+    return max(configured, 1)
 
 
 def _walk_ld_json(node, out):
