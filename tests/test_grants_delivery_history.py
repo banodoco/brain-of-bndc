@@ -92,3 +92,45 @@ def test_mismatched_guild_row_is_not_enriched(monkeypatch):
 
     assert calls == []
     assert result[0]['delivery_history_status'] == 'unknown'
+
+
+def test_recipient_reported_completion_is_exposed_and_survives_later_needs_info(monkeypatch):
+    grant = {'thread_id': 100, 'guild_id': 1, 'thread_content': 'Original', 'status': 'paid'}
+    db, _ = make_db([grant])
+    rows = [
+        {'message_id': 201, 'assessment': {
+            'classification': 'completed', 'verification': 'recipient_reported',
+        }},
+        {'message_id': 202, 'assessment': {
+            'classification': 'needs_info', 'verification': 'unverified',
+        }},
+    ]
+    monkeypatch.setattr(GrantDeliveryStore, 'history', lambda *_args: rows)
+
+    result = db.get_grant_history_for_applicant(7, guild_id=1)[0]
+
+    assert result['status'] == 'paid'
+    assert result['delivery_status'] == 'completed'
+    assert result['delivery_verification'] == 'recipient_reported'
+    assert result['delivery_status_message_id'] == 201
+
+
+def test_latest_needs_info_is_exposed_when_no_completion_exists(monkeypatch):
+    grant = {'thread_id': 100, 'guild_id': 1, 'status': 'paid'}
+    db, _ = make_db([grant])
+    rows = [
+        {'message_id': 201, 'assessment': {
+            'classification': 'progress', 'verification': 'unverified',
+        }},
+        {'message_id': 202, 'assessment': {
+            'classification': 'needs_info', 'verification': 'unverified',
+        }},
+        {'message_id': 203, 'assessment': {'classification': 'unrelated'}},
+    ]
+    monkeypatch.setattr(GrantDeliveryStore, 'history', lambda *_args: rows)
+
+    result = db.get_grant_history_for_applicant(7, guild_id=1)[0]
+
+    assert result['delivery_status'] == 'needs_info'
+    assert result['delivery_verification'] == 'unverified'
+    assert result['delivery_status_message_id'] == 202

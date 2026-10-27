@@ -15,8 +15,9 @@ Adding a section (e.g. norms to rules):
 1. Append a new quote block (or plain `## ` header) to posts/rules.md.
 2. Sync posts/rules.md into server_content (rerun backfill or update the row;
    the updated_at trigger marks it dirty for the next cycle).
-3. Next 5-min cycle edits in place when the message count is unchanged,
-   else delete+reposts the full set and upserts posted_content.
+3. Next 5-min cycle syncs the content. Text channels may repost when their
+   message count changes; forum guides reuse existing message slots or fail
+   closed when the content cannot fit safely.
 """
 
 import asyncio
@@ -67,6 +68,7 @@ class ContentCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.db = getattr(bot, 'db_handler', None)
+        self._forum_sync_locks: Dict[Tuple[int, str], asyncio.Lock] = {}
 
     async def cog_load(self):
         self.sync_content.start()
@@ -262,14 +264,31 @@ class ContentCog(commands.Cog):
                            thread_name: str, posted: Optional[dict],
                            content_key: str, sb=None, guild_id: int = 0) -> Tuple[List[int], Optional[int]]:
         """Edit existing forum thread or create new one."""
+        # A loop invocation can overlap a slow previous invocation. Serialize
+        # each guide so both runs cannot observe a missing thread and create it.
+        lock = self._forum_sync_locks.setdefault((guild_id, content_key), asyncio.Lock())
+        async with lock:
+            return await self._sync_forum_locked(
+                forum, new_messages, thread_name, posted, content_key, sb, guild_id
+            )
+
+    async def _sync_forum_locked(self, forum: discord.ForumChannel, new_messages: List[ContentSegment],
+                                  thread_name: str, posted: Optional[dict],
+                                  content_key: str, sb=None, guild_id: int = 0) -> Tuple[List[int], Optional[int]]:
         thread = await self._find_forum_thread(forum, thread_name, posted)
 
         if thread:
             result_ids = await self._edit_forum_thread(thread, new_messages, sb, guild_id)
+            if not result_ids:
+                return [], thread.id
             await thread.edit(pinned=True, locked=True)
             return result_ids, thread.id
 
         # No existing thread — create fresh
+        new_messages = self._pack_forum_messages(new_messages)
+        if new_messages is None:
+            logger.error(f"[ContentCog] Guide {content_key} contains a section over Discord's 2,000 character limit")
+            return [], None
         first = new_messages[0]
         file = await self._download_attachment(sb, guild_id, first) if first.attachment else None
         result = await forum.create_thread(
@@ -299,10 +318,19 @@ class ContentCog(commands.Cog):
         if thread_id:
             try:
                 thread = await self.bot.fetch_channel(thread_id)
-                if thread:
+                if (isinstance(thread, discord.Thread)
+                        and thread.parent_id == forum.id
+                        and thread.name == thread_name
+                        and thread.owner_id == self.bot.user.id):
                     return thread
-            except (discord.NotFound, discord.HTTPException):
+                if thread is not None:
+                    logger.warning(f"[ContentCog] Tracked forum thread {thread_id} does not match {thread_name}; searching by name")
+            except discord.NotFound:
                 pass
+            except discord.HTTPException:
+                # We cannot safely conclude that the thread is absent. Let the
+                # cycle retry instead of creating a duplicate guide.
+                raise
 
         for t in forum.threads:
             if t.name == thread_name and t.owner_id == self.bot.user.id:
@@ -316,48 +344,107 @@ class ContentCog(commands.Cog):
                                   new_messages: List[ContentSegment],
                                   sb=None, guild_id: int = 0) -> List[int]:
         """Edit messages in an existing forum thread."""
-        if thread.archived or thread.locked:
-            await thread.edit(archived=False, locked=False)
-            await asyncio.sleep(0.5)
-
         existing_msgs = []
         async for msg in thread.history(limit=100, oldest_first=True):
             if msg.author.id == self.bot.user.id:
                 existing_msgs.append(msg)
 
+        new_messages = self._pack_forum_messages(
+            new_messages,
+            max_messages=len(existing_msgs),
+            existing_texts=[msg.content or '' for msg in existing_msgs],
+        )
+        if new_messages is None:
+            logger.error(
+                f"[ContentCog] Guide update needs more than {len(existing_msgs)} messages; "
+                "leaving the live thread unchanged"
+            )
+            return []
+
+        was_archived, was_locked = thread.archived, thread.locked
+        if was_archived or was_locked:
+            await thread.edit(archived=False, locked=False)
+            await asyncio.sleep(0.5)
+
         result_ids = []
-        for i, seg in enumerate(new_messages):
-            if i < len(existing_msgs):
-                text_changed = existing_msgs[i].content != seg.text
-                att_changed = self._attachment_changed(existing_msgs[i], seg)
-                if att_changed:
-                    # Can't edit attachments — delete and repost
-                    await existing_msgs[i].delete()
-                    await asyncio.sleep(0.5)
+        try:
+            for i, seg in enumerate(new_messages):
+                if i < len(existing_msgs):
+                    text_changed = existing_msgs[i].content != seg.text
+                    att_changed = self._attachment_changed(existing_msgs[i], seg)
+                    if att_changed:
+                        # Can't edit attachments — delete and repost
+                        await existing_msgs[i].delete()
+                        await asyncio.sleep(0.5)
+                        file = await self._download_attachment(sb, guild_id, seg) if seg.attachment else None
+                        sent = await thread.send(content=seg.text, file=file or discord.utils.MISSING)
+                        result_ids.append(sent.id)
+                        await asyncio.sleep(0.5)
+                    elif text_changed:
+                        await existing_msgs[i].edit(content=seg.text)
+                        await asyncio.sleep(0.5)
+                        result_ids.append(existing_msgs[i].id)
+                    else:
+                        result_ids.append(existing_msgs[i].id)
+                else:
                     file = await self._download_attachment(sb, guild_id, seg) if seg.attachment else None
                     sent = await thread.send(content=seg.text, file=file or discord.utils.MISSING)
                     result_ids.append(sent.id)
                     await asyncio.sleep(0.5)
-                elif text_changed:
-                    await existing_msgs[i].edit(content=seg.text)
-                    await asyncio.sleep(0.5)
-                    result_ids.append(existing_msgs[i].id)
-                else:
-                    result_ids.append(existing_msgs[i].id)
-            else:
-                file = await self._download_attachment(sb, guild_id, seg) if seg.attachment else None
-                sent = await thread.send(content=seg.text, file=file or discord.utils.MISSING)
-                result_ids.append(sent.id)
-                await asyncio.sleep(0.5)
 
-        for i in range(len(new_messages), len(existing_msgs)):
-            try:
-                await existing_msgs[i].delete()
-                await asyncio.sleep(0.5)
-            except discord.HTTPException:
-                pass
+            for i in range(len(new_messages), len(existing_msgs)):
+                try:
+                    await existing_msgs[i].delete()
+                    await asyncio.sleep(0.5)
+                except discord.HTTPException:
+                    pass
+        finally:
+            if was_archived or was_locked:
+                await thread.edit(archived=was_archived, locked=was_locked)
 
         return result_ids
+
+    @staticmethod
+    def _pack_forum_messages(segments: List[ContentSegment],
+                             max_messages: Optional[int] = None,
+                             existing_texts: Optional[List[str]] = None) -> Optional[List[ContentSegment]]:
+        """Pack ordered guide sections into Discord-sized messages.
+
+        Adjacent text-only sections are merged only when needed to fit the
+        existing message count. Attachments stay with their own segment;
+        oversized content fails closed for an intentional editorial repack.
+        """
+        packed = list(segments)
+        if any(len(seg.text or '') > 2000 for seg in packed):
+            return None
+
+        # Keep every current section in its own stable slot when possible.
+        # If a section was inserted, merge only as many adjacent text-only
+        # sections as needed to fit the existing message count.
+        while max_messages is not None and len(packed) > max_messages:
+            candidates = []
+            for i in range(len(packed) - 1):
+                left, right = packed[i], packed[i + 1]
+                if left.attachment or right.attachment:
+                    continue
+                merged_length = len(left.text or '') + 2 + len(right.text or '')
+                if merged_length <= 2000:
+                    # Prefer absorbing inserted/changed sections into a
+                    # neighboring slot while leaving existing sections alone.
+                    changes_existing = (
+                        left.text not in (existing_texts or [])
+                        or right.text not in (existing_texts or [])
+                    )
+                    merged_text = f"{left.text or ''}\n\n{right.text or ''}"
+                    already_packed = merged_text in (existing_texts or [])
+                    candidates.append((not changes_existing, not already_packed, merged_length, i))
+            if not candidates:
+                return None
+            _, _, _, i = min(candidates)
+            packed[i:i + 2] = [ContentSegment(
+                text=f"{packed[i].text or ''}\n\n{packed[i + 1].text or ''}"
+            )]
+        return packed
 
     async def _ensure_companion_threads(self, forum: discord.ForumChannel, content_key: str):
         """Create companion threads (like 'Questions & Discussion') if they don't exist."""

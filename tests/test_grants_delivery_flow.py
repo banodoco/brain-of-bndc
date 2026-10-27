@@ -95,6 +95,12 @@ def make_message(thread, *, message_id=700, author_id=50, content='I finished a 
             id=message_id + 1, author=SimpleNamespace(id=999, bot=True), content=text,
             reference=SimpleNamespace(message_id=message_id),
         )
+        async def edit(**edit_kwargs):
+            ack.content = edit_kwargs['content']
+            ack.allowed_mentions = edit_kwargs.get('allowed_mentions')
+            return ack
+        ack.edit = edit
+        ack.allowed_mentions = kwargs.get('allowed_mentions')
         thread.messages.append(ack)
         return ack
     msg.reply = reply
@@ -161,6 +167,7 @@ def test_duplicate_event_and_reply_then_crash_recovers_without_second_assessment
     assert len(thread.messages) == 61
     assert thread.last_history['limit'] == 1000
     assert store.rows[(1, 700)]['state'] == 'acknowledged'
+    assert thread.messages[0].content == '**Grant progress update recorded**\nok'
 
 
 def test_concurrent_duplicate_events_only_assess_and_reply_once(monkeypatch):
@@ -185,6 +192,181 @@ def test_concurrent_duplicate_events_only_assess_and_reply_once(monkeypatch):
     asyncio.run(run_both())
     assert len(assessed) == 1
     assert len(thread.messages) == 1
+
+
+@pytest.mark.parametrize(('classification', 'heading', 'response'), [
+    ('completed', '**Grant delivery marked complete**', 'Marked complete based on your report.'),
+    ('progress', '**Grant progress update recorded**', 'This is reported progress.'),
+    ('needs_info', '**Grant update needs more information**', 'Please add the test results.'),
+    ('needs_review', '**Grant update needs review**', 'A reviewer will check this.'),
+])
+def test_assessment_response_and_classification_heading_are_sent(monkeypatch, classification, heading, response):
+    cog = make_cog()
+    thread = FakeThread()
+    msg = make_message(thread)
+    async def evidence(*_):
+        return []
+    async def assess(*_args, **_kwargs):
+        return {'classification': classification, 'summary': 'assessment', 'response': response,
+                'evidence_refs': [], 'verification': 'recipient_reported' if classification == 'completed' else 'unverified'}
+    monkeypatch.setattr(grants_cog, 'collect_delivery_evidence', evidence)
+    monkeypatch.setattr(grants_cog, 'assess_delivery', assess)
+
+    asyncio.run(cog._process_delivery_update(msg, cog.db.get_grant_by_thread(800)))
+
+    assert len(thread.messages) == 1
+    ack = thread.messages[0]
+    assert ack.content == f'{heading}\n{response}'
+    assert ack.allowed_mentions.everyone is False
+    assert ack.allowed_mentions.users is False
+    assert ack.allowed_mentions.roles is False
+    assert cog.db.get_grant_by_thread(800)['status'] == 'paid'
+
+
+def test_malformed_assessment_response_uses_bounded_static_fallback(monkeypatch):
+    cog = make_cog()
+    thread = FakeThread()
+    msg = make_message(thread)
+    async def evidence(*_):
+        return []
+    async def assess(*_args, **_kwargs):
+        return {'classification': 'needs_info', 'summary': 'assessment', 'response': 'x' * 601}
+    monkeypatch.setattr(grants_cog, 'collect_delivery_evidence', evidence)
+    monkeypatch.setattr(grants_cog, 'assess_delivery', assess)
+
+    asyncio.run(cog._process_delivery_update(msg, cog.db.get_grant_by_thread(800)))
+
+    assert thread.messages[0].content == (
+        '**Grant update needs more information**\n'
+        'Thanks for the update. Could you add a little more detail or link the work for future grant reviews?'
+    )
+
+
+def test_malformed_classification_falls_back_to_human_review_ack(monkeypatch):
+    cog = make_cog()
+    thread = FakeThread()
+    msg = make_message(thread)
+    async def evidence(*_):
+        return []
+    async def assess(*_args, **_kwargs):
+        return {'classification': 'unexpected', 'response': None}
+    monkeypatch.setattr(grants_cog, 'collect_delivery_evidence', evidence)
+    monkeypatch.setattr(grants_cog, 'assess_delivery', assess)
+
+    asyncio.run(cog._process_delivery_update(msg, cog.db.get_grant_by_thread(800)))
+
+    assert thread.messages[0].content == (
+        '**Grant update needs review**\n'
+        'Thanks for the update. It has been recorded for future grant reviews.'
+    )
+
+
+def test_legacy_ack_is_edited_during_explicit_reassessment_not_duplicated(monkeypatch):
+    store = FakeDeliveryStore()
+    cog = make_cog(store)
+    thread = FakeThread()
+    msg = make_message(thread)
+    legacy = SimpleNamespace(
+        id=701, author=SimpleNamespace(id=999, bot=True),
+        content=f'{grants_cog._DELIVERY_ACK_MARKER}\nGeneric old response',
+        reference=SimpleNamespace(message_id=700), edits=0,
+    )
+    async def edit(**kwargs):
+        legacy.content = kwargs['content']
+        legacy.allowed_mentions = kwargs.get('allowed_mentions')
+        legacy.edits += 1
+        return legacy
+    legacy.edit = edit
+    thread.messages.append(legacy)
+    async def evidence(*_):
+        return []
+    async def assess(*_args, **_kwargs):
+        return {'classification': 'needs_info', 'summary': 'assessment',
+                'response': 'Please link the beta and list GPUs tested.', 'evidence_refs': []}
+    monkeypatch.setattr(grants_cog, 'collect_delivery_evidence', evidence)
+    monkeypatch.setattr(grants_cog, 'assess_delivery', assess)
+    # Simulate the narrowly-targeted operator requeue path: only this row is reset.
+    store.rows[(1, 700)] = {
+        'guild_id': 1, 'message_id': 700, 'thread_id': 800, 'applicant_id': 50,
+        'content': msg.content, 'source_url': msg.jump_url, 'evidence': [], 'assessment': None,
+        'state': 'pending', 'ack_message_id': 701,
+    }
+
+    asyncio.run(cog._process_delivery_update(msg, cog.db.get_grant_by_thread(800)))
+
+    assert legacy.edits == 1
+    assert legacy.content == '**Grant update needs more information**\nPlease link the beta and list GPUs tested.'
+    assert legacy.allowed_mentions.everyone is False
+    assert legacy.allowed_mentions.users is False
+    assert legacy.allowed_mentions.roles is False
+    assert len(thread.messages) == 1
+    assert store.rows[(1, 700)]['ack_message_id'] == 701
+    assert store.rows[(1, 700)]['state'] == 'acknowledged'
+
+
+def test_reassessed_ack_edits_in_place_and_marks_reported_completion_without_verifying_payment(monkeypatch):
+    store = FakeDeliveryStore()
+    cog = make_cog(store)
+    thread = FakeThread()
+    msg = make_message(thread)
+    legacy = SimpleNamespace(
+        id=701, author=SimpleNamespace(id=999, bot=True),
+        content=f'{grants_cog._DELIVERY_ACK_MARKER}\nGeneric old response',
+        reference=SimpleNamespace(message_id=700), edits=0,
+    )
+    async def edit(**kwargs):
+        legacy.content = kwargs['content']
+        legacy.allowed_mentions = kwargs.get('allowed_mentions')
+        legacy.edits += 1
+        return legacy
+    legacy.edit = edit
+    thread.messages.append(legacy)
+    prior_evidence = {
+        'id': 'discord:1:22:333', 'url': 'https://discord.com/channels/1/22/333',
+        'status': 'available', 'content': 'Astrid beta launch announcement',
+        'reference_type': 'discord_message',
+    }
+    store.rows[(1, 600)] = {
+        'guild_id': 1, 'message_id': 600, 'thread_id': 800, 'applicant_id': 50,
+        'content': 'I did this!', 'evidence': [prior_evidence],
+        'assessment': {'classification': 'progress', 'verification': 'unverified'},
+        'state': 'acknowledged',
+    }
+    # This is the one-row reset performed by the explicit requeue script.
+    store.rows[(1, 700)] = {
+        'guild_id': 1, 'message_id': 700, 'thread_id': 800, 'applicant_id': 50,
+        'content': msg.content, 'source_url': msg.jump_url, 'evidence': [], 'assessment': None,
+        'state': 'pending', 'ack_message_id': 701,
+    }
+    received_prior = []
+    async def evidence(*_):
+        return []
+    async def assess(_grant, _update, _evidence, *, prior_updates=None):
+        received_prior.extend(prior_updates or [])
+        return {
+            'classification': 'completed', 'verification': 'recipient_reported',
+            'summary': 'Applicant reports beta shipment; prior announcement available.',
+            'response': 'Marked complete based on your update and the launch you shared.',
+            'evidence_refs': ['discord:1:22:333'],
+        }
+    monkeypatch.setattr(grants_cog, 'collect_delivery_evidence', evidence)
+    monkeypatch.setattr(grants_cog, 'assess_delivery', assess)
+
+    asyncio.run(cog._process_delivery_update(msg, cog.db.get_grant_by_thread(800)))
+
+    assert any(row['message_id'] == 600 for row in received_prior)
+    assert legacy.edits == 1
+    assert legacy.content.startswith('**Grant delivery marked complete**\n')
+    assert 'based on your update' in legacy.content.casefold()
+    assert legacy.allowed_mentions.everyone is False
+    assert legacy.allowed_mentions.users is False
+    assert legacy.allowed_mentions.roles is False
+    assert len(thread.messages) == 1
+    current = store.rows[(1, 700)]
+    assert current['state'] == 'acknowledged'
+    assert current['ack_message_id'] == 701
+    assert current['assessment']['verification'] == 'recipient_reported'
+    assert cog.db.get_grant_by_thread(800)['status'] == 'paid'
 
 
 def test_store_failure_and_unavailable_assessor_do_not_ack_then_retry(monkeypatch):

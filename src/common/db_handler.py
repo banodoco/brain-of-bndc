@@ -5666,6 +5666,23 @@ class DatabaseHandler:
                         continue
                     grant['delivery_updates'] = store.history(int(row_guild_id), int(row_thread_id))
                     grant['delivery_history_status'] = 'available'
+                    # Delivery is a separate lifecycle from funding/payment.
+                    # Preserve the strongest recorded completion through later
+                    # non-completion updates such as questions or chatter. An
+                    # explicit reopen signal is not part of the current event
+                    # contract; add one before supporting delivery reopening.
+                    assessed_updates = []
+                    for delivery_update in grant['delivery_updates']:
+                        assessment = delivery_update.get('assessment') or {}
+                        classification = assessment.get('classification') if isinstance(assessment, dict) else None
+                        if classification in {'progress', 'completed', 'needs_info', 'needs_review'}:
+                            assessed_updates.append((delivery_update, assessment))
+                    completed = [pair for pair in assessed_updates if pair[1].get('classification') == 'completed']
+                    latest_update, latest_assessment = (completed or assessed_updates)[-1] if (completed or assessed_updates) else (None, None)
+                    if latest_assessment:
+                        grant['delivery_status'] = latest_assessment.get('classification')
+                        grant['delivery_verification'] = latest_assessment.get('verification', 'unverified')
+                        grant['delivery_status_message_id'] = latest_update.get('message_id')
                 except Exception as delivery_error:
                     logger.warning(
                         'Could not load delivery history for grant thread %s in guild %s: %s',

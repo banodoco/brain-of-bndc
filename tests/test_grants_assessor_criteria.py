@@ -155,7 +155,7 @@ def test_history_renders_funded_scope_and_structured_delivery_provenance():
         'delivery_updates': [{
             'created_at': '2026-02-01', 'source_url': 'https://discord.com/channels/1/2/3',
             'assessment': {'classification': 'progress', 'summary': 'Training began; release remains.',
-                           'evidence_refs': ['discord:1:2:4']},
+                           'verification': 'unverified', 'evidence_refs': ['discord:1:2:4']},
             'evidence': [{'id': 'discord:1:2:4', 'url': 'https://discord.com/channels/1/2/4',
                           'status': 'available'}],
         }],
@@ -163,6 +163,7 @@ def test_history_renders_funded_scope_and_structured_delivery_provenance():
     assert 'funding status=paid' in history
     assert 'Original funded scope: Train and publish a LoRA.' in history
     assert 'progress' in history and 'release remains' in history
+    assert 'verification=unverified' in history
     assert 'discord:1:2:4' in history and 'available' in history
 
 
@@ -188,6 +189,23 @@ def test_custom_prompt_still_distinguishes_payment_from_delivery():
     assert 'structured delivery updates' in prompt
     assert 'outstanding commitments' in prompt
     assert 'message count alone is not reputation' in prompt
+    assert 'Recipient_reported completion' in prompt
+    assert 'alone is insufficient to establish reliable prior delivery' in prompt
+
+
+def test_history_labels_recipient_reported_completion_for_future_grant_review():
+    history = assessor._render_grant_history([{
+        'status': 'paid', 'thread_content': 'Ship a beta.',
+        'delivery_updates': [{'assessment': {
+            'classification': 'completed', 'verification': 'recipient_reported',
+            'summary': 'Recipient reports beta shipped; linked announcement supplies context.',
+            'verification_notes': 'Artifact contents and config tests not independently inspected.',
+            'evidence_refs': ['discord:1:2:3']},
+            'evidence': []}],
+    }])
+    assert 'completed; verification=recipient_reported' in history
+    assert 'Verification notes: Artifact contents and config tests not independently inspected.' in history
+    assert 'funding status=paid' in history
 
 
 def test_admin_review_prompt_honours_first_timer_cap():

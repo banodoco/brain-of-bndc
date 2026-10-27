@@ -49,12 +49,62 @@ _BILLING_PAUSED_MESSAGE = (
 )
 _BILLING_COOLDOWN_S = 3600  # 1 hour after a 402 before we retry the provider
 _DELIVERY_ACK_MARKER = '**Grant progress update recorded**'
+_DELIVERY_ACK_MARKERS = (
+    _DELIVERY_ACK_MARKER,  # legacy marker; retain for crash recovery dedupe
+    '**Grant delivery marked complete**',
+    '**Grant update needs more information**',
+    '**Grant update needs review**',
+)
 _DELIVERY_ACKS = {
     'progress': 'Thanks for sharing this progress update. It has been recorded for future grant reviews.',
     'completed': 'Thanks for sharing this update and the linked work. The evidence has been recorded for future grant reviews.',
     'needs_info': 'Thanks for the update. Could you add a little more detail or link the work for future grant reviews?',
     'needs_review': 'Thanks for the update. It has been recorded for future grant reviews.',
 }
+_DELIVERY_ACK_HEADINGS = {
+    'progress': '**Grant progress update recorded**',
+    'completed': '**Grant delivery marked complete**',
+    'needs_info': '**Grant update needs more information**',
+    'needs_review': '**Grant update needs review**',
+}
+
+
+def _delivery_ack_content(assessment: dict) -> str | None:
+    """Build a bounded acknowledgement from an already-validated assessment."""
+    assessment = assessment if isinstance(assessment, dict) else {}
+    classification = assessment.get('classification')
+    if classification not in _DELIVERY_ACK_HEADINGS:
+        classification = 'needs_review'
+    heading = _DELIVERY_ACK_HEADINGS.get(classification)
+    if not heading:
+        return None
+    response = assessment.get('response')
+    if not isinstance(response, str) or not response.strip() or len(response) > 600:
+        if classification == 'completed':
+            response = 'Your completion report has been recorded for future grant reviews.'
+            if assessment.get('verification') == 'recipient_reported':
+                response = 'Delivery is marked complete based on your report and the launch you shared.'
+            elif assessment.get('verification') == 'evidence_supported':
+                response = 'The inspected artifact supports completion of the funded work.'
+        else:
+            response = _DELIVERY_ACKS.get(classification)
+    if not response:
+        return None
+    response = response.strip()
+    if (classification == 'completed'
+            and assessment.get('verification') == 'recipient_reported'
+            and not any(term in response.casefold() for term in ('report', 'self-report', 'your update'))):
+        response = f'Based on your report (not independently verified): {response}'
+    return f'{heading}\n{response[:600]}'
+
+
+def _is_delivery_ack(message: Any, bot_id: int, source_message_id: int) -> bool:
+    reference = getattr(message, 'reference', None)
+    return (
+        getattr(getattr(message, 'author', None), 'id', None) == bot_id
+        and getattr(reference, 'message_id', None) == source_message_id
+        and any(marker in (getattr(message, 'content', '') or '') for marker in _DELIVERY_ACK_MARKERS)
+    )
 _billing_paused_until: float = 0  # monotonic-ish via time.time()
 
 def _is_billing_error(exc: Exception) -> bool:
@@ -622,25 +672,52 @@ class GrantsCog(commands.Cog):
                     guild_id, message_id, {'state': 'ignored'}, worker_id=worker_id,
                 )
                 return
+            acknowledgement = _delivery_ack_content(assessment)
+            if not acknowledgement:
+                logger.warning(
+                    'Grant delivery assessment returned malformed acknowledgement for %r',
+                    assessment.get('classification'),
+                )
+                return
 
             # Discord may have accepted the reply immediately before a process
             # crash. Match both the bot-authored marker and source reference.
             existing_ack = None
+            stored_ack_id = claim.get('ack_message_id')
+            fetch_message = getattr(message.channel, 'fetch_message', None)
+            if stored_ack_id and callable(fetch_message):
+                try:
+                    candidate = await fetch_message(int(stored_ack_id))
+                    if _is_delivery_ack(candidate, int(self.bot.user.id), message_id):
+                        existing_ack = candidate
+                except Exception:
+                    # Fall back to the bounded history scan if the stored ID
+                    # is stale or Discord cannot resolve it.
+                    logger.debug('Stored grant delivery acknowledgement %s could not be fetched', stored_ack_id)
             inspected = 0
-            async for candidate in message.channel.history(limit=1000, after=message, oldest_first=True):
-                inspected += 1
-                reference = getattr(candidate, 'reference', None)
-                referenced = getattr(reference, 'message_id', None)
-                if (getattr(getattr(candidate, 'author', None), 'id', None) == getattr(self.bot.user, 'id', None)
-                        and referenced == message_id
-                        and _DELIVERY_ACK_MARKER in (candidate.content or '')):
-                    existing_ack = candidate
-                    break
+            if existing_ack is None:
+                async for candidate in message.channel.history(limit=1000, after=message, oldest_first=True):
+                    inspected += 1
+                    if _is_delivery_ack(candidate, int(self.bot.user.id), message_id):
+                        existing_ack = candidate
+                        break
             if existing_ack is None and inspected >= 1000:
                 # The source is too old to prove whether an earlier ack exists.
                 # Fail closed instead of risking a duplicate public reply.
                 raise RuntimeError('Could not conclusively check for an existing delivery acknowledgement')
             if existing_ack is not None:
+                # An explicit re-assessment reuses the source message and the
+                # existing public reply. Refresh its content rather than
+                # leaving stale assessment text or creating a duplicate reply.
+                expiry = (discord.utils.utcnow() + timedelta(seconds=240)).isoformat()
+                self.delivery_store.update(
+                    guild_id, message_id, {'lease_until': expiry}, worker_id=worker_id,
+                )
+                if (existing_ack.content or '') != acknowledgement:
+                    await existing_ack.edit(
+                        content=acknowledgement,
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
                 self.delivery_store.update(
                     guild_id, message_id,
                     {'state': 'acknowledged', 'ack_message_id': int(existing_ack.id)},
@@ -653,13 +730,8 @@ class GrantsCog(commands.Cog):
             self.delivery_store.update(
                 guild_id, message_id, {'lease_until': expiry}, worker_id=worker_id,
             )
-            classification = assessment.get('classification')
-            response = _DELIVERY_ACKS.get(classification)
-            if not response:
-                logger.warning('Grant delivery assessment returned unsupported class %r', classification)
-                return
             ack = await message.reply(
-                f'{_DELIVERY_ACK_MARKER}\n{response}',
+                acknowledgement,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             self.delivery_store.update(
