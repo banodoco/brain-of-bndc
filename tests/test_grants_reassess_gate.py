@@ -259,6 +259,107 @@ async def test_non_wallet_chatter_at_unhandled_stage_stays_silent(monkeypatch):
     assert msg.replies == []  # no noise on ordinary messages
 
 
+@pytest.mark.parametrize("status", ["needs_info", "awaiting_wallet", "paid"])
+async def test_admin_applicant_uses_applicant_route_outside_needs_review(monkeypatch, status):
+    cog = make_cog()
+    cog.admin_id = APPLICANT_ID
+    monkeypatch.setattr(grants_cog_module, "discord", FakeDiscordShim)
+    grant = {"thread_id": 200, "applicant_id": APPLICANT_ID, "status": status,
+             "paid_at": "2026-10-01T00:00:00Z"}
+    monkeypatch.setattr(cog.db, "get_grant_by_thread", lambda *a, **k: grant)
+    msg = make_message(VALID_WALLET if status == "awaiting_wallet" else "applicant update",
+                       FakeDiscordShim.Thread)
+    msg.author.id = APPLICANT_ID
+
+    called = []
+    async def record(*args):
+        called.append(args)
+    if status == "needs_info":
+        monkeypatch.setattr(cog, "_reassess_application", record)
+    elif status == "awaiting_wallet":
+        monkeypatch.setattr(cog, "_start_payment_flow", record)
+    else:
+        monkeypatch.setattr(cog, "_process_delivery_update", record)
+
+    await cog.on_message(msg)
+
+    assert len(called) == 1
+
+
+async def test_admin_applicant_needs_review_uses_admin_decision_route(monkeypatch):
+    cog = make_cog()
+    cog.admin_id = APPLICANT_ID
+    monkeypatch.setattr(grants_cog_module, "discord", FakeDiscordShim)
+    grant = {"thread_id": 200, "applicant_id": APPLICANT_ID, "status": "needs_review"}
+    monkeypatch.setattr(cog.db, "get_grant_by_thread", lambda *a, **k: grant)
+    msg = make_message("approve", FakeDiscordShim.Thread)
+    msg.author.id = APPLICANT_ID
+    called = []
+
+    async def record(*args):
+        called.append(args)
+
+    monkeypatch.setattr(cog, "_handle_admin_review", record)
+    await cog.on_message(msg)
+
+    assert len(called) == 1
+
+
+async def test_unrelated_admin_cannot_submit_wallet_for_another_applicant(monkeypatch):
+    cog = make_cog()
+    cog.admin_id = 999
+    monkeypatch.setattr(grants_cog_module, "discord", FakeDiscordShim)
+    grant = {"thread_id": 200, "applicant_id": APPLICANT_ID, "status": "awaiting_wallet"}
+    monkeypatch.setattr(cog.db, "get_grant_by_thread", lambda *a, **k: grant)
+    msg = make_message(VALID_WALLET, FakeDiscordShim.Thread)
+    msg.author.id = cog.admin_id
+    started = []
+
+    async def record(*args):
+        started.append(args)
+
+    monkeypatch.setattr(cog, "_start_payment_flow", record)
+    await cog.on_message(msg)
+
+    assert started == []
+    assert msg.replies == []
+
+
+@pytest.mark.parametrize("status", ["needs_info", "paid"])
+async def test_unrelated_admin_cannot_enter_applicant_routes(monkeypatch, status):
+    cog = make_cog()
+    cog.admin_id = 999
+    monkeypatch.setattr(grants_cog_module, "discord", FakeDiscordShim)
+    grant = {"thread_id": 200, "applicant_id": APPLICANT_ID, "status": status,
+             "paid_at": "2026-10-01T00:00:00Z"}
+    monkeypatch.setattr(cog.db, "get_grant_by_thread", lambda *a, **k: grant)
+    msg = make_message("applicant update", FakeDiscordShim.Thread)
+    msg.author.id = cog.admin_id
+    called = []
+
+    async def record(*args):
+        called.append(args)
+
+    monkeypatch.setattr(cog, "_reassess_application", record)
+    monkeypatch.setattr(cog, "_process_delivery_update", record)
+    await cog.on_message(msg)
+
+    assert called == []
+
+
+async def test_non_admin_applicant_needs_review_wallet_still_gets_stage_reply(monkeypatch):
+    cog = make_cog()
+    cog.admin_id = 999
+    monkeypatch.setattr(grants_cog_module, "discord", FakeDiscordShim)
+    grant = {"thread_id": 200, "applicant_id": APPLICANT_ID, "status": "needs_review"}
+    monkeypatch.setattr(cog.db, "get_grant_by_thread", lambda *a, **k: grant)
+    msg = make_message(VALID_WALLET, FakeDiscordShim.Thread)
+    await cog.on_message(msg)
+
+    assert msg.replies
+    assert "`needs_review`" in msg.replies[0]
+
+
 def make_handle_thread():
     thread = FakeThread([])
     thread.owner_id = APPLICANT_ID

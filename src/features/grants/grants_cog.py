@@ -535,27 +535,28 @@ class GrantsCog(commands.Cog):
                 await self._process_delivery_update(message, grant)
             return
 
-        # Admin replies — interpret decision for needs_review grants
-        if self.admin_id and message.author.id == self.admin_id:
-            if grant['status'] == 'needs_review':
-                if thread_id in self._processing_threads:
-                    return
-                self._processing_threads.add(thread_id)
-                try:
-                    await self._handle_admin_review(channel, grant, message.content)
-                except Exception:
-                    logger.error(
-                        f"GrantsCog: admin review error for thread {thread_id}",
-                        exc_info=True,
-                    )
-                    self.db.update_grant_status(
-                        thread_id,
-                        guild_id=message.guild.id,
-                        status='needs_review',
-                    )
-                    await channel.send(_ADMIN_REVIEW_FAILURE_MESSAGE)
-                finally:
-                    self._processing_threads.discard(thread_id)
+        # Moderator decisions are only accepted while a grant is awaiting
+        # human review. In every other state, an admin who owns the application
+        # follows the same applicant path as any other owner.
+        if self.admin_id and message.author.id == self.admin_id and grant['status'] == 'needs_review':
+            if thread_id in self._processing_threads:
+                return
+            self._processing_threads.add(thread_id)
+            try:
+                await self._handle_admin_review(channel, grant, message.content)
+            except Exception:
+                logger.error(
+                    f"GrantsCog: admin review error for thread {thread_id}",
+                    exc_info=True,
+                )
+                self.db.update_grant_status(
+                    thread_id,
+                    guild_id=message.guild.id,
+                    status='needs_review',
+                )
+                await channel.send(_ADMIN_REVIEW_FAILURE_MESSAGE)
+            finally:
+                self._processing_threads.discard(thread_id)
             return
 
         # Only respond to the original applicant
