@@ -13,7 +13,7 @@ logger = logging.getLogger('DiscordBot')
 
 DEFAULT_GRANTS_LLM_CLIENT = 'openrouter'
 DEFAULT_GRANTS_LLM_MODEL = 'meta/muse-spark-1.3-contributor'
-DEFAULT_GRANTS_LLM_MAX_TOKENS = 1024
+DEFAULT_GRANTS_LLM_MAX_TOKENS = 4096
 MIN_GRANTS_LLM_MAX_TOKENS = 512
 
 CONCURRENT_GRANTS_POLICY = """### Mandatory concurrent grant policy (overrides any conflicting instruction above)

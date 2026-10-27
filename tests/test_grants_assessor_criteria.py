@@ -51,6 +51,13 @@ def test_first_timer_cap_invalid_env_falls_back(monkeypatch):
     monkeypatch.delenv('GRANTS_FIRST_TIMER_MAX_HOURS')
 
 
+def test_default_grant_token_budget_preserves_muse_spark_json(monkeypatch):
+    monkeypatch.delenv('GRANTS_LLM_MAX_TOKENS', raising=False)
+    assert assessor.grants_llm_max_tokens() == 4096
+    monkeypatch.setenv('GRANTS_LLM_MAX_TOKENS', '100')
+    assert assessor.grants_llm_max_tokens() == 4096
+
+
 # ---------------------------------------------------------------------------
 # Content gate — never adjudicate a title-only / empty application
 # ---------------------------------------------------------------------------
