@@ -5631,20 +5631,47 @@ class DatabaseHandler:
             return []
 
     def get_grant_history_for_applicant(self, applicant_id: int, guild_id: Optional[int] = None) -> List[Dict]:
-        """Return all past grant applications for a user (any status)."""
+        """Return grant history, including thread content and delivery evidence.
+
+        Delivery-history lookup failures are represented as ``unknown`` on the
+        individual grant and never collapse the grant-history result itself.
+        """
         if not self.storage_handler or not self.storage_handler.supabase_client:
             return []
         try:
             query = (
                 self.storage_handler.supabase_client.table('grant_applications')
-                .select('thread_id,status,gpu_type,recommended_hours,total_cost_usd,created_at,paid_at')
+                .select('thread_id,guild_id,thread_content,status,gpu_type,recommended_hours,total_cost_usd,created_at,paid_at')
                 .eq('applicant_id', applicant_id)
                 .order('created_at', desc=True)
             )
             if guild_id:
                 query = query.eq('guild_id', guild_id)
             result = query.execute()
-            return result.data or []
+            grants = result.data or []
+            from src.features.grants.delivery_store import GrantDeliveryStore
+            store = GrantDeliveryStore(self)
+            for grant in grants:
+                grant['delivery_updates'] = []
+                grant['delivery_history_status'] = 'unknown'
+                row_guild_id = grant.get('guild_id')
+                row_thread_id = grant.get('thread_id')
+                try:
+                    # Scope delivery lookups to the same guild used for this
+                    # history request; rows without guild custody stay unknown.
+                    if not row_guild_id or not row_thread_id:
+                        continue
+                    row_guild_id = int(row_guild_id)
+                    if guild_id and row_guild_id != int(guild_id):
+                        continue
+                    grant['delivery_updates'] = store.history(int(row_guild_id), int(row_thread_id))
+                    grant['delivery_history_status'] = 'available'
+                except Exception as delivery_error:
+                    logger.warning(
+                        'Could not load delivery history for grant thread %s in guild %s: %s',
+                        row_thread_id, row_guild_id, delivery_error,
+                    )
+            return grants
         except Exception as e:
             logger.error(f"Error fetching grant history for applicant {applicant_id}: {e}", exc_info=True)
             return []

@@ -11,6 +11,10 @@ We offer micro-grants of **10-50 GPU hours** (H100, H200, or B200) to support op
 
 If more information is needed, the bot will tell you what's missing — just reply in the same thread and it will re-review.
 
+### Progress updates and delivery evidence
+
+If you receive a grant, post progress and final results in the **same application thread**. Include concrete results, links to relevant commits, releases, demos, or papers, and a short note about what the grant helped you complete. The bot acknowledges substantive progress updates in that thread. Keeping updates together lets future grant reviews consider your progress and delivery evidence alongside your application history. Linked Discord messages are fetched only from public channels that you and the bot can read; GitHub and YouTube links are kept as references and are not treated as verified results by themselves.
+
 Have questions? Ask in the [Questions & Discussion](https://discord.com/channels/1076117621407223829/1479211913652207706) thread.
 
 ### Example projects

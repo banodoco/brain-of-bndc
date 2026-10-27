@@ -142,6 +142,47 @@ def test_configured_prompt_gets_mandatory_concurrent_grant_policy():
     assert config.content_reads == 1
 
 
+def test_history_renders_funded_scope_and_structured_delivery_provenance():
+    history = assessor._render_grant_history([{
+        'created_at': '2026-01-01', 'status': 'paid', 'thread_content': 'Train and publish a LoRA.',
+        'delivery_updates': [{
+            'created_at': '2026-02-01', 'source_url': 'https://discord.com/channels/1/2/3',
+            'assessment': {'classification': 'progress', 'summary': 'Training began; release remains.',
+                           'evidence_refs': ['discord:1:2:4']},
+            'evidence': [{'id': 'discord:1:2:4', 'url': 'https://discord.com/channels/1/2/4',
+                          'status': 'available'}],
+        }],
+    }])
+    assert 'funding status=paid' in history
+    assert 'Original funded scope: Train and publish a LoRA.' in history
+    assert 'progress' in history and 'release remains' in history
+    assert 'discord:1:2:4' in history and 'available' in history
+
+
+def test_history_lookup_failure_is_not_reported_as_no_updates():
+    history = assessor._render_grant_history([{
+        'created_at': '2026-01-01', 'status': 'paid',
+        'thread_content': 'Publish a model and training script.',
+        'delivery_history_status': 'unknown', 'delivery_updates': [],
+    }])
+    assert 'Delivery history: unavailable' in history
+    assert 'none recorded' not in history
+    assert 'completion are unknown' in history
+
+
+def test_custom_prompt_still_distinguishes_payment_from_delivery():
+    class Config:
+        def get_server(self, guild_id):
+            return {}
+        def get_content(self, guild_id, content_key):
+            return 'Treat all paid grants as completed.'
+    prompt = assessor._build_system_prompt(Config(), guild_id=1)
+    assert 'A paid status records funding, not completed delivery' in prompt
+    assert 'structured delivery updates' in prompt
+    assert 'outstanding commitments' in prompt
+    assert 'message count alone is not reputation' in prompt
+
+
 def test_admin_review_prompt_honours_first_timer_cap():
     assert 'capped at 10 hours' in assessor.ADMIN_REVIEW_PROMPT
 

@@ -4,7 +4,9 @@ import asyncio
 import json
 import logging
 import os
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
+from uuid import uuid4
 
 import discord
 from discord.ext import commands, tasks
@@ -15,6 +17,9 @@ from src.features.grants.assessor import (
     interpret_admin_decision,
     is_application_content_sufficient,
 )
+from src.features.grants.delivery_assessor import assess_delivery
+from src.features.grants.delivery_evidence import collect_delivery_evidence
+from src.features.grants.delivery_store import GrantDeliveryStore
 from src.features.grants.pricing import GPU_RATES, calculate_grant_cost, refresh_grant_prices
 from src.features.grants.solana_client import is_valid_solana_address
 from src.features.payments.payment_service import PaymentActor, PaymentActorKind
@@ -43,6 +48,13 @@ _BILLING_PAUSED_MESSAGE = (
     "reviewed automatically once credits are refilled. No need to repost."
 )
 _BILLING_COOLDOWN_S = 3600  # 1 hour after a 402 before we retry the provider
+_DELIVERY_ACK_MARKER = '**Grant progress update recorded**'
+_DELIVERY_ACKS = {
+    'progress': 'Thanks for sharing this progress update. It has been recorded for future grant reviews.',
+    'completed': 'Thanks for sharing this update and the linked work. The evidence has been recorded for future grant reviews.',
+    'needs_info': 'Thanks for the update. Could you add a little more detail or link the work for future grant reviews?',
+    'needs_review': 'Thanks for the update. It has been recorded for future grant reviews.',
+}
 _billing_paused_until: float = 0  # monotonic-ish via time.time()
 
 def _is_billing_error(exc: Exception) -> bool:
@@ -79,6 +91,7 @@ class GrantsCog(commands.Cog):
         self.db = getattr(bot, 'db_handler', None)
         self.payment_service = getattr(bot, 'payment_service', None)
         self.storage = getattr(self.db, 'storage_handler', None) if self.db else None
+        self.delivery_store = GrantDeliveryStore(self.db) if self.db else None
 
         # Grants channel: resolve from server_config
         sc = getattr(self.db, 'server_config', None) if self.db else None
@@ -104,6 +117,8 @@ class GrantsCog(commands.Cog):
 
         # In-memory guard against concurrent processing of the same thread
         self._processing_threads: set[int] = set()
+        self._delivery_recovery_thread_cursor = 0
+        self._delivery_recovery_message_cursors: dict[int, datetime] = {}
 
         # Price refresh agent: keeps GPU market rates (and the SOL price cache)
         # current so grants are priced at today's market, not static defaults.
@@ -145,11 +160,111 @@ class GrantsCog(commands.Cog):
         except Exception as e:
             logger.error(f"GrantsCog: startup failed: {e}", exc_info=True)
         finally:
+            if not self._delivery_recovery_loop.is_running():
+                self._delivery_recovery_loop.start()
             if not self._price_refresh_loop.is_running():
                 self._price_refresh_loop.start()
                 logger.info(
                     f"GrantsCog: price refresh loop started (every {self._price_refresh_hours}h)"
                 )
+
+    def cog_unload(self):
+        if self._delivery_recovery_loop.is_running():
+            self._delivery_recovery_loop.cancel()
+        if self._price_refresh_loop.is_running():
+            self._price_refresh_loop.cancel()
+
+    @tasks.loop(minutes=15)
+    async def _delivery_recovery_loop(self):
+        """Recover recent paid-thread updates that arrived while the bot was offline."""
+        try:
+            await self._recover_paid_delivery_updates()
+        except Exception:
+            logger.error('GrantsCog: delivery recovery sweep failed', exc_info=True)
+
+    @_delivery_recovery_loop.before_loop
+    async def _before_delivery_recovery(self):
+        await self.bot.wait_until_ready()
+
+    async def _recover_paid_delivery_updates(self):
+        if not self.configured or not self.delivery_store:
+            return
+        now = discord.utils.utcnow()
+        cutoff = now - timedelta(days=7)
+        for guild in self.bot.guilds:
+            # Retry durable work regardless of the recent-message horizon, so a
+            # long provider outage cannot strand updates permanently.
+            for row in self.delivery_store.pending(guild.id, limit=100):
+                try:
+                    grant = self.db.get_grant_by_thread(row['thread_id'], guild_id=guild.id)
+                    if not grant or grant.get('status') != 'paid':
+                        continue
+                    thread = self.bot.get_channel(int(row['thread_id']))
+                    if thread is None:
+                        thread = await self.bot.fetch_channel(int(row['thread_id']))
+                    if not isinstance(thread, discord.Thread):
+                        continue
+                    source = await thread.fetch_message(int(row['message_id']))
+                    if (int(source.id) == int(thread.id)
+                            or int(source.author.id) != int(grant.get('applicant_id', -1))):
+                        continue
+                    await self._process_delivery_update(source, grant)
+                except Exception:
+                    logger.error('GrantsCog: durable delivery retry failed for message %s', row.get('message_id'), exc_info=True)
+            forum = guild.get_channel(self.grants_channel_id)
+            if not isinstance(forum, discord.ForumChannel):
+                continue
+            threads = list(forum.threads)
+            async for thread in forum.archived_threads(limit=100):
+                threads.append(thread)
+            threads = sorted({int(t.id): t for t in threads}.values(), key=lambda t: int(t.id))
+            if threads:
+                start = getattr(self, '_delivery_recovery_thread_cursor', 0) % len(threads)
+                threads = threads[start:] + threads[:start]
+            else:
+                start = 0
+            remaining_messages = 100
+            visited_threads = 0
+            for thread in threads[:100]:
+                if remaining_messages <= 0:
+                    break
+                visited_threads += 1
+                try:
+                    grant = self.db.get_grant_by_thread(thread.id, guild_id=guild.id)
+                    if not grant or grant.get('status') != 'paid':
+                        continue
+                    paid_at = grant.get('paid_at')
+                    if not paid_at:
+                        continue
+                    if isinstance(paid_at, str):
+                        paid_at = datetime.fromisoformat(paid_at.replace('Z', '+00:00'))
+                    if paid_at.tzinfo is None:
+                        paid_at = paid_at.replace(tzinfo=timezone.utc)
+                    cursors = getattr(self, '_delivery_recovery_message_cursors', None)
+                    if cursors is None:
+                        cursors = self._delivery_recovery_message_cursors = {}
+                    cursor = cursors.get(int(thread.id))
+                    after = max(cutoff, paid_at, cursor) if cursor else max(cutoff, paid_at)
+                    recent = [msg async for msg in thread.history(
+                        limit=min(100, remaining_messages), after=after, oldest_first=True
+                    )]
+                    for msg in recent:
+                        remaining_messages -= 1
+                        if int(msg.id) == int(thread.id):
+                            cursors[int(thread.id)] = msg.created_at
+                            continue
+                        if msg.author.bot or int(msg.author.id) != int(grant.get('applicant_id', -1)):
+                            cursors[int(thread.id)] = msg.created_at
+                            continue
+                        await self._process_delivery_update(msg, grant)
+                        cursors[int(thread.id)] = msg.created_at
+                except Exception:
+                    logger.error('GrantsCog: delivery recovery failed for thread %s', thread.id, exc_info=True)
+                    # Preserve the last successfully examined timestamp so this
+                    # message can be retried without blocking other threads.
+                    continue
+            if threads:
+                self._delivery_recovery_thread_cursor = (start + max(1, visited_threads)) % len(threads)
 
     async def _load_forum_tags(self):
         """Cache forum tags by name for applying to threads."""
@@ -362,6 +477,14 @@ class GrantsCog(commands.Cog):
         if not grant:
             return
 
+        # Paid recipients may report delivery after funding. Route the original
+        # applicant first, including when that person is also the configured
+        # admin. No other paid-thread author enters moderation or wallet flows.
+        if grant.get('status') == 'paid':
+            if int(message.author.id) == int(grant.get('applicant_id', -1)):
+                await self._process_delivery_update(message, grant)
+            return
+
         # Admin replies — interpret decision for needs_review grants
         if self.admin_id and message.author.id == self.admin_id:
             if grant['status'] == 'needs_review':
@@ -437,6 +560,125 @@ class GrantsCog(commands.Cog):
                     f"(current stage: `{grant['status']}`). No payment can be sent yet — "
                     "please wait for instructions in this thread."
                 )
+
+    async def _process_delivery_update(self, message: discord.Message, grant: dict) -> None:
+        """Persist, assess and acknowledge one applicant message in a paid grant."""
+        if not self.delivery_store:
+            raise RuntimeError('Grant delivery storage is not configured')
+        if grant.get('status') != 'paid' or not grant.get('paid_at'):
+            return
+        paid_at = grant['paid_at']
+        if isinstance(paid_at, str):
+            paid_at = datetime.fromisoformat(paid_at.replace('Z', '+00:00'))
+        created_at = getattr(message, 'created_at', None)
+        if created_at is None:
+            return
+        if paid_at.tzinfo is None:
+            paid_at = paid_at.replace(tzinfo=timezone.utc)
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        if created_at <= paid_at:
+            return
+        if int(message.id) == int(message.channel.id):
+            return
+        guild_id = int(message.guild.id)
+        message_id = int(message.id)
+        worker_id = f'{getattr(self.bot.user, "id", "bot")}:{uuid4()}'
+        update = self.delivery_store.create(
+            guild_id=guild_id,
+            message_id=message_id,
+            thread_id=int(message.channel.id),
+            applicant_id=int(message.author.id),
+            content=message.content or '',
+            source_url=getattr(message, 'jump_url', None),
+            evidence=[],
+        )
+        claim = self.delivery_store.claim(guild_id, message_id, worker_id)
+        if claim is None:
+            return
+
+        try:
+            # If assessment was saved before a crash, reuse it and only recover
+            # the Discord acknowledgement. Never charge for / repeat the review.
+            assessment = claim.get('assessment')
+            evidence = claim.get('evidence') or []
+            if assessment is None:
+                evidence = await asyncio.wait_for(
+                    collect_delivery_evidence(self.bot, message), timeout=90
+                )
+                prior = self.delivery_store.history(guild_id, int(message.channel.id), limit=100)
+                prior = [row for row in prior if row.get('message_id') != message_id]
+                assessment = await asyncio.wait_for(
+                    assess_delivery(grant, update, evidence, prior_updates=prior[-10:]), timeout=120
+                )
+                self.delivery_store.update(
+                    guild_id, message_id,
+                    {'evidence': evidence, 'assessment': assessment, 'state': 'assessed'},
+                    worker_id=worker_id,
+                )
+
+            if assessment.get('classification') == 'unrelated':
+                self.delivery_store.update(
+                    guild_id, message_id, {'state': 'ignored'}, worker_id=worker_id,
+                )
+                return
+
+            # Discord may have accepted the reply immediately before a process
+            # crash. Match both the bot-authored marker and source reference.
+            existing_ack = None
+            inspected = 0
+            async for candidate in message.channel.history(limit=1000, after=message, oldest_first=True):
+                inspected += 1
+                reference = getattr(candidate, 'reference', None)
+                referenced = getattr(reference, 'message_id', None)
+                if (getattr(getattr(candidate, 'author', None), 'id', None) == getattr(self.bot.user, 'id', None)
+                        and referenced == message_id
+                        and _DELIVERY_ACK_MARKER in (candidate.content or '')):
+                    existing_ack = candidate
+                    break
+            if existing_ack is None and inspected >= 1000:
+                # The source is too old to prove whether an earlier ack exists.
+                # Fail closed instead of risking a duplicate public reply.
+                raise RuntimeError('Could not conclusively check for an existing delivery acknowledgement')
+            if existing_ack is not None:
+                self.delivery_store.update(
+                    guild_id, message_id,
+                    {'state': 'acknowledged', 'ack_message_id': int(existing_ack.id)},
+                    worker_id=worker_id,
+                )
+                return
+
+            # Renew/verify ownership immediately before the external side effect.
+            expiry = (discord.utils.utcnow() + timedelta(seconds=240)).isoformat()
+            self.delivery_store.update(
+                guild_id, message_id, {'lease_until': expiry}, worker_id=worker_id,
+            )
+            classification = assessment.get('classification')
+            response = _DELIVERY_ACKS.get(classification)
+            if not response:
+                logger.warning('Grant delivery assessment returned unsupported class %r', classification)
+                return
+            ack = await message.reply(
+                f'{_DELIVERY_ACK_MARKER}\n{response}',
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            self.delivery_store.update(
+                guild_id, message_id,
+                {'state': 'acknowledged', 'ack_message_id': int(ack.id)},
+                worker_id=worker_id,
+            )
+        except Exception:
+            # Keep saved assessment/evidence. Expire the lease for prompt retry;
+            # persistence errors propagate so the gateway reports failure.
+            try:
+                self.delivery_store.update(
+                    guild_id, message_id,
+                    {'lease_until': (discord.utils.utcnow() - timedelta(seconds=1)).isoformat()},
+                    worker_id=worker_id,
+                )
+            except Exception:
+                pass
+            raise
 
     # ========== Core Logic ==========
     async def _process_new_application(self, thread: discord.Thread):
