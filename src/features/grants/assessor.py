@@ -16,12 +16,16 @@ DEFAULT_GRANTS_LLM_MODEL = 'meta/muse-spark-1.3-contributor'
 DEFAULT_GRANTS_LLM_MAX_TOKENS = 1024
 MIN_GRANTS_LLM_MAX_TOKENS = 512
 
+CONCURRENT_GRANTS_POLICY = """### Mandatory concurrent grant policy (overrides any conflicting instruction above)
+One active grant is the default, but multiple concurrent grants may be approved for applicants with a solid, verifiable reputation: linked public contributions or prior work and reliable delivery of earlier grants. Verify that each scope is distinct, avoids duplicate or double funding, and fits the applicant's combined active commitments. Require concrete progress or results from earlier grants. Do not require a prior paid grant or mandatory manual approval when reputation and delivery are well evidenced. If capacity, reputation, prior delivery, or scope is uncertain, use needs_info or needs_review; ask for missing status, scope, progress, or evidence instead of inferring it from grant status. For concurrent requests, never auto-approve a concurrent grant based only on the applicant's assertion or Discord message count."""
+
 
 def _render_prompt_template(template: str, community_name: str) -> str:
     return template.replace("our server", f"the {community_name} server")
 
 
-def _load_prompt(server_config, guild_id: Optional[int], content_key: str, fallback: str) -> str:
+def _load_prompt(server_config, guild_id: Optional[int], content_key: str, fallback: str,
+                 configured_appendix: str = "") -> str:
     prompt = None
     community_name = "community"
     if server_config and guild_id:
@@ -29,6 +33,8 @@ def _load_prompt(server_config, guild_id: Optional[int], content_key: str, fallb
         if server:
             community_name = server.get('community_name') or community_name
         prompt = server_config.get_content(guild_id, content_key)
+    if prompt and configured_appendix:
+        prompt += "\n\n" + configured_appendix
     return _render_prompt_template(prompt or fallback, community_name)
 
 
@@ -38,6 +44,7 @@ def _fill_prompt_template(prompt: str, gpu_info: str) -> str:
         .replace('{bot_voice}', BOT_VOICE)
         .replace('{gpu_info}', gpu_info)
         .replace('{max_grant_usd:.0f}', f'{max_grant_usd():.0f}')
+        .replace('{concurrent_grants_policy}', CONCURRENT_GRANTS_POLICY)
         .replace('{{', '{')
         .replace('}}', '}')
     )
@@ -148,9 +155,8 @@ The applicant may request a specific GPU type or hours — honour their preferen
 If they don't specify, choose based on project needs.
 
 ## Prior Grant History
-If the applicant has received grants before, this will be noted below the application.
-Be VERY hesitant to approve someone who already has an open/active grant (status: reviewing, awaiting_wallet, payment_requested).
-For applicants with past paid grants, apply higher scrutiny — they should demonstrate clear results from previous grants before receiving more.
+Previous and active grants, when present, will be listed below with available dates, statuses, and amounts; their project scopes and delivery evidence may not be recorded.
+{concurrent_grants_policy}
 
 ## Discord Engagement
 The applicant's Discord activity will be provided below the application. This shows their total message count in our server and their most recent substantive messages. Low engagement does not automatically disqualify, but it RAISES scrutiny and must not be offset by missing evidence. Message count is not demonstrated community standing or merit — especially when the messages are inside the applicant's own application thread.
@@ -176,7 +182,10 @@ Use "spam" for posts that are clearly not real applications — e.g. test posts,
 
 def _build_system_prompt(server_config=None, guild_id: Optional[int] = None) -> str:
     gpu_info = '\n'.join(f'- {name}: ${rate:.2f}/hr' for name, rate in GPU_RATES.items())
-    prompt = _load_prompt(server_config, guild_id, 'prompt_grants_assessor_system', SYSTEM_PROMPT)
+    prompt = _load_prompt(
+        server_config, guild_id, 'prompt_grants_assessor_system', SYSTEM_PROMPT,
+        configured_appendix=CONCURRENT_GRANTS_POLICY,
+    )
     return _fill_prompt_template(prompt, gpu_info)
 
 

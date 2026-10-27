@@ -23,6 +23,7 @@ Have questions? Ask in the [Questions & Discussion](https://discord.com/channels
 - **Project description** — what are you building?
 - **What the compute is for** — training, fine-tuning, inference, etc.
 - **Links to prior work** — GitHub repos, demos, papers, or anything that shows your capability
+- **If you already have an active grant** — include its status, scope, and progress so we can assess whether this application is distinct and fits alongside your current commitments
 - You can optionally request a specific GPU type or number of hours
 
 ### Approval criteria
@@ -35,8 +36,8 @@ Have questions? Ask in the [Questions & Discussion](https://discord.com/channels
 ### Grant limits
 
 - Maximum grant: **50 hours of H100** (~$137 USD paid in SOL)
-- One active application at a time per person
-- Repeat applicants should demonstrate results from previous grants
+- One active grant is the default limit. Applicants with a strong, verifiable reputation and reliable delivery may be considered for multiple grants at once when each has a distinct scope and combined commitments are manageable.
+- Applicants with previous grants should demonstrate concrete progress or results. If an active grant's status, scope, or progress is unclear, provide those details in the application; concurrent requests are not approved on assertion alone.
 
 ### GPU rates (approximate)
 

@@ -110,6 +110,38 @@ def test_system_prompt_has_manual_review_triggers():
     assert '## Manual Review Triggers (needs_review)' in assessor.SYSTEM_PROMPT
 
 
+def test_system_prompt_allows_reputable_concurrent_grants_with_safeguards():
+    prompt = assessor._build_system_prompt()
+    assert 'multiple concurrent grants may be approved' in prompt
+    assert 'solid, verifiable reputation' in prompt
+    assert 'scope is distinct' in prompt
+    assert 'combined active commitments' in prompt
+    assert 'concrete progress or results' in prompt
+    assert 'Do not require a prior paid grant or mandatory manual approval' in prompt
+    assert 'never auto-approve a concurrent grant based only on the applicant\'s assertion or Discord message count' in prompt
+
+
+def test_configured_prompt_gets_mandatory_concurrent_grant_policy():
+    class Config:
+        def __init__(self):
+            self.content_reads = 0
+
+        def get_server(self, guild_id):
+            return {"community_name": "Example"}
+
+        def get_content(self, guild_id, content_key):
+            self.content_reads += 1
+            return "Old custom prompt: reject every applicant who has an active grant."
+
+    config = Config()
+    prompt = assessor._build_system_prompt(config, guild_id=123)
+    assert "Old custom prompt: reject every applicant who has an active grant." in prompt
+    assert "Mandatory concurrent grant policy (overrides any conflicting instruction above)" in prompt
+    assert "multiple concurrent grants may be approved" in prompt
+    assert "use needs_info or needs_review" in prompt
+    assert config.content_reads == 1
+
+
 def test_admin_review_prompt_honours_first_timer_cap():
     assert 'capped at 10 hours' in assessor.ADMIN_REVIEW_PROMPT
 

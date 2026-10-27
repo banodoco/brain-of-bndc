@@ -447,19 +447,6 @@ class GrantsCog(commands.Cog):
         # Join the thread so the bot can post
         await thread.join()
 
-        # Check for existing active grants
-        active = self.db.get_active_grants_for_applicant(applicant_id, guild_id=thread.guild.id)
-        if active:
-            await thread.send(
-                "You already have an active grant application. "
-                "Please wait for it to be completed before submitting a new one."
-            )
-            try:
-                await thread.edit(archived=True)
-            except Exception as e:
-                logger.warning(f"GrantsCog: failed to archive duplicate thread {thread_id}: {e}")
-            return
-
         # Fetch the starter message content (retry — on_thread_create can fire
         # before the starter message is available via the API)
         starter_message = None
@@ -592,7 +579,9 @@ class GrantsCog(commands.Cog):
 
         # Fetch grant history and engagement
         grant_history = self.db.get_grant_history_for_applicant(applicant_id, guild_id=thread.guild.id)
-        grant_history = [g for g in grant_history if g.get('status') not in ('reviewing', 'needs_info')]
+        # Exclude this application's own row while retaining other active and
+        # needs-info applications so concurrent commitments reach the assessor.
+        grant_history = [g for g in grant_history if g.get('thread_id') != thread_id]
         engagement = self.db.get_member_engagement(applicant_id, guild_id=thread.guild.id)
 
         try:

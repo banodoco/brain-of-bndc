@@ -120,6 +120,13 @@ async def test_reassess_gates_title_only_chatter(monkeypatch):
 
 async def test_reassess_proceeds_once_writeup_is_sufficient(monkeypatch):
     cog = make_cog()
+    active_grant = {"thread_id": 199, "status": "payment_requested"}
+    other_reviewing = {"thread_id": 197, "status": "reviewing"}
+    other_needs_info = {"thread_id": 198, "status": "needs_info"}
+    current_grant = {"thread_id": 200, "status": "reviewing"}
+    cog.db.get_grant_history_for_applicant = lambda *args, **kwargs: [
+        current_grant, active_grant, other_reviewing, other_needs_info,
+    ]
     thread = FakeThread([
         FakeHistoryMsg(author=SimpleNamespace(bot=True), content="More information needed..."),
         FakeHistoryMsg(author=SimpleNamespace(bot=False), content=LONG_WRITEUP),
@@ -129,6 +136,7 @@ async def test_reassess_proceeds_once_writeup_is_sufficient(monkeypatch):
 
     async def fake_assess(thread_content, **kwargs):
         called["content"] = thread_content
+        called["grant_history"] = kwargs["grant_history"]
         return {
             "decision": "needs_review",
             "response": "ok",
@@ -142,6 +150,59 @@ async def test_reassess_proceeds_once_writeup_is_sufficient(monkeypatch):
 
     assert called  # reviewer ran
     assert cog.db.status_updates[0][1] == "reviewing"
+    assert called["grant_history"] == [active_grant, other_reviewing, other_needs_info]
+
+
+async def test_new_application_with_active_grant_reaches_assessor(monkeypatch):
+    cog = make_cog()
+    existing = {
+        "thread_id": 199,
+        "status": "payment_requested",
+        "gpu_type": "H100_80GB",
+        "recommended_hours": 10,
+        "created_at": "2026-01-01T00:00:00Z",
+    }
+    cog.db.create_grant_application = lambda *args, **kwargs: True
+    cog.db.get_grant_history_for_applicant = lambda *args, **kwargs: [
+        existing,
+        {"thread_id": 200, "status": "reviewing", "created_at": "2026-10-27T00:00:00Z"},
+    ]
+    cog.db.get_member_engagement = lambda *args, **kwargs: {"total_messages": 20}
+    cog._transcribe_attachments = lambda attachments: _async_result([])
+    cog._upload_attachments = lambda thread_id, message: _async_result([])
+    cog._upload_avatar = lambda thread: _async_result(None)
+    monkeypatch.setattr(grants_cog_module, "_billing_paused", lambda: False)
+
+    thread = FakeThread([])
+    thread.id = 200
+    thread.fetch_message = lambda message_id: _async_result(SimpleNamespace(
+        content=LONG_WRITEUP,
+        attachments=[],
+    ))
+    edits = []
+    thread.edit = lambda **kwargs: _async_result(edits.append(kwargs))
+    assessed = {}
+
+    async def fake_assess(content, **kwargs):
+        assessed.update(kwargs)
+        return {"decision": "needs_review", "response": "Pending review.",
+                "reasoning": "r", "gpu_type": None, "recommended_hours": None}
+
+    async def skip_posting(thread, assessment):
+        return None
+
+    monkeypatch.setattr(grants_cog_module, "assess_application", fake_assess)
+    monkeypatch.setattr(cog, "_handle_assessment", skip_posting)
+
+    await cog._process_new_application(thread)
+
+    assert assessed["grant_history"] == [existing]
+    assert edits == []
+    assert not any("already have an active grant" in message for message in thread.sent)
+
+
+async def _async_result(value):
+    return value
 
 
 class FakeDiscordShim:
